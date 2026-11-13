@@ -1,10 +1,12 @@
 #![allow(unused, dead_code)]
 use gpui::{Hsla, Length};
+use settings::Settings as _;
 use std::{
     cell::LazyCell,
-    sync::{Arc, LazyLock, OnceLock},
+    sync::{Arc, OnceLock},
 };
 use theme::{Theme, ThemeColors, ThemeRegistry};
+use theme_settings::ThemeSettings;
 use ui::{
     IntoElement, RenderOnce, component_prelude::Documented, prelude::*, utils::inner_corner_radius,
 };
@@ -25,23 +27,31 @@ pub struct ThemePreviewTile {
     style: ThemePreviewStyle,
 }
 
-static CHILD_RADIUS: LazyLock<Pixels> = LazyLock::new(|| {
+/// The radius of the editor drawn inside the tile, concentric with the tile's own.
+fn child_radius() -> Pixels {
     inner_corner_radius(
-        ThemePreviewTile::ROOT_RADIUS,
+        ThemePreviewTile::root_radius(),
         ThemePreviewTile::ROOT_BORDER,
         ThemePreviewTile::ROOT_PADDING,
         ThemePreviewTile::CHILD_BORDER,
     )
-});
+    .max(px(0.0))
+}
 
 impl ThemePreviewTile {
     pub const SKELETON_HEIGHT_DEFAULT: Pixels = px(2.);
     pub const SIDEBAR_SKELETON_ITEM_COUNT: usize = 8;
     pub const SIDEBAR_WIDTH_DEFAULT: DefiniteLength = relative(0.25);
+    /// The tile's radius in a theme with round corners.
     pub const ROOT_RADIUS: Pixels = px(8.0);
     pub const ROOT_BORDER: Pixels = px(2.0);
     pub const ROOT_PADDING: Pixels = px(2.0);
     pub const CHILD_BORDER: Pixels = px(1.0);
+
+    /// The tile's radius in the current theme: square in a square theme.
+    pub fn root_radius() -> Pixels {
+        Self::ROOT_RADIUS * gpui::corner_radius_scale()
+    }
 
     pub fn new(theme: Arc<Theme>, seed: f32) -> Self {
         Self {
@@ -173,21 +183,64 @@ impl ThemePreviewTile {
             ))
     }
 
+    /// One line of real code in the theme's syntax colours, so that two themes with
+    /// the same accent can still be told apart at a glance.
+    pub fn render_code_line(theme: &Theme, code_font: SharedString) -> impl IntoElement {
+        let colors = theme.colors();
+        let syntax = theme.syntax();
+        let color_of = |name: &str| {
+            syntax
+                .style_for_name(name)
+                .and_then(|style| style.color)
+                .unwrap_or(colors.text)
+        };
+
+        h_flex()
+            .flex_none()
+            .font_family(code_font)
+            .text_size(px(11.))
+            .line_height(px(14.))
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .child(div().text_color(color_of("keyword")).child("let "))
+            .child(div().text_color(color_of("variable")).child("n "))
+            .child(div().text_color(color_of("operator")).child("= "))
+            .child(div().text_color(color_of("number")).child("42"))
+            .child(div().text_color(color_of("punctuation")).child(";"))
+    }
+
     pub fn render_pane(
         seed: f32,
         theme: Arc<Theme>,
         skeleton_height: impl Into<Length>,
+        code_font: Option<SharedString>,
     ) -> impl IntoElement {
-        div()
-            .p_2()
+        // The marker of the active tab: where the theme's accent shows first.
+        let marker = div()
+            .flex_none()
+            .h(px(2.))
+            .w(relative(0.3))
+            .bg(theme.colors().accent_background);
+        let code_line = code_font.map(|code_font| Self::render_code_line(&theme, code_font));
+
+        // The sheet ground, beside the chrome ground of the side bar.
+        v_flex()
             .size_full()
             .overflow_hidden()
             .bg(theme.colors().editor_background)
-            .child(Self::render_pseudo_code_skeleton(
-                seed,
-                theme,
-                skeleton_height.into(),
-            ))
+            .child(marker)
+            .child(
+                v_flex()
+                    .p_1p5()
+                    .gap_0p5()
+                    .size_full()
+                    .children(code_line)
+                    .child(Self::render_pseudo_code_skeleton(
+                        seed,
+                        theme,
+                        skeleton_height.into(),
+                    )),
+            )
     }
 
     pub fn render_editor(
@@ -195,6 +248,7 @@ impl ThemePreviewTile {
         theme: Arc<Theme>,
         sidebar_width: impl Into<Length> + Clone,
         skeleton_height: impl Into<Length> + Clone,
+        code_font: Option<SharedString>,
     ) -> impl IntoElement {
         div()
             .flex()
@@ -206,34 +260,41 @@ impl ThemePreviewTile {
                 sidebar_width,
                 skeleton_height.clone(),
             ))
-            .child(Self::render_pane(seed, theme, skeleton_height))
+            .child(Self::render_pane(seed, theme, skeleton_height, code_font))
     }
 
-    fn render_borderless(seed: f32, theme: Arc<Theme>) -> impl IntoElement {
+    fn render_borderless(
+        seed: f32,
+        theme: Arc<Theme>,
+        code_font: SharedString,
+    ) -> impl IntoElement {
         Self::render_editor(
             seed,
             theme,
             Self::SIDEBAR_WIDTH_DEFAULT,
             Self::SKELETON_HEIGHT_DEFAULT,
+            Some(code_font),
         )
     }
 
-    fn render_border(seed: f32, theme: Arc<Theme>) -> impl IntoElement {
+    fn render_border(seed: f32, theme: Arc<Theme>, code_font: SharedString) -> impl IntoElement {
         div()
             .size_full()
             .p(Self::ROOT_PADDING)
-            .rounded(Self::ROOT_RADIUS)
+            .rounded(Self::root_radius())
             .child(
                 div()
                     .size_full()
-                    .rounded(*CHILD_RADIUS)
+                    .rounded(child_radius())
                     .border(Self::CHILD_BORDER)
                     .border_color(theme.colors().border)
+                    .overflow_hidden()
                     .child(Self::render_editor(
                         seed,
                         theme.clone(),
                         Self::SIDEBAR_WIDTH_DEFAULT,
                         Self::SKELETON_HEIGHT_DEFAULT,
+                        Some(code_font),
                     )),
             )
     }
@@ -249,20 +310,22 @@ impl ThemePreviewTile {
         div()
             .size_full()
             .p(Self::ROOT_PADDING)
-            .rounded(Self::ROOT_RADIUS)
+            .rounded(Self::root_radius())
             .child(
                 h_flex()
                     .size_full()
                     .relative()
-                    .rounded(*CHILD_RADIUS)
+                    .rounded(child_radius())
                     .border(Self::CHILD_BORDER)
                     .border_color(border_color)
                     .overflow_hidden()
+                    // Each half is too narrow for a line of text.
                     .child(div().size_full().child(Self::render_editor(
                         seed,
                         theme,
                         sidebar_width,
                         Self::SKELETON_HEIGHT_DEFAULT,
+                        None,
                     )))
                     .child(
                         div()
@@ -275,6 +338,7 @@ impl ThemePreviewTile {
                                 other_theme,
                                 sidebar_width,
                                 Self::SKELETON_HEIGHT_DEFAULT,
+                                None,
                             )),
                     ),
             )
@@ -284,12 +348,13 @@ impl ThemePreviewTile {
 
 impl RenderOnce for ThemePreviewTile {
     fn render(self, _window: &mut ui::Window, _cx: &mut ui::App) -> impl IntoElement {
+        let code_font = ThemeSettings::get_global(_cx).buffer_font.family.clone();
         match self.style {
             ThemePreviewStyle::Bordered => {
-                Self::render_border(self.seed, self.theme).into_any_element()
+                Self::render_border(self.seed, self.theme, code_font).into_any_element()
             }
             ThemePreviewStyle::Borderless => {
-                Self::render_borderless(self.seed, self.theme).into_any_element()
+                Self::render_borderless(self.seed, self.theme, code_font).into_any_element()
             }
             ThemePreviewStyle::SideBySide(other_theme) => Self::render_side_by_side(
                 self.seed,

@@ -90,7 +90,7 @@ pub enum CliResponse {
 ///
 /// Note that in the main zed binary, this variable is unset after it's read for the first time,
 /// therefore it should always be accessed through the `FORCE_CLI_MODE` static.
-pub const FORCE_CLI_MODE_ENV_VAR_NAME: &str = "ZED_FORCE_CLI_MODE";
+pub const FORCE_CLI_MODE_ENV_VAR_NAME: &str = "IDE_FORCE_CLI_MODE";
 
 /// Abstracts the transport for sending CLI responses (Zed → CLI).
 ///
@@ -103,5 +103,129 @@ pub trait CliResponseSink: Send + 'static {
 impl CliResponseSink for ipc::IpcSender<CliResponse> {
     fn send(&self, response: CliResponse) -> Result<()> {
         ipc::IpcSender::send(self, response).map_err(|error| anyhow::anyhow!("{error}"))
+    }
+}
+
+/// The scheme of the links the app parses internally (`ide://file/…`,
+/// `ide://settings`, …). It is a neutral identifier, not the product's name
+/// and not upstream's: chats and JSON schemas store such links, and the link
+/// parsers spell it as a literal (`"ide://…"`, with `ide-cli://` and
+/// `ide-dock-action://` for the two private channels). It is never registered
+/// with the system; the scheme the product claims is [`branding::URL_SCHEME`].
+pub const INTERNAL_URL_SCHEME: &str = "ide";
+
+/// Returns what follows `<branding::URL_SCHEME>://` when `url` is one of the
+/// product's own links, as the outside world writes them.
+///
+/// The scheme is compared without regard to case, as URL schemes are.
+pub fn strip_product_url_prefix(url: &str) -> Option<&str> {
+    strip_scheme_prefix(url, branding::URL_SCHEME)
+}
+
+/// Whether `url` is one of the product's own links (`unaligned-ide://…`).
+pub fn is_product_url(url: &str) -> bool {
+    strip_product_url_prefix(url).is_some()
+}
+
+/// Rewrites a leading `<branding::URL_SCHEME>://` to the internal `ide://`
+/// form, so that the existing link parser understands the product's own links.
+/// Anything else is returned unchanged.
+///
+/// Call this at every place that receives a link from outside the app, before
+/// the link is parsed.
+pub fn to_internal_url(url: &str) -> std::borrow::Cow<'_, str> {
+    match strip_product_url_prefix(url) {
+        Some(rest) => std::borrow::Cow::Owned(format!("{INTERNAL_URL_SCHEME}://{rest}")),
+        None => std::borrow::Cow::Borrowed(url),
+    }
+}
+
+fn strip_scheme_prefix<'a>(url: &'a str, scheme: &str) -> Option<&'a str> {
+    let head = url.get(..scheme.len())?;
+    if !head.eq_ignore_ascii_case(scheme) {
+        return None;
+    }
+    url[scheme.len()..].strip_prefix("://")
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    fn product(rest: &str) -> String {
+        format!("{}://{rest}", branding::URL_SCHEME)
+    }
+
+    #[test]
+    fn product_links_become_internal_links() {
+        for rest in [
+            "",
+            "open",
+            "file/tmp/project/main.rs:3",
+            "settings",
+            "settings/languages/Rust/tab_size",
+            "extension/html",
+            "agent",
+            "agent?prompt=hello%20world",
+            "git/clone/?repo=https://example.com/a/b.git",
+            "git/commit/abc123?repo=path/to/repo",
+            "ssh/me@host/path",
+            "schemas/settings",
+        ] {
+            assert_eq!(
+                to_internal_url(&product(rest)),
+                format!("ide://{rest}"),
+                "{rest:?}"
+            );
+            assert!(is_product_url(&product(rest)), "{rest:?}");
+        }
+    }
+
+    #[test]
+    fn the_scheme_is_matched_without_regard_to_case() {
+        let upper = format!("{}://settings", branding::URL_SCHEME.to_uppercase());
+        assert_eq!(to_internal_url(&upper), "ide://settings");
+    }
+
+    #[test]
+    fn other_arguments_are_left_alone() {
+        for arg in [
+            "ide://settings",
+            "ide-cli://server",
+            "file:///tmp/a.rs",
+            "https://example.com",
+            "ssh://me@host/path",
+            "/tmp/a.rs:3:4",
+            "src/main.rs",
+            "",
+            "-",
+            // The scheme alone, or as the start of a longer word, is a path.
+            branding::URL_SCHEME,
+            "unaligned-ide-notes://settings",
+            "unaligned-ide:/settings",
+            // Not at the start.
+            "notes/unaligned-ide://settings",
+            // Not a char boundary where the scheme would end.
+            "unaligned-idé://settings",
+        ] {
+            assert_eq!(to_internal_url(arg), arg, "{arg:?}");
+            assert!(!is_product_url(arg), "{arg:?}");
+        }
+    }
+
+    /// The scheme the product claims on the system is its own, and the
+    /// internal one is a neutral identifier that nothing registers. Neither
+    /// may be upstream's, or the app would produce, or take over, a real
+    /// Zed's links. The two are also kept apart, so that a link written in
+    /// the internal form is never mistaken for one the system can open.
+    #[test]
+    fn the_product_scheme_is_not_the_internal_one() {
+        assert!(!branding::URL_SCHEME.eq_ignore_ascii_case(INTERNAL_URL_SCHEME));
+        assert!(!branding::URL_SCHEME.is_empty());
+        assert!(!INTERNAL_URL_SCHEME.is_empty());
+        for upstream in ["zed", "zed-cli", "zed-dock-action"] {
+            assert!(!INTERNAL_URL_SCHEME.eq_ignore_ascii_case(upstream));
+            assert!(!branding::URL_SCHEME.eq_ignore_ascii_case(upstream));
+        }
     }
 }

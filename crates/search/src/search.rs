@@ -1,3 +1,6 @@
+pub use app_actions::search::{
+    FocusSearch, SelectNextMatch, SelectPreviousMatch, ToggleCaseSensitive, ToggleIncludeIgnored,
+};
 use bitflags::bitflags;
 pub use buffer_search::BufferSearchBar;
 pub use editor::HighlightKey;
@@ -9,9 +12,6 @@ use ui::{IconButtonShape, Tooltip, prelude::*};
 use util::paths::PathMatcher;
 use workspace::notifications::NotificationId;
 use workspace::{Toast, Workspace};
-pub use zed_actions::search::{
-    FocusSearch, SelectNextMatch, SelectPreviousMatch, ToggleCaseSensitive, ToggleIncludeIgnored,
-};
 
 pub use search_status_button::SEARCH_ICON;
 
@@ -178,6 +178,11 @@ impl SearchOption {
                 }
             })
             .shape(IconButtonShape::Square)
+            .icon_size(IconSize::Small)
+            // Off: muted. On: the neutral selected ground and the text colour,
+            // never the accent (D2).
+            .icon_color(Color::Muted)
+            .aria_label(label)
             .toggle_state(active.contains(self.as_options()))
             .tooltip(move |_window, cx| Tooltip::for_action_in(label, action, &focus_handle, cx))
     }

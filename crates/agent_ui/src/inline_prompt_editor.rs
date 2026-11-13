@@ -1,69 +1,67 @@
 use agent::ThreadStore;
-use agent_settings::AgentSettings;
+use app_actions::{
+    agent::ToggleModelSelector,
+    editor::{MoveDown, MoveUp},
+};
 use collections::{HashMap, VecDeque};
 use editor::actions::Paste;
-use editor::code_context_menus::CodeContextMenu;
 use editor::display_map::{CreaseId, EditorMargins};
-use editor::{AnchorRangeExt as _, MultiBufferOffset, ToOffset as _};
+use editor::{AnchorRangeExt as _, MultiBufferOffset};
 use editor::{
     ContextMenuOptions, Editor, EditorElement, EditorEvent, EditorMode, EditorStyle, MultiBuffer,
 };
 use fs::Fs;
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    Subscription, TextStyle, TextStyleRefinement, WeakEntity, Window, actions,
+    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription,
+    TextStyle, WeakEntity, Window, actions,
 };
 use language_model::{LanguageModel, LanguageModelRegistry};
-use markdown::{HeadingLevelStyles, Markdown, MarkdownElement, MarkdownStyle};
 use parking_lot::Mutex;
+use picker::popover_menu::PickerPopoverMenu;
 use project::Project;
-use settings::Settings;
-use std::cmp;
+use settings::{Settings, update_settings_file};
+use std::fmt::Write as _;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 use theme_settings::ThemeSettings;
 use ui::utils::WithRemSize;
-use ui::{IconButtonShape, KeyBinding, PopoverMenuHandle, Tooltip, prelude::*};
+use ui::{ButtonLike, IconButtonShape, KeyBinding, PopoverMenuHandle, Tooltip, prelude::*};
 use uuid::Uuid;
-use workspace::notifications::NotificationId;
-use workspace::{Toast, Workspace};
-use zed_actions::{
-    agent::ToggleModelSelector,
-    editor::{MoveDown, MoveUp},
-};
+use workspace::Workspace;
 
-use crate::agent_model_selector::AgentModelSelector;
-use crate::buffer_codegen::{BufferCodegen, CodegenAlternative};
+use crate::buffer_codegen::{BufferCodegen, inline_assist_model};
 use crate::completion_provider::{
     PromptCompletionProvider, PromptCompletionProviderDelegate, PromptContextType,
 };
+use crate::connections::{self, Backing};
+use crate::language_model_selector::{LanguageModelSelector, language_model_selector};
 use crate::mention_set::paste_images_as_context;
 use crate::mention_set::{MentionSet, crease_for_mention};
 use crate::terminal_codegen::TerminalCodegen;
-use crate::{
-    CycleFavoriteModels, CycleNextInlineAssist, CyclePreviousInlineAssist, ModelUsageContext,
-};
+use crate::{CycleFavoriteModels, CycleNextInlineAssist, CyclePreviousInlineAssist};
 
-actions!(inline_assistant, [ThumbsUpResult, ThumbsDownResult]);
-
-enum CompletionState {
-    Pending,
-    Generated { completion_text: Option<String> },
-    Rated,
-}
-
-struct SessionState {
-    session_id: Uuid,
-    completion: CompletionState,
-}
+actions!(
+    inline_assistant,
+    [
+        /// Does nothing: results are no longer rated. The name stays because
+        /// the built-in keymaps still bind it, and an unknown action there
+        /// stops the app at startup.
+        ThumbsUpResult,
+        /// Does nothing. See [`ThumbsUpResult`].
+        ThumbsDownResult,
+        /// Refines the generated result with one more instruction.
+        FollowUp
+    ]
+);
 
 pub struct PromptEditor<T> {
     pub editor: Entity<Editor>,
     mode: PromptEditorMode,
     mention_set: Entity<MentionSet>,
     workspace: WeakEntity<Workspace>,
-    model_selector: Entity<AgentModelSelector>,
+    model_selector: Entity<LanguageModelSelector>,
+    model_selector_menu_handle: PopoverMenuHandle<LanguageModelSelector>,
     edited_since_done: bool,
     prompt_history: VecDeque<String>,
     prompt_history_ix: Option<usize>,
@@ -71,234 +69,222 @@ pub struct PromptEditor<T> {
     _codegen_subscription: Subscription,
     editor_subscriptions: Vec<Subscription>,
     show_rate_limit_notice: bool,
-    session_state: SessionState,
+    session_id: Uuid,
+    /// The instruction of the last request, kept so that a text changed
+    /// after a result is sent as a refinement of it.
+    last_sent_prompt: Option<String>,
+    /// Earlier instructions of this session, oldest first, once the user
+    /// refines a result with a follow-up. The editor holds the latest one.
+    follow_up_to: Vec<String>,
+    /// A follow-up is being written and has not been sent yet.
+    composing_follow_up: bool,
+    /// Text put back by `abandon_follow_up`, so that its edit event is not
+    /// mistaken for the user rewording the instruction.
+    restored_prompt: Option<String>,
+    _registry_subscription: Subscription,
     _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T: 'static> EventEmitter<PromptEditorEvent> for PromptEditor<T> {}
 
+/// What the prompt box is showing. Every state keeps the same two rows (the
+/// instruction on top, one status row below) so the box never changes height
+/// while the code streams in.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum BoxState {
+    /// No usable model: one line and a button leading to Connections.
+    Setup,
+    /// Writing an instruction (first one, a reworded one or a follow-up).
+    Compose,
+    Generating,
+    /// The result is in the buffer, waiting to be accepted or rejected.
+    Review,
+    /// The model answered that it cannot do what was asked.
+    Declined,
+    Failed,
+}
+
 impl<T: 'static> Render for PromptEditor<T> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
-        let mut buttons = Vec::new();
+        let state = self.box_state(cx);
+        let colors = cx.theme().colors();
 
-        const RIGHT_PADDING: Pixels = px(9.);
-
-        let (left_gutter_width, right_padding, explanation) = match &self.mode {
-            PromptEditorMode::Buffer {
-                id: _,
-                codegen,
-                editor_margins,
-            } => {
-                let codegen = codegen.read(cx);
-
-                if codegen.alternative_count(cx) > 1 {
-                    buttons.push(self.render_cycle_controls(codegen, cx));
-                }
-
+        // In a buffer the box starts where the code starts, past the gutter.
+        let (left_inset, right_inset, surface) = match &self.mode {
+            PromptEditorMode::Buffer { editor_margins, .. } => {
                 let editor_margins = editor_margins.lock();
-                let gutter = editor_margins.gutter;
-
-                let left_gutter_width = gutter.full_width() + (gutter.margin / 2.0);
-                let right_padding = editor_margins.right + RIGHT_PADDING;
-
-                let active_alternative = codegen.active_alternative().read(cx);
-                let explanation = active_alternative
-                    .description
-                    .clone()
-                    .or_else(|| active_alternative.failure.clone());
-
-                (left_gutter_width, right_padding, explanation)
+                (
+                    editor_margins.gutter.full_width(),
+                    editor_margins.right + px(12.),
+                    colors.editor_background,
+                )
             }
-            PromptEditorMode::Terminal { .. } => {
-                // Give the equivalent of the same left-padding that we're using on the right
-                (Pixels::from(40.0), Pixels::from(24.), None)
-            }
+            PromptEditorMode::Terminal { .. } => (px(8.), px(8.), colors.terminal_background),
         };
 
-        let bottom_padding = match &self.mode {
-            PromptEditorMode::Buffer { .. } => rems_from_px(2.0_f32),
-            PromptEditorMode::Terminal { .. } => rems_from_px(4.0_f32),
+        // A raised surface on the sheet: its own ground and the strong line,
+        // which turns to the text colour while the box has the focus.
+        let focus_handle = self.editor.focus_handle(cx);
+        let box_background = colors.elevated_surface_background;
+        let border_color = if focus_handle.contains_focused(window, cx) {
+            colors.text
+        } else {
+            colors.border_strong
         };
 
-        buttons.extend(self.render_buttons(window, cx));
+        let top_row = if state == BoxState::Setup {
+            self.render_setup_notice(cx)
+        } else {
+            self.render_editor(state, window, cx)
+        };
+        let status_row = self.render_status_row(state, window, cx);
 
-        let menu_visible = self.is_completions_menu_visible(cx);
-        let add_context_button = IconButton::new("add-context", IconName::AtSign)
-            .icon_size(IconSize::Small)
-            .icon_color(Color::Muted)
-            .when(!menu_visible, |this| {
-                this.tooltip(move |_window, cx| {
-                    Tooltip::with_meta("Add Context", None, "Or type @ to include context", cx)
-                })
-            })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.trigger_completion_menu(window, cx);
-            }));
-
-        let markdown = window.use_state(cx, |_, cx| Markdown::new("".into(), None, None, cx));
-
-        if let Some(explanation) = &explanation {
-            markdown.update(cx, |markdown, cx| {
-                markdown.reset(SharedString::from(explanation), cx);
-            });
-        }
-
-        let explanation_label = self
-            .render_markdown(markdown, markdown_style(window, cx))
-            .into_any_element();
-
-        v_flex()
+        div()
             .key_context("InlineAssistant")
             .capture_action(cx.listener(Self::paste))
             .block_mouse_except_scroll()
             .size_full()
-            .pt_0p5()
-            .pb(bottom_padding)
-            .pr(right_padding)
-            .gap_0p5()
+            .flex()
+            .flex_col()
             .justify_center()
-            .border_y_1()
-            .border_color(cx.theme().colors().border)
-            .bg(cx.theme().colors().editor_background)
+            .py_1()
+            .pl(left_inset)
+            .pr(right_inset)
+            .bg(surface)
             .child(
-                h_flex()
+                // As wide as the text column it sits in.
+                v_flex()
+                    .id("inline-prompt-box")
+                    .w_full()
+                    .p_2()
+                    .gap_0p5()
+                    .bg(box_background)
+                    .border_1()
+                    .border_color(border_color)
+                    // Without a model the instruction editor is not drawn; the box
+                    // keeps its focus so Enter and Esc still reach these handlers.
+                    .when(state == BoxState::Setup, |this| {
+                        this.track_focus(&focus_handle)
+                    })
                     .on_action(cx.listener(Self::confirm))
                     .on_action(cx.listener(Self::secondary_confirm))
                     .on_action(cx.listener(Self::cancel))
+                    .on_action(cx.listener(Self::menu_cancel))
                     .on_action(cx.listener(Self::move_up))
                     .on_action(cx.listener(Self::move_down))
-                    .on_action(cx.listener(Self::thumbs_up))
-                    .on_action(cx.listener(Self::thumbs_down))
+                    .on_action(cx.listener(|this, _: &FollowUp, window, cx| {
+                        this.begin_follow_up(window, cx);
+                    }))
                     .capture_action(cx.listener(Self::cycle_prev))
                     .capture_action(cx.listener(Self::cycle_next))
                     .on_action(cx.listener(|this, _: &ToggleModelSelector, window, cx| {
-                        this.model_selector
-                            .update(cx, |model_selector, cx| model_selector.toggle(window, cx));
+                        this.model_selector_menu_handle.toggle(window, cx);
                     }))
                     .on_action(cx.listener(|this, _: &CycleFavoriteModels, window, cx| {
                         this.model_selector.update(cx, |model_selector, cx| {
-                            model_selector.cycle_favorite_models(window, cx);
+                            model_selector.delegate.cycle_favorite_models(window, cx);
                         });
                     }))
-                    .child(
-                        WithRemSize::new(ui_font_size)
-                            .h_full()
-                            .w(left_gutter_width)
-                            .flex()
-                            .flex_row()
-                            .flex_shrink_0()
-                            .items_center()
-                            .justify_center()
-                            .gap_1()
-                            .child(self.render_close_button(cx))
-                            .map(|el| {
-                                let CodegenStatus::Error(error) = self.codegen_status(cx) else {
-                                    return el;
-                                };
-
-                                let error_message = SharedString::from(error.to_string());
-                                el.child(
-                                    div()
-                                        .id("error")
-                                        .tooltip(Tooltip::text(error_message))
-                                        .child(
-                                            Icon::new(IconName::XCircle)
-                                                .size(IconSize::Small)
-                                                .color(Color::Error),
-                                        ),
-                                )
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .child(div().flex_1().child(self.render_editor(window, cx)))
-                            .child(
-                                WithRemSize::new(ui_font_size)
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(add_context_button)
-                                    .child(self.model_selector.clone())
-                                    .children(buttons),
-                            ),
-                    ),
+                    .child(top_row)
+                    .child(WithRemSize::new(ui_font_size).w_full().child(status_row)),
             )
-            .when_some(explanation, |this, _| {
-                this.child(
-                    h_flex()
-                        .size_full()
-                        .justify_center()
-                        .child(div().w(left_gutter_width + px(6.)))
-                        .child(
-                            div()
-                                .size_full()
-                                .min_w_0()
-                                .pt(rems_from_px(3_f32))
-                                .pl_0p5()
-                                .flex_1()
-                                .border_t_1()
-                                .border_color(cx.theme().colors().border_variant)
-                                .child(explanation_label),
-                        ),
-                )
-            })
     }
 }
 
-fn markdown_style(window: &Window, cx: &App) -> MarkdownStyle {
-    let theme_settings = ThemeSettings::get_global(cx);
-    let colors = cx.theme().colors();
-    let mut text_style = window.text_style();
+/// One clear line for the failures a user can act on; anything else falls
+/// back to the first line of the server's own message.
+fn error_summary(error: &anyhow::Error) -> SharedString {
+    use language_model::{
+        LanguageModelCompletionError as CompletionError, ProviderErrorCategory as Category,
+    };
 
-    text_style.refine(&TextStyleRefinement {
-        font_family: Some(theme_settings.ui_font.family.clone()),
-        color: Some(colors.text),
-        ..Default::default()
-    });
-
-    MarkdownStyle {
-        base_text_style: text_style.clone(),
-        syntax: cx.theme().syntax().clone(),
-        selection_background_color: colors.element_selection_background,
-        heading_level_styles: Some(HeadingLevelStyles {
-            h1: Some(TextStyleRefinement {
-                font_size: Some(rems(1.15).into()),
-                ..Default::default()
-            }),
-            h2: Some(TextStyleRefinement {
-                font_size: Some(rems(1.1).into()),
-                ..Default::default()
-            }),
-            h3: Some(TextStyleRefinement {
-                font_size: Some(rems(1.05).into()),
-                ..Default::default()
-            }),
-            h4: Some(TextStyleRefinement {
-                font_size: Some(rems(1.).into()),
-                ..Default::default()
-            }),
-            h5: Some(TextStyleRefinement {
-                font_size: Some(rems(0.95).into()),
-                ..Default::default()
-            }),
-            h6: Some(TextStyleRefinement {
-                font_size: Some(rems(0.875).into()),
-                ..Default::default()
-            }),
-        }),
-        inline_code: TextStyleRefinement {
-            font_family: Some(theme_settings.buffer_font.family.clone()),
-            font_fallbacks: theme_settings.buffer_font.fallbacks.clone(),
-            font_features: Some(theme_settings.buffer_font.features.clone()),
-            background_color: Some(colors.editor_foreground.opacity(0.08)),
-            ..Default::default()
-        },
-        ..Default::default()
+    let known = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<CompletionError>())
+        .and_then(|error| match error {
+            CompletionError::NoApiKey { .. } => {
+                Some("No key for this model. Add one in Connections, then retry.")
+            }
+            CompletionError::ProviderRejection { category, .. } => match category {
+                Category::Authentication | Category::Permission => {
+                    Some("The key was refused. Check it in Connections, then retry.")
+                }
+                Category::PaymentRequired => {
+                    Some("Your balance is too low. Add funds, then retry.")
+                }
+                Category::RateLimit => Some("Rate limit reached. Wait a moment, then retry."),
+                Category::Overloaded | Category::InternalServer | Category::Timeout => {
+                    Some("The model's server is not responding. Retry in a moment.")
+                }
+                Category::PromptTooLarge { .. } => {
+                    Some("The selection is too large for this model. Select less code.")
+                }
+                _ => None,
+            },
+            CompletionError::HttpSend { .. }
+            | CompletionError::ApiReadResponseError { .. }
+            | CompletionError::StreamEndedUnexpectedly { .. } => {
+                Some("Could not reach the model's server. Check your network, then retry.")
+            }
+            CompletionError::ModelUnavailable { .. } => {
+                Some("This model is no longer available. Pick another one, then retry.")
+            }
+            _ => None,
+        });
+    if let Some(known) = known {
+        return known.into();
     }
+
+    let message = error.to_string();
+    message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("The request failed.")
+        .to_string()
+        .into()
+}
+
+/// The picker behind the model's name. It shows the model the edit is really
+/// sent to (`active_model`) and writes a choice to `agent.inline_assistant_model`.
+fn build_model_selector(
+    active_model: impl Fn(&App) -> Option<LanguageModel> + 'static,
+    fs: Arc<dyn Fs>,
+    focus_handle: FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<LanguageModelSelector> {
+    cx.new(|cx| {
+        language_model_selector(
+            active_model,
+            {
+                let fs = fs.clone();
+                move |model, cx| {
+                    let provider = model.provider_id().0.to_string();
+                    let model_id = model.id().0.to_string();
+                    update_settings_file(fs.clone(), cx, move |settings, _cx| {
+                        settings
+                            .agent
+                            .get_or_insert_default()
+                            .set_inline_assistant_model(provider.clone(), model_id);
+                    });
+                }
+            },
+            move |model, should_be_favorite, cx| {
+                crate::favorite_models::toggle_in_settings(
+                    model,
+                    should_be_favorite,
+                    fs.clone(),
+                    cx,
+                );
+            },
+            true, // Use popover styles for picker
+            focus_handle,
+            window,
+            cx,
+        )
+    })
 }
 
 impl<T: 'static> Focusable for PromptEditor<T> {
@@ -309,12 +295,22 @@ impl<T: 'static> Focusable for PromptEditor<T> {
 
 impl<T: 'static> PromptEditor<T> {
     const MAX_LINES: u8 = 8;
+    const TERMINAL_CHROME_LINES: u8 = 3;
 
     fn codegen_status<'a>(&'a self, cx: &'a App) -> &'a CodegenStatus {
         match &self.mode {
             PromptEditorMode::Buffer { codegen, .. } => codegen.read(cx).status(cx),
             PromptEditorMode::Terminal { codegen, .. } => &codegen.read(cx).status,
         }
+    }
+
+    /// Connecting a provider or changing the model elsewhere (agent panel,
+    /// settings) must show in an open prompt box right away.
+    fn observe_model_registry(cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe(
+            &LanguageModelRegistry::global(cx),
+            |_, _, _: &language_model::Event, cx| cx.notify(),
+        )
     }
 
     fn subscribe_to_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -353,11 +349,12 @@ impl<T: 'static> PromptEditor<T> {
             extract_message_creases(editor, &self.mention_set, window, cx)
         });
         let focus = self.editor.focus_handle(cx).contains_focused(window, cx);
+        let placeholder = Self::placeholder_text(&self.mode, window, cx);
         let mut creases = vec![];
         self.editor = cx.new(|cx| {
             let mut editor = Editor::auto_height(1, Self::MAX_LINES as usize, window, cx);
             editor.set_soft_wrap_mode(language::language_settings::SoftWrap::EditorWidth, cx);
-            editor.set_placeholder_text("Add a prompt…", window, cx);
+            editor.set_placeholder_text(&placeholder, window, cx);
             editor.set_text(prompt, window, cx);
             creases = insert_message_creases(&mut editor, &existing_creases, window, cx);
 
@@ -386,24 +383,144 @@ impl<T: 'static> PromptEditor<T> {
         self.subscribe_to_editor(window, cx);
     }
 
-    pub fn placeholder_text(mode: &PromptEditorMode, window: &mut Window, cx: &mut App) -> String {
-        let action = match mode {
+    pub fn placeholder_text(mode: &PromptEditorMode, _window: &mut Window, cx: &mut App) -> String {
+        match mode {
             PromptEditorMode::Buffer { codegen, .. } => {
                 if codegen.read(cx).is_insertion {
-                    "Generate"
+                    "Describe the code. Enter to run, Esc to close."
                 } else {
-                    "Transform"
+                    "Describe the change. Enter to run, Esc to close."
                 }
             }
-            PromptEditorMode::Terminal { .. } => "Generate",
+            PromptEditorMode::Terminal { .. } => {
+                "Describe the command. Enter to run, Esc to close."
+            }
+        }
+        .to_string()
+    }
+
+    /// The instruction sent to the model: the editor's text, preceded by the
+    /// earlier instructions when this one is a follow-up. Each generation
+    /// starts again from the original text, which is what lets Reject restore
+    /// it exactly however many follow-ups were made.
+    pub fn request_prompt(&self, cx: &App) -> String {
+        let prompt = self.prompt(cx);
+        if self.follow_up_to.is_empty() {
+            return prompt;
+        }
+
+        let mut request = String::from(
+            "Apply these instructions in order, each one refining the result of the previous ones:\n",
+        );
+        for (ix, instruction) in self
+            .follow_up_to
+            .iter()
+            .chain(std::iter::once(&prompt))
+            .enumerate()
+        {
+            writeln!(request, "{}. {}", ix + 1, instruction.trim()).ok();
+        }
+        request
+    }
+
+    fn needs_setup(&self, cx: &App) -> bool {
+        let registry = LanguageModelRegistry::read_global(cx);
+        registry
+            .configuration_error(registry.inline_assistant_model(), cx)
+            .is_some()
+    }
+
+    /// The model's own explanation when it declined the instruction.
+    fn failure_message(&self, cx: &App) -> Option<String> {
+        match &self.mode {
+            PromptEditorMode::Buffer { codegen, .. } => codegen
+                .read(cx)
+                .active_alternative()
+                .read(cx)
+                .failure
+                .clone(),
+            PromptEditorMode::Terminal { .. } => None,
+        }
+    }
+
+    fn box_state(&self, cx: &App) -> BoxState {
+        match self.codegen_status(cx) {
+            CodegenStatus::Pending => BoxState::Generating,
+            CodegenStatus::Done if !self.edited_since_done => {
+                if self.failure_message(cx).is_some() {
+                    BoxState::Declined
+                } else {
+                    BoxState::Review
+                }
+            }
+            _ if self.needs_setup(cx) => BoxState::Setup,
+            CodegenStatus::Error(_) => BoxState::Failed,
+            CodegenStatus::Idle | CodegenStatus::Done => BoxState::Compose,
+        }
+    }
+
+    /// Keeps the result on screen and empties the editor for one more
+    /// instruction on top of it.
+    fn begin_follow_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.box_state(cx) != BoxState::Review {
+            return;
+        }
+
+        let previous = self.prompt(cx);
+        self.follow_up_to.push(previous);
+        self.composing_follow_up = true;
+        self.edited_since_done = true;
+        self.editor.update(cx, |editor, cx| {
+            editor.set_text("", window, cx);
+            editor.set_placeholder_text("Add a follow-up instruction…", window, cx);
+            window.focus(&editor.focus_handle(cx), cx);
+        });
+        cx.notify();
+    }
+
+    /// Esc while writing a follow-up goes back to Keep / Undo instead of
+    /// throwing the result away.
+    fn abandon_follow_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(previous) = self.follow_up_to.pop() else {
+            return;
         };
 
-        let agent_panel_keybinding =
-            ui::text_for_action(&zed_actions::assistant::ToggleFocus, window, cx)
-                .map(|keybinding| format!("{keybinding} to chat"))
-                .unwrap_or_default();
+        let placeholder = Self::placeholder_text(&self.mode, window, cx);
+        self.composing_follow_up = false;
+        self.edited_since_done = false;
+        self.restored_prompt = Some(previous.clone());
+        self.editor.update(cx, |editor, cx| {
+            editor.set_text(previous, window, cx);
+            editor.set_placeholder_text(&placeholder, window, cx);
+        });
+        cx.notify();
+    }
 
-        format!("{action}… ({agent_panel_keybinding} ― ↓↑ for history — @ to include context)")
+    /// Without a usable model the box leads to the Connections window.
+    fn open_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.dispatch_action(Box::new(crate::ManageProviders), cx);
+    }
+
+    /// A terminal block has a fixed height in terminal lines: the instruction
+    /// plus the box's own padding and status row.
+    fn sync_terminal_height(&mut self, cx: &mut Context<Self>) {
+        let prompt_lines = self
+            .editor
+            .update(cx, |editor, cx| editor.max_point(cx).row().0 + 1)
+            .min(Self::MAX_LINES as u32) as u8;
+        let PromptEditorMode::Terminal {
+            height_in_lines: current_height,
+            ..
+        } = &mut self.mode
+        else {
+            return;
+        };
+
+        let height_in_lines = prompt_lines + Self::TERMINAL_CHROME_LINES;
+        if height_in_lines != *current_height {
+            *current_height = height_in_lines;
+            cx.emit(PromptEditorEvent::Resized { height_in_lines });
+        }
     }
 
     pub fn prompt(&self, cx: &App) -> String {
@@ -452,6 +569,14 @@ impl<T: 'static> PromptEditor<T> {
                     });
                 }
                 let prompt = snapshot.text();
+                self.sync_terminal_height(cx);
+                if self
+                    .restored_prompt
+                    .take()
+                    .is_some_and(|restored| restored == prompt)
+                {
+                    return;
+                }
                 if self
                     .prompt_history_ix
                     .is_none_or(|ix| self.prompt_history[ix] != prompt)
@@ -461,7 +586,6 @@ impl<T: 'static> PromptEditor<T> {
                 }
 
                 self.edited_since_done = true;
-                self.session_state.completion = CompletionState::Pending;
                 cx.notify();
             }
             EditorEvent::Blurred => {
@@ -474,100 +598,86 @@ impl<T: 'static> PromptEditor<T> {
         }
     }
 
-    pub fn is_completions_menu_visible(&self, cx: &App) -> bool {
-        self.editor
-            .read(cx)
-            .context_menu()
-            .borrow()
-            .as_ref()
-            .is_some_and(|menu| matches!(menu, CodeContextMenu::Completions(_)) && menu.visible())
-    }
-
-    pub fn trigger_completion_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.editor.update(cx, |editor, cx| {
-            let menu_is_open = editor.context_menu().borrow().as_ref().is_some_and(|menu| {
-                matches!(menu, CodeContextMenu::Completions(_)) && menu.visible()
-            });
-
-            let has_at_sign = {
-                let snapshot = editor.display_snapshot(cx);
-                let cursor = editor.selections.newest::<text::Point>(&snapshot).head();
-                let offset = cursor.to_offset(&snapshot);
-                if offset.0 > 0 {
-                    snapshot
-                        .buffer_snapshot()
-                        .reversed_chars_at(offset)
-                        .next()
-                        .map(|sign| sign == '@')
-                        .unwrap_or(false)
-                } else {
-                    false
-                }
-            };
-
-            if menu_is_open && has_at_sign {
-                return;
-            }
-
-            editor.insert("@", window, cx);
-            editor.show_completions(&editor::actions::ShowCompletions, window, cx);
-        });
-    }
-
-    fn cancel(
-        &mut self,
-        _: &editor::actions::Cancel,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn cancel(&mut self, _: &editor::actions::Cancel, window: &mut Window, cx: &mut Context<Self>) {
         match self.codegen_status(cx) {
-            CodegenStatus::Idle | CodegenStatus::Done | CodegenStatus::Error(_) => {
-                cx.emit(PromptEditorEvent::CancelRequested);
-            }
             CodegenStatus::Pending => {
                 cx.emit(PromptEditorEvent::StopRequested);
+            }
+            CodegenStatus::Done if self.composing_follow_up => {
+                self.abandon_follow_up(window, cx);
+            }
+            CodegenStatus::Idle | CodegenStatus::Done | CodegenStatus::Error(_) => {
+                cx.emit(PromptEditorEvent::CancelRequested);
             }
         }
     }
 
-    fn confirm(&mut self, _: &menu::Confirm, _window: &mut Window, cx: &mut Context<Self>) {
+    // Esc resolves to `menu::Cancel` when the instruction editor is not drawn.
+    fn menu_cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel(&editor::actions::Cancel, window, cx);
+    }
+
+    fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        if self.box_state(cx) == BoxState::Setup {
+            self.open_connections(window, cx);
+            return;
+        }
         self.handle_confirm(false, cx);
     }
 
     fn secondary_confirm(
         &mut self,
         _: &menu::SecondaryConfirm,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.box_state(cx) == BoxState::Setup {
+            self.open_connections(window, cx);
+            return;
+        }
         let execute = matches!(self.mode, PromptEditorMode::Terminal { .. });
         self.handle_confirm(execute, cx);
     }
 
     fn handle_confirm(&mut self, execute: bool, cx: &mut Context<Self>) {
         match self.codegen_status(cx) {
-            CodegenStatus::Idle => {
-                self.fire_started_telemetry(cx);
-                cx.emit(PromptEditorEvent::StartRequested);
-            }
+            CodegenStatus::Idle | CodegenStatus::Error(_) => self.request_start(cx),
             CodegenStatus::Pending => {}
             CodegenStatus::Done => {
                 if self.edited_since_done {
-                    self.fire_started_telemetry(cx);
-                    cx.emit(PromptEditorEvent::StartRequested);
+                    self.request_start(cx);
                 } else {
                     cx.emit(PromptEditorEvent::ConfirmRequested { execute });
                 }
             }
-            CodegenStatus::Error(_) => {
-                self.fire_started_telemetry(cx);
-                cx.emit(PromptEditorEvent::StartRequested);
-            }
         }
     }
 
+    /// Sends the instruction, unless there is nothing to send.
+    fn request_start(&mut self, cx: &mut Context<Self>) {
+        let prompt = self.prompt(cx);
+        if prompt.trim().is_empty() {
+            return;
+        }
+        // A text changed after a result refines that result: the instruction
+        // that produced it is sent first. (`begin_follow_up` already did it.)
+        let refines_result = matches!(self.codegen_status(cx), CodegenStatus::Done)
+            && self.edited_since_done
+            && !self.composing_follow_up;
+        if let Some(previous) = self.last_sent_prompt.take()
+            && refines_result
+            && previous.trim() != prompt.trim()
+        {
+            self.follow_up_to.push(previous);
+        }
+        self.last_sent_prompt = Some(prompt);
+        self.composing_follow_up = false;
+        self.fire_started_telemetry(cx);
+        cx.emit(PromptEditorEvent::StartRequested);
+    }
+
     fn fire_started_telemetry(&self, cx: &Context<Self>) {
-        let Some(model) = LanguageModelRegistry::read_global(cx).inline_assistant_model() else {
+        let Some(model) = self.active_model(cx) else {
             return;
         };
 
@@ -587,7 +697,7 @@ impl<T: 'static> PromptEditor<T> {
 
         telemetry::event!(
             "Assistant Started",
-            session_id = self.session_state.session_id.to_string(),
+            session_id = self.session_id.to_string(),
             kind = kind,
             phase = "started",
             model = model_telemetry_id,
@@ -596,150 +706,9 @@ impl<T: 'static> PromptEditor<T> {
         );
     }
 
-    fn thumbs_up(&mut self, _: &ThumbsUpResult, _window: &mut Window, cx: &mut Context<Self>) {
-        match &self.session_state.completion {
-            CompletionState::Pending => {
-                self.toast("Can't rate, still generating...", None, cx);
-                return;
-            }
-            CompletionState::Rated => {
-                self.toast(
-                    "Already rated this completion",
-                    Some(self.session_state.session_id),
-                    cx,
-                );
-                return;
-            }
-            CompletionState::Generated { completion_text } => {
-                let model_info = self.model_selector.read(cx).active_model(cx);
-                let (model_id, use_streaming_tools) = {
-                    let Some(model) = model_info else {
-                        self.toast("No configured model", None, cx);
-                        return;
-                    };
-                    (
-                        model.telemetry_id(),
-                        CodegenAlternative::use_streaming_tools(&model, cx),
-                    )
-                };
-
-                let selected_text = match &self.mode {
-                    PromptEditorMode::Buffer { codegen, .. } => {
-                        codegen.read(cx).selected_text(cx).map(|s| s.to_string())
-                    }
-                    PromptEditorMode::Terminal { .. } => None,
-                };
-
-                let prompt = self.editor.read(cx).text(cx);
-
-                let kind = match &self.mode {
-                    PromptEditorMode::Buffer { .. } => "inline",
-                    PromptEditorMode::Terminal { .. } => "inline_terminal",
-                };
-
-                telemetry::event!(
-                    "Inline Assistant Rated",
-                    rating = "positive",
-                    session_id = self.session_state.session_id.to_string(),
-                    kind = kind,
-                    model = model_id,
-                    prompt = prompt,
-                    completion = completion_text,
-                    selected_text = selected_text,
-                    use_streaming_tools
-                );
-
-                self.session_state.completion = CompletionState::Rated;
-
-                cx.notify();
-            }
-        }
-    }
-
-    fn thumbs_down(&mut self, _: &ThumbsDownResult, _window: &mut Window, cx: &mut Context<Self>) {
-        match &self.session_state.completion {
-            CompletionState::Pending => {
-                self.toast("Can't rate, still generating...", None, cx);
-                return;
-            }
-            CompletionState::Rated => {
-                self.toast(
-                    "Already rated this completion",
-                    Some(self.session_state.session_id),
-                    cx,
-                );
-                return;
-            }
-            CompletionState::Generated { completion_text } => {
-                let model_info = self.model_selector.read(cx).active_model(cx);
-                let (model_telemetry_id, use_streaming_tools) = {
-                    let Some(model) = model_info else {
-                        self.toast("No configured model", None, cx);
-                        return;
-                    };
-                    (
-                        model.telemetry_id(),
-                        CodegenAlternative::use_streaming_tools(&model, cx),
-                    )
-                };
-
-                let selected_text = match &self.mode {
-                    PromptEditorMode::Buffer { codegen, .. } => {
-                        codegen.read(cx).selected_text(cx).map(|s| s.to_string())
-                    }
-                    PromptEditorMode::Terminal { .. } => None,
-                };
-
-                let prompt = self.editor.read(cx).text(cx);
-
-                let kind = match &self.mode {
-                    PromptEditorMode::Buffer { .. } => "inline",
-                    PromptEditorMode::Terminal { .. } => "inline_terminal",
-                };
-
-                telemetry::event!(
-                    "Inline Assistant Rated",
-                    rating = "negative",
-                    session_id = self.session_state.session_id.to_string(),
-                    kind = kind,
-                    model = model_telemetry_id,
-                    prompt = prompt,
-                    completion = completion_text,
-                    selected_text = selected_text,
-                    use_streaming_tools
-                );
-
-                self.session_state.completion = CompletionState::Rated;
-
-                cx.notify();
-            }
-        }
-    }
-
-    fn toast(&mut self, msg: &str, uuid: Option<Uuid>, cx: &mut Context<'_, PromptEditor<T>>) {
-        self.workspace
-            .update(cx, |workspace, cx| {
-                enum InlinePromptRating {}
-                workspace.show_toast(
-                    {
-                        let mut toast = Toast::new(
-                            NotificationId::unique::<InlinePromptRating>(),
-                            msg.to_string(),
-                        )
-                        .autohide();
-
-                        if let Some(uuid) = uuid {
-                            toast = toast.on_click("Click to copy rating ID", move |_, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(uuid.to_string()));
-                            });
-                        };
-
-                        toast
-                    },
-                    cx,
-                );
-            })
-            .ok();
+    /// The model the next request of this box goes to.
+    fn active_model(&self, cx: &App) -> Option<LanguageModel> {
+        self.model_selector.read(cx).delegate.active_model(cx)
     }
 
     fn move_up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
@@ -782,190 +751,322 @@ impl<T: 'static> PromptEditor<T> {
         }
     }
 
-    fn render_buttons(&self, _window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mode = match &self.mode {
-            PromptEditorMode::Buffer { codegen, .. } => {
-                let codegen = codegen.read(cx);
-                if codegen.is_insertion {
-                    GenerationMode::Generate
-                } else {
-                    GenerationMode::Transform
-                }
+    fn key_hint(&self, action: &dyn gpui::Action, cx: &App) -> KeyBinding {
+        KeyBinding::for_action_in(action, &self.editor.focus_handle(cx), cx)
+            .size(rems_from_px(10_f32))
+    }
+
+    fn render_cancel_button(
+        &self,
+        label: &'static str,
+        style: ButtonStyle,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        Button::new("cancel", label)
+            .label_size(LabelSize::Small)
+            .style(style)
+            .key_binding(self.key_hint(&editor::actions::Cancel, cx))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.cancel(&editor::actions::Cancel, window, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// The name of the model the edit goes to; it opens the model picker.
+    /// Who answers and at which price is said by its tooltip.
+    fn render_model_chip(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let model = self.active_model(cx);
+        let model_name = model
+            .as_ref()
+            .map(|model| model.name().0)
+            .unwrap_or_else(|| SharedString::from("Select a Model"));
+        let provider_name = model.as_ref().and_then(|model| {
+            let catalog_title = connections::catalog(cx).into_iter().find_map(|spec| {
+                matches!(&spec.backing, Backing::Provider(id) if id == &model.provider_id)
+                    .then_some(spec.title)
+            });
+            catalog_title.or_else(|| {
+                LanguageModelRegistry::read_global(cx)
+                    .provider(&model.provider_id)
+                    .map(|provider| provider.name().0)
+            })
+        });
+        let cost = model
+            .as_ref()
+            .and_then(|model| model.cost_info.as_ref())
+            .map(|cost| cost.to_shared_string());
+        let color = if self.model_selector_menu_handle.is_deployed() {
+            Color::Default
+        } else {
+            Color::Muted
+        };
+        let show_cycle_row = self.model_selector.read(cx).delegate.favorites_count() > 1;
+        let tooltip = Tooltip::element(move |_, _cx| {
+            crate::ui::ModelSelectorTooltip::new()
+                .provider(provider_name.clone())
+                .cost(cost.clone())
+                .show_cycle_row(show_cycle_row)
+                .into_any_element()
+        });
+
+        PickerPopoverMenu::new(
+            self.model_selector.clone(),
+            ButtonLike::new("active-model").child(
+                h_flex()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        Label::new(model_name)
+                            .size(LabelSize::Small)
+                            .color(color)
+                            .truncate(),
+                    )
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .color(Color::Muted)
+                            .size(IconSize::XSmall),
+                    ),
+            ),
+            tooltip,
+            gpui::Anchor::TopLeft,
+            cx,
+        )
+        .with_handle(self.model_selector_menu_handle.clone())
+        .offset(gpui::Point {
+            x: px(0.0),
+            y: px(2.0),
+        })
+        .render(window, cx)
+        .into_any_element()
+    }
+
+    /// A one-line message on the left of the status row; the full text is in
+    /// its tooltip when it does not fit.
+    fn render_status_message(
+        icon: IconName,
+        color: Color,
+        summary: SharedString,
+        details: SharedString,
+    ) -> AnyElement {
+        // Starts where the instruction's text and the model's name start.
+        h_flex()
+            .id("status-message")
+            .min_w_0()
+            .gap_1p5()
+            .pl_1()
+            .child(Icon::new(icon).size(IconSize::XSmall).color(color))
+            .child(
+                Label::new(summary)
+                    .size(LabelSize::Small)
+                    .color(color)
+                    .truncate(),
+            )
+            .tooltip(Tooltip::text(details))
+            .into_any_element()
+    }
+
+    /// The bottom row: on the left the model (or what happened), on the
+    /// right the actions of the current state. At most one of them is filled.
+    fn render_status_row(
+        &self,
+        state: BoxState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_terminal = matches!(self.mode, PromptEditorMode::Terminal { .. });
+        // Only when the user listed models in `agent.inline_alternatives`.
+        let cycle_controls = match &self.mode {
+            PromptEditorMode::Buffer { codegen, .. }
+                if codegen.read(cx).alternative_count(cx) > 1 =>
+            {
+                Some(self.render_cycle_controls(codegen.read(cx), cx))
             }
-            PromptEditorMode::Terminal { .. } => GenerationMode::Generate,
+            _ => None,
         };
 
-        let codegen_status = self.codegen_status(cx);
+        let mut left = Vec::<AnyElement>::new();
+        let mut right = Vec::<AnyElement>::new();
 
-        match codegen_status {
-            CodegenStatus::Idle => {
-                vec![
-                    Button::new("start", mode.start_label())
+        match state {
+            BoxState::Setup => {
+                right.push(self.render_cancel_button("Cancel", ButtonStyle::Subtle, cx));
+                right.push(
+                    Button::new("connect", "Connect")
                         .label_size(LabelSize::Small)
-                        .end_icon(
-                            Icon::new(IconName::Return)
-                                .size(IconSize::XSmall)
+                        .style(ButtonStyle::Outlined)
+                        .key_binding(self.key_hint(&menu::Confirm, cx))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_connections(window, cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
+            BoxState::Compose => {
+                let is_empty = self.prompt(cx).trim().is_empty();
+                left.push(self.render_model_chip(window, cx));
+                right.extend(cycle_controls);
+                if matches!(self.codegen_status(cx), CodegenStatus::Done) {
+                    // A result is in the buffer and the instruction changed.
+                    right.push(self.render_cancel_button("Undo", ButtonStyle::Outlined, cx));
+                    right.push(
+                        Button::primary("start", "Refine")
+                            .label_size(LabelSize::Small)
+                            .disabled(is_empty)
+                            .key_binding(self.key_hint(&menu::Confirm, cx))
+                            .tooltip(Tooltip::text(
+                                "Generate again with this instruction on top of the previous one",
+                            ))
+                            .on_click(cx.listener(|this, _, _, cx| this.request_start(cx)))
+                            .into_any_element(),
+                    );
+                } else {
+                    right.push(self.key_hint(&menu::Confirm, cx).into_any_element());
+                    right.push(
+                        IconButton::primary("start", IconName::Send)
+                            .icon_size(IconSize::Small)
+                            .disabled(is_empty)
+                            .aria_label("Run")
+                            .tooltip(Tooltip::text(if is_empty {
+                                "Type an Instruction to Run"
+                            } else {
+                                "Run"
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| this.request_start(cx)))
+                            .into_any_element(),
+                    );
+                }
+            }
+            BoxState::Generating => {
+                left.push(self.render_model_name(cx));
+                // Three steps on a timer that lives only while this row shows it.
+                left.push(
+                    h_flex()
+                        .flex_none()
+                        .gap_1()
+                        .child(
+                            Label::new("Generating")
+                                .size(LabelSize::Small)
                                 .color(Color::Muted),
                         )
+                        .child(crate::ui::WorkingIndicator::new("inline-generating"))
+                        .into_any_element(),
+                );
+                right.push(
+                    Button::new("stop", "Stop")
+                        .label_size(LabelSize::Small)
+                        .style(ButtonStyle::Outlined)
+                        .key_binding(self.key_hint(&editor::actions::Cancel, cx))
+                        .tooltip(Tooltip::text(
+                            "What was generated so far is kept for review",
+                        ))
                         .on_click(
-                            cx.listener(|_, _, _, cx| cx.emit(PromptEditorEvent::StartRequested)),
+                            cx.listener(|_, _, _, cx| cx.emit(PromptEditorEvent::StopRequested)),
                         )
                         .into_any_element(),
-                ]
+                );
             }
-            CodegenStatus::Pending => vec![
-                IconButton::new("stop", IconName::Stop)
-                    .icon_color(Color::Error)
-                    .shape(IconButtonShape::Square)
-                    .tooltip(move |_window, cx| {
-                        Tooltip::with_meta(
-                            mode.tooltip_interrupt(),
-                            Some(&menu::Cancel),
-                            "Changes won't be discarded",
-                            cx,
-                        )
-                    })
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(PromptEditorEvent::StopRequested)))
-                    .into_any_element(),
-            ],
-            CodegenStatus::Done | CodegenStatus::Error(_) => {
-                let has_error = matches!(codegen_status, CodegenStatus::Error(_));
-                if has_error || self.edited_since_done {
-                    vec![
-                        IconButton::new("restart", IconName::RotateCw)
-                            .icon_color(Color::Info)
-                            .shape(IconButtonShape::Square)
-                            .tooltip(move |_window, cx| {
-                                Tooltip::with_meta(
-                                    mode.tooltip_restart(),
-                                    Some(&menu::Confirm),
-                                    "Changes will be discarded",
-                                    cx,
-                                )
-                            })
+            BoxState::Review => {
+                left.push(self.render_model_chip(window, cx));
+                right.extend(cycle_controls);
+                right.push(self.render_cancel_button("Undo", ButtonStyle::Outlined, cx));
+                if is_terminal {
+                    right.push(
+                        Button::new("run", "Run")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Outlined)
+                            .key_binding(self.key_hint(&menu::SecondaryConfirm, cx))
+                            .tooltip(Tooltip::text("Run the generated command now"))
                             .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(PromptEditorEvent::StartRequested);
+                                cx.emit(PromptEditorEvent::ConfirmRequested { execute: true });
                             }))
                             .into_any_element(),
-                    ]
-                } else {
-                    let rated = matches!(self.session_state.completion, CompletionState::Rated);
-
-                    let accept = IconButton::new("accept", IconName::Check)
-                        .icon_color(Color::Info)
-                        .shape(IconButtonShape::Square)
-                        .tooltip(move |_window, cx| {
-                            Tooltip::for_action(mode.tooltip_accept(), &menu::Confirm, cx)
-                        })
+                    );
+                }
+                right.push(
+                    Button::primary("accept", "Keep")
+                        .label_size(LabelSize::Small)
+                        .key_binding(self.key_hint(&menu::Confirm, cx))
+                        .tooltip(Tooltip::text(if is_terminal {
+                            "Keep the command at the prompt without running it"
+                        } else {
+                            "Keep the edit. Change the instruction to refine it instead."
+                        }))
                         .on_click(cx.listener(|_, _, _, cx| {
                             cx.emit(PromptEditorEvent::ConfirmRequested { execute: false });
                         }))
-                        .into_any_element();
-
-                    let mut buttons = Vec::new();
-
-                    if AgentSettings::get_global(cx).enable_feedback {
-                        buttons.push(
-                            h_flex()
-                                .pl_1()
-                                .gap_1()
-                                .border_l_1()
-                                .border_color(cx.theme().colors().border_variant)
-                                .child(
-                                    IconButton::new("thumbs-up", IconName::ThumbsUp)
-                                        .shape(IconButtonShape::Square)
-                                        .map(|this| {
-                                            if rated {
-                                                this.disabled(true)
-                                                    .icon_color(Color::Disabled)
-                                                    .tooltip(move |_, cx| {
-                                                        Tooltip::with_meta(
-                                                            "Good Result",
-                                                            None,
-                                                            "You already rated this result",
-                                                            cx,
-                                                        )
-                                                    })
-                                            } else {
-                                                this.icon_color(Color::Muted).tooltip(
-                                                    move |_, cx| {
-                                                        Tooltip::for_action(
-                                                            "Good Result",
-                                                            &ThumbsUpResult,
-                                                            cx,
-                                                        )
-                                                    },
-                                                )
-                                            }
-                                        })
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.thumbs_up(&ThumbsUpResult, window, cx);
-                                        })),
-                                )
-                                .child(
-                                    IconButton::new("thumbs-down", IconName::ThumbsDown)
-                                        .shape(IconButtonShape::Square)
-                                        .map(|this| {
-                                            if rated {
-                                                this.disabled(true)
-                                                    .icon_color(Color::Disabled)
-                                                    .tooltip(move |_, cx| {
-                                                        Tooltip::with_meta(
-                                                            "Bad Result",
-                                                            None,
-                                                            "You already rated this result",
-                                                            cx,
-                                                        )
-                                                    })
-                                            } else {
-                                                this.icon_color(Color::Muted).tooltip(
-                                                    move |_, cx| {
-                                                        Tooltip::for_action(
-                                                            "Bad Result",
-                                                            &ThumbsDownResult,
-                                                            cx,
-                                                        )
-                                                    },
-                                                )
-                                            }
-                                        })
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.thumbs_down(&ThumbsDownResult, window, cx);
-                                        })),
-                                )
-                                .into_any_element(),
-                        );
-                    }
-
-                    buttons.push(accept);
-
-                    match &self.mode {
-                        PromptEditorMode::Terminal { .. } => {
-                            buttons.push(
-                                IconButton::new("confirm", IconName::PlayFilled)
-                                    .icon_color(Color::Info)
-                                    .shape(IconButtonShape::Square)
-                                    .tooltip(|_window, cx| {
-                                        Tooltip::for_action(
-                                            "Execute Generated Command",
-                                            &menu::SecondaryConfirm,
-                                            cx,
-                                        )
-                                    })
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(PromptEditorEvent::ConfirmRequested {
-                                            execute: true,
-                                        });
-                                    }))
-                                    .into_any_element(),
-                            );
-                            buttons
-                        }
-                        PromptEditorMode::Buffer { .. } => buttons,
-                    }
+                        .into_any_element(),
+                );
+            }
+            BoxState::Declined => {
+                let message = SharedString::from(self.failure_message(cx).unwrap_or_default());
+                let summary = message
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("The model could not do this.")
+                    .to_string();
+                left.push(Self::render_status_message(
+                    IconName::Warning,
+                    Color::Muted,
+                    summary.into(),
+                    message,
+                ));
+                right.push(self.render_cancel_button("Close", ButtonStyle::Outlined, cx));
+            }
+            BoxState::Failed => {
+                if let CodegenStatus::Error(error) = self.codegen_status(cx) {
+                    left.push(Self::render_status_message(
+                        IconName::XCircle,
+                        Color::Error,
+                        error_summary(error),
+                        format!("{error:#}").into(),
+                    ));
                 }
+                right.push(self.render_model_chip(window, cx));
+                right.push(
+                    Button::new("retry", "Retry")
+                        .label_size(LabelSize::Small)
+                        .style(ButtonStyle::Outlined)
+                        .key_binding(self.key_hint(&menu::Confirm, cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.request_start(cx)))
+                        .into_any_element(),
+                );
             }
         }
+
+        h_flex()
+            .h(rems_from_px(24_f32))
+            .w_full()
+            .gap_2()
+            .justify_between()
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .gap_2()
+                    .children(left),
+            )
+            .child(h_flex().flex_none().gap_1().children(right))
+            .into_any_element()
+    }
+
+    /// The model's name as plain text, while its picker would change nothing.
+    fn render_model_name(&self, cx: &App) -> AnyElement {
+        let name = self
+            .active_model(cx)
+            .map(|model| model.name().0)
+            .unwrap_or_default();
+        div()
+            .min_w_0()
+            .pl_1()
+            .child(
+                Label::new(name)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+            .into_any_element()
     }
 
     fn cycle_prev(
@@ -993,26 +1094,6 @@ impl<T: 'static> PromptEditor<T> {
                 // no cycle buttons in terminal mode
             }
         }
-    }
-
-    fn render_close_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let focus_handle = self.editor.focus_handle(cx);
-
-        IconButton::new("cancel", IconName::Close)
-            .icon_color(Color::Muted)
-            .shape(IconButtonShape::Square)
-            .tooltip({
-                move |_window, cx| {
-                    Tooltip::for_action_in(
-                        "Close Assistant",
-                        &editor::actions::Cancel,
-                        &focus_handle,
-                        cx,
-                    )
-                }
-            })
-            .on_click(cx.listener(|_, _, _, cx| cx.emit(PromptEditorEvent::CancelRequested)))
-            .into_any_element()
     }
 
     fn render_cycle_controls(&self, codegen: &BufferCodegen, cx: &Context<Self>) -> AnyElement {
@@ -1120,44 +1201,58 @@ impl<T: 'static> PromptEditor<T> {
             .into_any_element()
     }
 
-    fn render_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_editor(
+        &mut self,
+        state: BoxState,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let colors = cx.theme().colors();
+        let settings = ThemeSettings::get_global(cx);
+        // The instruction steps back while the model is writing.
+        let text_color = if state == BoxState::Generating {
+            colors.text_muted
+        } else {
+            colors.editor_foreground
+        };
+
+        let text_style = TextStyle {
+            color: text_color,
+            font_family: settings.buffer_font.family.clone(),
+            font_features: settings.buffer_font.features.clone(),
+            font_size: settings.buffer_font_size(cx).into(),
+            line_height: relative(settings.buffer_line_height.value()),
+            ..Default::default()
+        };
 
         div()
-            .size_full()
-            .p_2()
-            .pl_1()
-            .bg(colors.editor_background)
-            .child({
-                let settings = ThemeSettings::get_global(cx);
-                let font_size = settings.buffer_font_size(cx);
-
-                let text_style = TextStyle {
-                    color: colors.editor_foreground,
-                    font_family: settings.buffer_font.family.clone(),
-                    font_features: settings.buffer_font.features.clone(),
-                    font_size: font_size.into(),
-                    line_height: relative(settings.buffer_line_height.value()),
+            .w_full()
+            .child(EditorElement::new(
+                &self.editor,
+                EditorStyle {
+                    background: colors.elevated_surface_background,
+                    local_player: cx.theme().players().local(),
+                    syntax: cx.theme().syntax().clone(),
+                    text: text_style,
                     ..Default::default()
-                };
-
-                EditorElement::new(
-                    &self.editor,
-                    EditorStyle {
-                        background: colors.editor_background,
-                        local_player: cx.theme().players().local(),
-                        syntax: cx.theme().syntax().clone(),
-                        text: text_style,
-                        ..Default::default()
-                    },
-                )
-            })
+                },
+            ))
             .into_any_element()
     }
 
-    fn render_markdown(&self, markdown: Entity<Markdown>, style: MarkdownStyle) -> MarkdownElement {
-        MarkdownElement::new(markdown, style)
-            .image_resolver(|dest_url, _cx| crate::resolve_agent_image(dest_url, &[]))
+    /// Shown in place of the instruction when no model can be used: there is
+    /// nothing to type until one is connected. The chat says it with the
+    /// same words.
+    fn render_setup_notice(&self, cx: &mut Context<Self>) -> AnyElement {
+        let settings = ThemeSettings::get_global(cx);
+        let line_height = settings.buffer_font_size(cx) * settings.buffer_line_height.value();
+
+        h_flex()
+            .w_full()
+            .h(line_height)
+            .pl_1()
+            .child(Label::new("No model is connected.").size(LabelSize::Small))
+            .into_any_element()
     }
 }
 
@@ -1273,22 +1368,30 @@ impl PromptEditor<BufferCodegen> {
 
         let mention_set = cx.new(|_cx| MentionSet::new(project, Some(thread_store.clone())));
 
-        let model_selector_menu_handle = PopoverMenuHandle::default();
+        // The fast model for a short selection, unless the user chose one.
+        let model_selector = {
+            let codegen = match &mode {
+                PromptEditorMode::Buffer { codegen, .. } => codegen.downgrade(),
+                PromptEditorMode::Terminal { .. } => unreachable!(),
+            };
+            build_model_selector(
+                move |cx| match codegen.upgrade() {
+                    Some(codegen) => codegen.read(cx).model(cx),
+                    None => LanguageModelRegistry::read_global(cx).inline_assistant_model(),
+                },
+                fs,
+                prompt_editor.focus_handle(cx),
+                window,
+                cx,
+            )
+        };
 
         let mut this: PromptEditor<BufferCodegen> = PromptEditor {
-            editor: prompt_editor.clone(),
+            editor: prompt_editor,
             mention_set,
             workspace,
-            model_selector: cx.new(|cx| {
-                AgentModelSelector::new(
-                    fs,
-                    model_selector_menu_handle,
-                    prompt_editor.focus_handle(cx),
-                    ModelUsageContext::InlineAssistant,
-                    window,
-                    cx,
-                )
-            }),
+            model_selector,
+            model_selector_menu_handle: PopoverMenuHandle::default(),
             edited_since_done: false,
             prompt_history,
             prompt_history_ix: None,
@@ -1297,10 +1400,12 @@ impl PromptEditor<BufferCodegen> {
             editor_subscriptions: Vec::new(),
             show_rate_limit_notice: false,
             mode,
-            session_state: SessionState {
-                session_id,
-                completion: CompletionState::Pending,
-            },
+            session_id,
+            last_sent_prompt: None,
+            follow_up_to: Vec::new(),
+            composing_follow_up: false,
+            restored_prompt: None,
+            _registry_subscription: Self::observe_model_registry(cx),
             _phantom: Default::default(),
         };
 
@@ -1311,7 +1416,7 @@ impl PromptEditor<BufferCodegen> {
 
     fn handle_codegen_changed(
         &mut self,
-        codegen: Entity<BufferCodegen>,
+        _codegen: Entity<BufferCodegen>,
         cx: &mut Context<PromptEditor<BufferCodegen>>,
     ) {
         match self.codegen_status(cx) {
@@ -1320,15 +1425,10 @@ impl PromptEditor<BufferCodegen> {
                     .update(cx, |editor, _| editor.set_read_only(false));
             }
             CodegenStatus::Pending => {
-                self.session_state.completion = CompletionState::Pending;
                 self.editor
                     .update(cx, |editor, _| editor.set_read_only(true));
             }
             CodegenStatus::Done => {
-                let completion = codegen.read(cx).active_completion(cx);
-                self.session_state.completion = CompletionState::Generated {
-                    completion_text: completion,
-                };
                 self.edited_since_done = false;
                 self.editor
                     .update(cx, |editor, _| editor.set_read_only(false));
@@ -1396,7 +1496,7 @@ impl PromptEditor<TerminalCodegen> {
         let mode = PromptEditorMode::Terminal {
             id,
             codegen,
-            height_in_lines: 1,
+            height_in_lines: 1 + Self::TERMINAL_CHROME_LINES,
         };
 
         let prompt_editor = cx.new(|cx| {
@@ -1422,22 +1522,21 @@ impl PromptEditor<TerminalCodegen> {
 
         let mention_set = cx.new(|_cx| MentionSet::new(project, Some(thread_store.clone())));
 
-        let model_selector_menu_handle = PopoverMenuHandle::default();
+        // A command is always a small edit.
+        let model_selector = build_model_selector(
+            |cx| inline_assist_model(0, cx),
+            fs,
+            prompt_editor.focus_handle(cx),
+            window,
+            cx,
+        );
 
         let mut this = Self {
-            editor: prompt_editor.clone(),
+            editor: prompt_editor,
             mention_set,
             workspace,
-            model_selector: cx.new(|cx| {
-                AgentModelSelector::new(
-                    fs,
-                    model_selector_menu_handle.clone(),
-                    prompt_editor.focus_handle(cx),
-                    ModelUsageContext::InlineAssistant,
-                    window,
-                    cx,
-                )
-            }),
+            model_selector,
+            model_selector_menu_handle: PopoverMenuHandle::default(),
             edited_since_done: false,
             prompt_history,
             prompt_history_ix: None,
@@ -1446,57 +1545,45 @@ impl PromptEditor<TerminalCodegen> {
             editor_subscriptions: Vec::new(),
             mode,
             show_rate_limit_notice: false,
-            session_state: SessionState {
-                session_id,
-                completion: CompletionState::Pending,
-            },
+            session_id,
+            last_sent_prompt: None,
+            follow_up_to: Vec::new(),
+            composing_follow_up: false,
+            restored_prompt: None,
+            _registry_subscription: Self::observe_model_registry(cx),
             _phantom: Default::default(),
         };
-        this.count_lines(cx);
+        this.sync_terminal_height(cx);
         this.assign_completion_provider(cx);
         this.subscribe_to_editor(window, cx);
         this
     }
 
-    fn count_lines(&mut self, cx: &mut Context<Self>) {
-        let height_in_lines = cmp::max(
-            2, // Make the editor at least two lines tall, to account for padding and buttons.
-            cmp::min(
-                self.editor
-                    .update(cx, |editor, cx| editor.max_point(cx).row().0 + 1),
-                Self::MAX_LINES as u32,
-            ),
-        ) as u8;
-
-        match &mut self.mode {
-            PromptEditorMode::Terminal {
-                height_in_lines: current_height,
-                ..
-            } => {
-                if height_in_lines != *current_height {
-                    *current_height = height_in_lines;
-                    cx.emit(PromptEditorEvent::Resized { height_in_lines });
-                }
-            }
+    /// Height of the terminal block that holds this prompt box, in terminal lines.
+    pub fn height_in_lines(&self) -> u8 {
+        match &self.mode {
             PromptEditorMode::Buffer { .. } => unreachable!(),
+            PromptEditorMode::Terminal {
+                height_in_lines, ..
+            } => *height_in_lines,
         }
     }
 
-    fn handle_codegen_changed(&mut self, codegen: Entity<TerminalCodegen>, cx: &mut Context<Self>) {
+    fn handle_codegen_changed(
+        &mut self,
+        _codegen: Entity<TerminalCodegen>,
+        cx: &mut Context<Self>,
+    ) {
         match &self.codegen().read(cx).status {
             CodegenStatus::Idle => {
                 self.editor
                     .update(cx, |editor, _| editor.set_read_only(false));
             }
             CodegenStatus::Pending => {
-                self.session_state.completion = CompletionState::Pending;
                 self.editor
                     .update(cx, |editor, _| editor.set_read_only(true));
             }
             CodegenStatus::Done | CodegenStatus::Error(_) => {
-                self.session_state.completion = CompletionState::Generated {
-                    completion_text: codegen.read(cx).completion(),
-                };
                 self.edited_since_done = false;
                 self.editor
                     .update(cx, |editor, _| editor.set_read_only(false));
@@ -1528,41 +1615,6 @@ pub enum CodegenStatus {
     Pending,
     Done,
     Error(anyhow::Error),
-}
-
-#[derive(Copy, Clone)]
-pub enum GenerationMode {
-    Generate,
-    Transform,
-}
-
-impl GenerationMode {
-    fn start_label(self) -> &'static str {
-        match self {
-            GenerationMode::Generate => "Generate",
-            GenerationMode::Transform => "Transform",
-        }
-    }
-    fn tooltip_interrupt(self) -> &'static str {
-        match self {
-            GenerationMode::Generate => "Interrupt Generation",
-            GenerationMode::Transform => "Interrupt Transform",
-        }
-    }
-
-    fn tooltip_restart(self) -> &'static str {
-        match self {
-            GenerationMode::Generate => "Restart Generation",
-            GenerationMode::Transform => "Restart Transform",
-        }
-    }
-
-    fn tooltip_accept(self) -> &'static str {
-        match self {
-            GenerationMode::Generate => "Accept Generation",
-            GenerationMode::Transform => "Accept Transform",
-        }
-    }
 }
 
 /// Stored information that can be used to resurrect a context crease when creating an editor for a past message.
@@ -1631,7 +1683,7 @@ mod tests {
     use agent::ThreadStore;
     use collections::VecDeque;
     use fs::FakeFs;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{ClipboardItem, TestAppContext, VisualTestContext};
     use language::Buffer;
     use project::Project;
     use settings::SettingsStore;
@@ -1766,6 +1818,71 @@ mod tests {
                 _ => "other event".to_string(),
             }
         );
+    }
+
+    #[gpui::test]
+    async fn test_text_changed_after_result_is_sent_as_refinement(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", serde_json::json!({"file": ""}))
+            .await;
+        let project = Project::test(fs, [Path::new(path!("/project"))], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let prompt_editor = build_terminal_prompt_editor(&workspace, cx);
+
+        let set_prompt = |text: &str, cx: &mut VisualTestContext| {
+            prompt_editor.update_in(cx, |prompt_editor, window, cx| {
+                prompt_editor
+                    .editor
+                    .update(cx, |editor, cx| editor.set_text(text, window, cx));
+            });
+            cx.run_until_parked();
+        };
+        let finish = |cx: &mut VisualTestContext| {
+            prompt_editor.update(cx, |prompt_editor, cx| {
+                prompt_editor.codegen().update(cx, |codegen, cx| {
+                    codegen.status = CodegenStatus::Done;
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+        };
+
+        // The first instruction is sent alone.
+        set_prompt("list the files", cx);
+        prompt_editor.update(cx, |prompt_editor, cx| {
+            prompt_editor.request_start(cx);
+            assert_eq!(prompt_editor.request_prompt(cx), "list the files");
+        });
+
+        // With its result on screen, the box offers Keep and Undo.
+        finish(cx);
+        prompt_editor.update(cx, |prompt_editor, cx| {
+            assert_eq!(prompt_editor.box_state(cx), BoxState::Review);
+        });
+
+        // A changed text is a refinement: both instructions go, in order.
+        set_prompt("sorted by size", cx);
+        prompt_editor.update(cx, |prompt_editor, cx| {
+            assert_eq!(prompt_editor.box_state(cx), BoxState::Compose);
+            prompt_editor.request_start(cx);
+            let request = prompt_editor.request_prompt(cx);
+            assert!(request.contains("1. list the files"), "{request}");
+            assert!(request.contains("2. sorted by size"), "{request}");
+        });
+
+        // Sending the same text again does not stack it on itself.
+        finish(cx);
+        set_prompt("sorted by size ", cx);
+        prompt_editor.update(cx, |prompt_editor, cx| {
+            prompt_editor.request_start(cx);
+            assert_eq!(
+                prompt_editor.follow_up_to,
+                vec!["list the files".to_string()]
+            );
+        });
     }
 
     #[gpui::test]

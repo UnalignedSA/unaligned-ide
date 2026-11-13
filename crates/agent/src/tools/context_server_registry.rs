@@ -314,6 +314,12 @@ impl AnyAgentTool for ContextServerTool {
         acp::ToolKind::Other
     }
 
+    // Offered without a folder only when the "ask" profile enables it:
+    // `Thread::enabled_tools` decides, not the tool.
+    fn works_without_folder(&self) -> bool {
+        true
+    }
+
     fn initial_title(&self, input: serde_json::Value, _cx: &mut App) -> SharedString {
         format_mcp_initial_title(&self.tool.name, &input).into()
     }

@@ -1,9 +1,10 @@
 use std::ops::Range;
+use std::sync::Arc;
 
-use client::zed_urls;
 use collections::HashMap;
 use editor::{Editor, EditorElement, EditorStyle};
 use fs::Fs;
+use futures::channel::oneshot;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, Focusable, KeyContext, ParentElement, Render,
     RenderOnce, SharedString, Styled, TextStyle, UniformListScrollHandle, Window, point,
@@ -11,7 +12,9 @@ use gpui::{
 };
 use project::agent_server_store::{AllAgentServersSettings, CustomAgentServerSettings};
 use project::{AgentRegistryStore, RegistryAgent};
-use settings::{Settings, SettingsStore, update_settings_file};
+use settings::{
+    Settings, SettingsStore, update_settings_file, update_settings_file_with_completion,
+};
 use theme_settings::ThemeSettings;
 use ui::{
     ButtonStyle, ScrollableHandle, ToggleButtonGroup, ToggleButtonGroupSize,
@@ -21,6 +24,32 @@ use workspace::{
     Workspace,
     item::{Item, ItemEvent},
 };
+
+/// Sets up an agent of the public registry: adds `agent_servers.<id> =
+/// { "type": "registry" }` to the user's settings, unless the id is already
+/// there (a custom command is left alone). The agent itself is downloaded when
+/// a chat with it starts.
+///
+/// The returned channel completes once the settings file has been written.
+pub(crate) fn add_registry_agent_to_settings(
+    agent_id: impl Into<String>,
+    fs: Arc<dyn Fs>,
+    cx: &App,
+) -> oneshot::Receiver<anyhow::Result<()>> {
+    let agent_id = agent_id.into();
+    update_settings_file_with_completion(fs, cx, move |settings, _| {
+        settings
+            .agent_servers
+            .get_or_insert_default()
+            .entry(agent_id)
+            .or_insert_with(|| settings::CustomAgentServerSettings::Registry {
+                default_mode: None,
+                env: Default::default(),
+                default_config_options: HashMap::default(),
+                favorite_config_option_values: HashMap::default(),
+            });
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RegistryFilter {
@@ -529,30 +558,25 @@ impl AgentRegistryPage {
             RegistryInstallStatus::NotInstalled => {
                 let fs = <dyn Fs>::global(cx);
                 let agent_id = agent.id().to_string();
+                // One of many rows: outlined, the accent stays for the one
+                // primary action of a view.
                 Button::new(button_id, "Install")
-                    .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                    .style(ButtonStyle::Outlined)
                     .start_icon(
                         Icon::new(IconName::Download)
                             .size(IconSize::Small)
                             .color(Color::Muted),
                     )
                     .on_click(move |_, window, cx| {
-                        update_settings_file(fs.clone(), cx, {
-                            let agent_id = agent_id.clone();
-                            move |settings, _| {
-                                let agent_servers = settings.agent_servers.get_or_insert_default();
-                                agent_servers.entry(agent_id).or_insert_with(|| {
-                                    settings::CustomAgentServerSettings::Registry {
-                                        default_mode: None,
-                                        env: Default::default(),
-                                        default_config_options: HashMap::default(),
-                                        favorite_config_option_values: HashMap::default(),
-                                    }
-                                });
-                            }
-                        });
+                        // Nothing here waits for the write: the panel only
+                        // notes the agent for its next new chat.
+                        drop(add_registry_agent_to_settings(
+                            agent_id.clone(),
+                            fs.clone(),
+                            cx,
+                        ));
                         window.dispatch_action(
-                            Box::new(zed_actions::agent::SelectAgent {
+                            Box::new(app_actions::agent::SelectAgent {
                                 agent: agent_id.clone(),
                             }),
                             cx,
@@ -604,20 +628,7 @@ impl Render for AgentRegistryPage {
                             .w_full()
                             .gap_1p5()
                             .justify_between()
-                            .child(Headline::new("ACP Registry").size(HeadlineSize::Large))
-                            .child(
-                                Button::new("learn-more", "Learn More")
-                                    .style(ButtonStyle::Outlined)
-                                    .size(ButtonSize::Medium)
-                                    .end_icon(
-                                        Icon::new(IconName::ArrowUpRight)
-                                            .size(IconSize::Small)
-                                            .color(Color::Muted),
-                                    )
-                                    .on_click(move |_, _, cx| {
-                                        cx.open_url(&zed_urls::acp_registry_blog(cx))
-                                    }),
-                            ),
+                            .child(Headline::new("Agent Registry").size(HeadlineSize::Large)),
                     )
                     .child(
                         h_flex()
@@ -701,7 +712,7 @@ impl Item for AgentRegistryPage {
     type Event = ItemEvent;
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        "ACP Registry".into()
+        "Agent Registry".into()
     }
 
     fn telemetry_event_text(&self) -> Option<&'static str> {

@@ -33,13 +33,21 @@ impl Render for ContactFinder {
             .elevation_3(cx)
             .child(
                 v_flex()
-                    .px_2()
-                    .py_1()
-                    .bg(cx.theme().colors().element_background)
-                    // HACK: Prevent the background color from overflowing the parent container.
-                    .rounded_t(px(8.))
-                    .child(Label::new("Contacts"))
-                    .child(h_flex().child(Label::new("Invite new contacts"))),
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .gap_0p5()
+                    .child(
+                        Label::new("CONTACTS")
+                            .size(LabelSize::XSmall)
+                            .buffer_font(cx)
+                            .color(Color::Placeholder),
+                    )
+                    .child(
+                        Label::new("Invite new contacts")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
             )
             .child(self.picker.clone())
     }

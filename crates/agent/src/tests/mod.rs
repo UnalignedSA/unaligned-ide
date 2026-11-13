@@ -7089,6 +7089,247 @@ async fn test_lsp_tools_gated_by_feature_flag(cx: &mut TestAppContext) {
     );
 }
 
+/// Unaligned: with no folder open the chat's working directory would be the
+/// user's home directory, so the agent only answers. The list of tools sent
+/// to the model must hold nothing that reads, lists or writes files or runs a
+/// command, whatever the mode (Agent or Ask), until a folder is opened.
+#[gpui::test]
+async fn test_tools_offered_with_and_without_a_folder(cx: &mut TestAppContext) {
+    let fake = init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({ "main.rs": "fn main() {}" }))
+        .await;
+    let model = fake.model("fake");
+
+    let new_thread = |project: Entity<Project>, cx: &mut TestAppContext| {
+        let project_context = cx.new(|_cx| ProjectContext::default());
+        let context_server_store =
+            project.read_with(cx, |project, _| project.context_server_store());
+        let context_server_registry =
+            cx.new(|cx| ContextServerRegistry::new(context_server_store, cx));
+        let environment = Rc::new(cx.update(|cx| {
+            FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+        }));
+        let model = model.clone();
+        cx.new(|cx| {
+            let mut thread = Thread::new(
+                project,
+                project_context,
+                context_server_registry,
+                Templates::new(),
+                Some(model),
+                cx,
+            );
+            thread.add_default_tools(environment, cx);
+            thread
+        })
+    };
+
+    let writes_or_runs = [
+        EditFileTool::NAME,
+        WriteFileTool::NAME,
+        CreateDirectoryTool::NAME,
+        CopyPathTool::NAME,
+        MovePathTool::NAME,
+        DeletePathTool::NAME,
+        TerminalTool::NAME,
+    ];
+    let reads = [
+        ReadFileTool::NAME,
+        ListDirectoryTool::NAME,
+        GrepTool::NAME,
+        FindPathTool::NAME,
+    ];
+
+    // With a folder, in the default mode ("write", shown as Agent): the model
+    // is offered the file tools and the terminal.
+    let project = Project::test(fs.clone(), [path!("/test").as_ref()], cx).await;
+    let thread = new_thread(project, cx);
+    thread.read_with(cx, |thread, cx| {
+        assert!(thread.has_open_folder(cx));
+        assert_eq!(thread.profile().as_str(), "write");
+    });
+    thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["hello"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let completion = fake.pending_completions().pop().unwrap();
+    let with_folder = tool_names_for_completion(&completion);
+    for name in writes_or_runs.iter().chain(&reads) {
+        assert!(
+            with_folder.iter().any(|tool| tool == name),
+            "expected {name} with a folder open, got: {with_folder:?}"
+        );
+    }
+    let system_prompt = completion.messages[0].string_contents();
+    assert!(system_prompt.contains("root directories"));
+    assert!(!system_prompt.contains("No folder is open"));
+    fake.end_last(&model);
+    cx.run_until_parked();
+
+    // Without a folder, same mode: the agent answers, and gets nothing that
+    // touches files or a terminal. The request that goes to the model is the
+    // proof, not the registry: every tool is still registered.
+    let empty_project = Project::test(fs.clone(), [], cx).await;
+    let thread = new_thread(empty_project.clone(), cx);
+    thread.read_with(cx, |thread, cx| {
+        assert!(!thread.has_open_folder(cx));
+        assert_eq!(thread.profile().as_str(), "write");
+        assert!(thread.has_registered_tool(EditFileTool::NAME));
+        assert!(thread.has_registered_tool(TerminalTool::NAME));
+    });
+    thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["hello"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let completion = fake.pending_completions().pop().unwrap();
+    let without_folder = tool_names_for_completion(&completion);
+    assert_eq!(
+        without_folder,
+        vec![FetchTool::NAME.to_string()],
+        "without a folder only tools that touch nothing on this machine may be offered"
+    );
+    let system_prompt = completion.messages[0].string_contents();
+    assert!(system_prompt.contains("No folder is open"));
+    assert!(!system_prompt.contains("root directories:"));
+    fake.end_last(&model);
+    cx.run_until_parked();
+
+    // The same in every built-in mode: "ask" reads files when a folder is
+    // open, and must not read the home directory when none is.
+    for profile in ["ask", "write", "minimal"] {
+        thread.update(cx, |thread, cx| {
+            thread.set_profile(AgentProfileId(profile.into()), cx);
+            let names = thread.enabled_tool_names(cx);
+            for name in writes_or_runs.iter().chain(&reads) {
+                assert!(
+                    !names.iter().any(|tool| tool == name),
+                    "{name} offered without a folder in profile {profile}: {names:?}"
+                );
+            }
+            assert!(
+                names.len() <= 1,
+                "unexpected tools without a folder in profile {profile}: {names:?}"
+            );
+        });
+    }
+
+    // Opening a folder in the same window gives the mode its tools back.
+    thread.update(cx, |thread, cx| {
+        thread.set_profile(AgentProfileId("write".into()), cx)
+    });
+    empty_project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/test"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    thread.read_with(cx, |thread, cx| {
+        assert!(thread.has_open_folder(cx));
+        let names = thread.enabled_tool_names(cx);
+        for name in writes_or_runs.iter().chain(&reads) {
+            assert!(
+                names.iter().any(|tool| tool == name),
+                "expected {name} once a folder is open, got: {names:?}"
+            );
+        }
+    });
+}
+
+/// A tool that needs a folder refuses to run when the last folder was closed
+/// during the turn that called it.
+#[gpui::test]
+async fn test_tool_call_refused_once_the_folder_is_closed(cx: &mut TestAppContext) {
+    let fake = init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({ "main.rs": "fn main() {}" }))
+        .await;
+    let project = Project::test(fs.clone(), [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry = cx.new(|cx| ContextServerRegistry::new(context_server_store, cx));
+    let model = fake.model("fake");
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let thread = cx.new(|cx| {
+        let mut thread = Thread::new(
+            project.clone(),
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(model.clone()),
+            cx,
+        );
+        thread.add_default_tools(environment, cx);
+        thread
+    });
+
+    let _events = thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["list the folder"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // The folder goes away while the model is answering.
+    project.update(cx, |project, cx| {
+        let ids = project
+            .visible_worktrees(cx)
+            .map(|worktree| worktree.read(cx).id())
+            .collect::<Vec<_>>();
+        for id in ids {
+            project.remove_worktree(id, cx);
+        }
+    });
+    cx.run_until_parked();
+
+    fake.send_last_event(
+        &model,
+        LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+            id: "tool_1".into(),
+            name: ListDirectoryTool::NAME.into(),
+            raw_input: json!({"path": "test"}).to_string(),
+            input: language_model::LanguageModelToolUseInput::Json(json!({"path": "test"})),
+            is_input_complete: true,
+            thought_signature: None,
+        }),
+    );
+    fake.end_last(&model);
+    cx.run_until_parked();
+
+    let completion = fake.pending_completions().pop().unwrap();
+    let last = completion.messages.last().unwrap();
+    let refused = last.content.iter().any(|content| match content {
+        language_model::MessageContent::ToolResult(result) => {
+            result.is_error
+                && result.content.iter().any(|content| {
+                    matches!(
+                        content,
+                        language_model::LanguageModelToolResultContent::Text(text)
+                            if text.as_ref() == crate::NO_FOLDER_TOOL_ERROR
+                    )
+                })
+        }
+        _ => false,
+    });
+    assert!(refused, "expected the no-folder refusal, got: {last:?}");
+    assert!(
+        tool_names_for_completion(&completion)
+            .iter()
+            .all(|tool| tool == FetchTool::NAME),
+        "the next request must not offer file tools: {:?}",
+        tool_names_for_completion(&completion)
+    );
+}
+
 #[gpui::test]
 async fn test_thread_tools_feature_gating(cx: &mut TestAppContext) {
     let fake = init_test(cx);
@@ -7360,7 +7601,10 @@ async fn test_subagent_auto_compaction(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn test_subagent_compaction_respects_settings_and_context_window(cx: &mut TestAppContext) {
     for (enabled, max_tokens, max_output_tokens, input_tokens) in [
-        (true, 1_000_000, None, 899_999),
+        // Unaligned default: a threshold given as a share of the window ("90%")
+        // is capped at `AUTO_COMPACT_PERCENTAGE_TOKEN_CAP` (200 000 tokens), so
+        // a 1M-token model stays uncompacted up to 199 999, not 899 999.
+        (true, 1_000_000, None, 199_999),
         (false, 1_000_000, None, 799_999),
         (true, 79_999, None, 63_999),
         (true, 100_000, Some(20_001), 79_999),
@@ -8240,7 +8484,7 @@ async fn test_edit_file_tool_allow_still_prompts_for_local_settings(cx: &mut Tes
     fs.insert_tree(
         "/root",
         json!({
-            ".zed": {
+            ".unaligned": {
                 "settings.json": "{}"
             },
             "README.md": "# Hello"
@@ -8279,13 +8523,13 @@ async fn test_edit_file_tool_allow_still_prompts_for_local_settings(cx: &mut Tes
         language_registry,
     ));
 
-    // Editing a file inside .zed/ should still prompt even with global default: allow,
+    // Editing a file inside .unaligned/ should still prompt even with global default: allow,
     // because local settings paths are sensitive and require confirmation regardless.
     let (event_stream, mut rx) = crate::ToolCallEventStream::test();
     let _task = cx.update(|cx| {
         tool.run(
             ToolInput::resolved(crate::EditFileToolInput {
-                path: "root/.zed/settings.json".into(),
+                path: "root/.unaligned/settings.json".into(),
                 edits: vec![],
             }),
             event_stream,

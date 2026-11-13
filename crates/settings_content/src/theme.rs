@@ -217,7 +217,7 @@ pub struct ThemeSettingsContent {
     /// The name of a font to use for rendering Mermaid diagrams in the agent
     /// panel and markdown preview. Falls back to the UI font if unset.
     pub mermaid_font_family: Option<FontFamilyName>,
-    /// The name of the Zed theme to use.
+    /// The name of the theme to use.
     pub theme: Option<ThemeSelection>,
     /// The name of the icon theme to use.
     pub icon_theme: Option<IconThemeSelection>,
@@ -243,6 +243,69 @@ pub struct ThemeSettingsContent {
     /// These values will override the ones on the specified theme
     #[serde(default)]
     pub theme_overrides: HashMap<String, ThemeStyleContent>,
+
+    /// How round the corners of buttons, inputs, menus and other surfaces are.
+    ///
+    /// "theme" follows the active theme (the Unaligned themes are square, most others are round);
+    /// "square", "soft" and "round" force one style on every theme.
+    ///
+    /// Default: "theme"
+    pub corners: Option<CornersSetting>,
+
+    /// The accent color: the fill of the primary button, the marker of the active item, links,
+    /// the cursor and the selection.
+    ///
+    /// "theme" keeps the active theme's own accent; a color such as "#e5322d" replaces it on
+    /// every theme.
+    ///
+    /// Default: "theme"
+    pub accent: Option<AccentSetting>,
+}
+
+/// The accent color setting: `"theme"` or a hex color such as `"#e5322d"`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MergeFrom)]
+#[serde(transparent)]
+pub struct AccentSetting(pub String);
+
+impl AccentSetting {
+    /// The value that keeps the active theme's own accent.
+    pub const THEME: &'static str = "theme";
+
+    /// The color the user asked for, or `None` when the accent follows the theme.
+    pub fn custom_color(&self) -> Option<&str> {
+        let value = self.0.trim();
+        if value.is_empty() || value.eq_ignore_ascii_case(Self::THEME) {
+            None
+        } else {
+            Some(value)
+        }
+    }
+}
+
+impl Default for AccentSetting {
+    fn default() -> Self {
+        Self(Self::THEME.to_string())
+    }
+}
+
+impl JsonSchema for AccentSetting {
+    fn schema_name() -> Cow<'static, str> {
+        "AccentSetting".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        use schemars::json_schema;
+        json_schema!({
+            "anyOf": [
+                { "type": "string", "const": "theme" },
+                {
+                    "type": "string",
+                    "pattern": "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$",
+                    "format": "color"
+                }
+            ]
+        })
+    }
 }
 
 /// A font size value in pixels, wrapping around `f32` for custom settings UI rendering.
@@ -341,8 +404,8 @@ pub enum ThemeSelection {
     },
 }
 
-pub const DEFAULT_LIGHT_THEME: &'static str = "One Light";
-pub const DEFAULT_DARK_THEME: &'static str = "One Dark";
+pub const DEFAULT_LIGHT_THEME: &'static str = "Unaligned Light";
+pub const DEFAULT_DARK_THEME: &'static str = "Unaligned";
 
 impl Default for ThemeSelection {
     fn default() -> Self {
@@ -416,7 +479,7 @@ pub enum ThemeAppearanceMode {
 }
 
 /// Specifies the density of the UI.
-/// Note: This setting is still experimental. See [this tracking issue](https://github.com/zed-industries/zed/issues/18078)
+/// Note: This setting is still experimental.
 #[derive(
     Debug,
     Default,
@@ -529,6 +592,9 @@ pub struct ThemeStyleContent {
     #[serde(rename = "background.appearance")]
     pub window_background_appearance: Option<WindowBackgroundContent>,
 
+    /// How round the corners of buttons, inputs, menus and other surfaces are: "square", "soft" or "round". A theme that does not say is round.
+    pub corners: Option<CornerStyleContent>,
+
     #[serde(default)]
     pub accents: Vec<AccentContent>,
 
@@ -595,6 +661,10 @@ pub struct ThemeColorsContent {
     /// Border color. Used for disabled elements, like a disabled input or button.
     #[serde(rename = "border.disabled")]
     pub border_disabled: Option<ThemeColor>,
+
+    /// Border color. Used for the outline of things the user can type in or press (inputs, outlined buttons, key caps) and for the edge of raised surfaces. Falls back to `border`.
+    #[serde(rename = "border.strong")]
+    pub border_strong: Option<ThemeColor>,
 
     /// Background color. Used for elevated surfaces, like a context menu, popup, or dialog.
     #[serde(rename = "elevated_surface.background")]
@@ -707,6 +777,22 @@ pub struct ThemeColorsContent {
     /// Text Color. Color used for emphasis or highlighting certain text, like an active filter or a matched character in a search.
     #[serde(rename = "text.accent")]
     pub text_accent: Option<ThemeColor>,
+
+    /// Text Color. The faintest text that must still be readable: section labels, panel titles, table headers. Falls back to `text.muted`.
+    #[serde(rename = "text.faint")]
+    pub text_faint: Option<ThemeColor>,
+
+    /// Background Color. The fill of the primary action of a view and of the marker of the active or selected thing. Falls back to the local player's cursor color.
+    #[serde(rename = "accent.background")]
+    pub accent_background: Option<ThemeColor>,
+
+    /// Background Color. The hover state of an element filled with `accent.background`. Falls back to `accent.background`, lightened on dark themes and darkened on light themes.
+    #[serde(rename = "accent.hover")]
+    pub accent_hover: Option<ThemeColor>,
+
+    /// Text Color. Text and icons drawn on `accent.background`. Falls back to black or white, whichever contrasts more with `accent.background`.
+    #[serde(rename = "accent.foreground")]
+    pub accent_foreground: Option<ThemeColor>,
 
     /// Fill Color. Used for the default fill color of an icon.
     #[serde(rename = "icon")]
@@ -1353,6 +1439,46 @@ pub struct StatusColorsContent {
 
     #[serde(rename = "warning.border")]
     pub warning_border: Option<ThemeColor>,
+}
+
+/// How round a theme draws the corners of buttons, inputs, menus and other surfaces.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, JsonSchema, MergeFrom)]
+#[serde(rename_all = "snake_case")]
+pub enum CornerStyleContent {
+    /// No rounding at all.
+    Square,
+    /// Half of the usual rounding.
+    Soft,
+    /// The usual rounding.
+    Round,
+}
+
+/// Whether corners follow the theme or are forced to one style.
+#[derive(
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CornersSetting {
+    /// Use what the active theme asks for.
+    #[default]
+    Theme,
+    /// Square corners, whatever the theme says.
+    Square,
+    /// Slightly rounded corners, whatever the theme says.
+    Soft,
+    /// Rounded corners, whatever the theme says.
+    Round,
 }
 
 /// The background appearance of the window.

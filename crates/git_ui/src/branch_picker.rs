@@ -19,8 +19,8 @@ use settings::Settings;
 use std::sync::Arc;
 use time::OffsetDateTime;
 use ui::{
-    Banner, ContextMenu, Divider, HighlightedLabel, Indicator, KeyBinding, ListItem,
-    ListItemSpacing, ListSubHeader, PopoverMenu, PopoverMenuHandle, Severity, Tooltip, prelude::*,
+    Banner, ContextMenu, Divider, HighlightedLabel, Indicator, ListItem, ListItemSpacing,
+    ListSubHeader, PopoverMenu, PopoverMenuHandle, Severity, Tooltip, prelude::*,
 };
 use ui_input::ErasedEditor;
 use util::ResultExt;
@@ -52,25 +52,25 @@ actions!(
 
 pub fn checkout_branch(
     workspace: &mut Workspace,
-    _: &zed_actions::git::CheckoutBranch,
+    _: &app_actions::git::CheckoutBranch,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    open(workspace, &zed_actions::git::Branch, window, cx);
+    open(workspace, &app_actions::git::Branch, window, cx);
 }
 
 pub fn switch(
     workspace: &mut Workspace,
-    _: &zed_actions::git::Switch,
+    _: &app_actions::git::Switch,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    open(workspace, &zed_actions::git::Branch, window, cx);
+    open(workspace, &app_actions::git::Branch, window, cx);
 }
 
 pub fn open(
     workspace: &mut Workspace,
-    _: &zed_actions::git::Branch,
+    _: &app_actions::git::Branch,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -1070,7 +1070,7 @@ impl BranchListDelegate {
             .icon_size(IconSize::Small)
             .toggle_state(self.branch_filter != BranchFilter::All)
             .when(self.branch_filter != BranchFilter::All, |this| {
-                this.indicator(Indicator::dot().color(Color::Info))
+                this.indicator(Indicator::dot().color(Color::Accent))
             })
     }
 
@@ -1333,50 +1333,46 @@ impl PickerDelegate for BranchListDelegate {
                         .when_some(warning_banner(), |this, banner| this.child(banner))
                 })
                 .child(
-                    h_flex()
-                        .h_9()
-                        .px_2p5()
-                        .flex_none()
-                        .overflow_hidden()
-                        .child(editor.clone())
-                        .when(self.has_filter_menu, |this| {
-                            let branch_filter = self.branch_filter;
-                            let focus_handle = self.focus_handle.clone();
+                    // The pickers' shared query row: search icon, 36px, the
+                    // 12px inset.
+                    picker::query_row(editor.clone()).when(self.has_filter_menu, |this| {
+                        let branch_filter = self.branch_filter;
+                        let focus_handle = self.focus_handle.clone();
 
-                            this.gap_1().justify_between().child(
-                                PopoverMenu::new("branch-filter-menu")
-                                    .with_handle(self.branch_filter_menu_handle.clone())
-                                    .trigger_with_tooltip(
-                                        self.branch_filter_trigger(),
-                                        self.branch_filter_tooltip(),
-                                    )
-                                    .menu(move |window, cx| {
-                                        Some(branch_filter_menu(
-                                            branch_filter,
-                                            focus_handle.clone(),
-                                            window,
-                                            cx,
-                                        ))
-                                    })
-                                    .map(|this| {
-                                        if editor_bottom {
-                                            this.anchor(gpui::Anchor::BottomRight)
-                                                .attach(gpui::Anchor::TopRight)
-                                                .offset(gpui::Point {
-                                                    x: px(0.0),
-                                                    y: px(-1.0),
-                                                })
-                                        } else {
-                                            this.anchor(gpui::Anchor::TopRight)
-                                                .attach(gpui::Anchor::BottomRight)
-                                                .offset(gpui::Point {
-                                                    x: px(1.0),
-                                                    y: px(1.0),
-                                                })
-                                        }
-                                    }),
-                            )
-                        }),
+                        this.child(
+                            PopoverMenu::new("branch-filter-menu")
+                                .with_handle(self.branch_filter_menu_handle.clone())
+                                .trigger_with_tooltip(
+                                    self.branch_filter_trigger(),
+                                    self.branch_filter_tooltip(),
+                                )
+                                .menu(move |window, cx| {
+                                    Some(branch_filter_menu(
+                                        branch_filter,
+                                        focus_handle.clone(),
+                                        window,
+                                        cx,
+                                    ))
+                                })
+                                .map(|this| {
+                                    if editor_bottom {
+                                        this.anchor(gpui::Anchor::BottomRight)
+                                            .attach(gpui::Anchor::TopRight)
+                                            .offset(gpui::Point {
+                                                x: px(0.0),
+                                                y: px(-1.0),
+                                            })
+                                    } else {
+                                        this.anchor(gpui::Anchor::TopRight)
+                                            .attach(gpui::Anchor::BottomRight)
+                                            .offset(gpui::Point {
+                                                x: px(1.0),
+                                                y: px(1.0),
+                                            })
+                                    }
+                                }),
+                        )
+                    }),
                 )
                 .when(editor_start, |this| {
                     this.child(Divider::horizontal())
@@ -2026,13 +2022,8 @@ impl PickerDelegate for BranchListDelegate {
         }
         let focus_handle = self.focus_handle.clone();
 
-        let footer_container = || {
-            h_flex()
-                .w_full()
-                .p_1p5()
-                .border_t_1()
-                .border_color(cx.theme().colors().border_variant)
-        };
+        // The pickers' shared footer: one height, one line, small muted buttons.
+        let footer_container = || picker::footer(cx);
 
         match self.state {
             PickerState::List => {
@@ -2045,15 +2036,12 @@ impl PickerDelegate for BranchListDelegate {
                     .map(|default_branch| {
                         let button_label = format!("Create New From: {default_branch}");
 
-                        Button::new("branch-from-default", button_label)
-                            .key_binding(
-                                KeyBinding::for_action_in(
-                                    &menu::SecondaryConfirm,
-                                    &focus_handle,
-                                    cx,
-                                )
-                                .map(|kb| kb.size(rems_from_px(12_f32))),
-                            )
+                        picker::footer_button("branch-from-default", button_label)
+                            .key_binding(picker::footer_key_cap(
+                                &menu::SecondaryConfirm,
+                                &focus_handle,
+                                cx,
+                            ))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.delegate.confirm(true, window, cx);
                             }))
@@ -2072,15 +2060,12 @@ impl PickerDelegate for BranchListDelegate {
                         !selected_branch.is_some_and(|branch| branch.is_head),
                         |this| {
                             this.child(
-                                Button::new("delete-branch", delete_label)
-                                    .key_binding(
-                                        KeyBinding::for_action_in(
-                                            &branch_picker::DeleteBranch,
-                                            &focus_handle,
-                                            cx,
-                                        )
-                                        .map(|kb| kb.size(rems_from_px(12_f32))),
-                                    )
+                                picker::footer_button("delete-branch", delete_label)
+                                    .key_binding(picker::footer_key_cap(
+                                        &branch_picker::DeleteBranch,
+                                        &focus_handle,
+                                        cx,
+                                    ))
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
                                             branch_picker::DeleteBranch.boxed_clone(),
@@ -2091,11 +2076,8 @@ impl PickerDelegate for BranchListDelegate {
                         },
                     )
                     .child(
-                        Button::new("switch_branch", "Switch")
-                            .key_binding(
-                                KeyBinding::for_action_in(&menu::Confirm, &focus_handle, cx)
-                                    .map(|kb| kb.size(rems_from_px(12_f32))),
-                            )
+                        picker::footer_button("switch_branch", "Switch")
+                            .key_binding(picker::footer_key_cap(&menu::Confirm, &focus_handle, cx))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.delegate.confirm(false, window, cx);
                             })),
@@ -2106,15 +2088,12 @@ impl PickerDelegate for BranchListDelegate {
                         .justify_end()
                         .map(|this| match branch_from_default_button {
                             Some(button) => this.child(button).child(
-                                Button::new("create", "Create")
-                                    .key_binding(
-                                        KeyBinding::for_action_in(
-                                            &menu::Confirm,
-                                            &focus_handle,
-                                            cx,
-                                        )
-                                        .map(|kb| kb.size(rems_from_px(12_f32))),
-                                    )
+                                picker::footer_button("create", "Create")
+                                    .key_binding(picker::footer_key_cap(
+                                        &menu::Confirm,
+                                        &focus_handle,
+                                        cx,
+                                    ))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.delegate.confirm(false, window, cx);
                                     })),
@@ -2129,15 +2108,12 @@ impl PickerDelegate for BranchListDelegate {
                     self.default_branch.as_ref().map(|default_branch| {
                         let button_label = format!("Create New From: {default_branch}");
 
-                        Button::new("branch-from-default", button_label)
-                            .key_binding(
-                                KeyBinding::for_action_in(
-                                    &menu::SecondaryConfirm,
-                                    &focus_handle,
-                                    cx,
-                                )
-                                .map(|kb| kb.size(rems_from_px(12_f32))),
-                            )
+                        picker::footer_button("branch-from-default", button_label)
+                            .key_binding(picker::footer_key_cap(
+                                &menu::SecondaryConfirm,
+                                &focus_handle,
+                                cx,
+                            ))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.delegate.confirm(true, window, cx);
                             }))
@@ -2151,11 +2127,12 @@ impl PickerDelegate for BranchListDelegate {
                             this.child(button)
                         })
                         .child(
-                            Button::new("create-new-branch", "Create")
-                                .key_binding(
-                                    KeyBinding::for_action_in(&menu::Confirm, &focus_handle, cx)
-                                        .map(|kb| kb.size(rems_from_px(12_f32))),
-                                )
+                            picker::footer_button("create-new-branch", "Create")
+                                .key_binding(picker::footer_key_cap(
+                                    &menu::Confirm,
+                                    &focus_handle,
+                                    cx,
+                                ))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.delegate.confirm(false, window, cx);
                                 })),
@@ -2167,11 +2144,8 @@ impl PickerDelegate for BranchListDelegate {
                 footer_container()
                     .justify_end()
                     .child(
-                        Button::new("confirm-create-remote", "Confirm")
-                            .key_binding(
-                                KeyBinding::for_action_in(&menu::Confirm, &focus_handle, cx)
-                                    .map(|kb| kb.size(rems_from_px(12_f32))),
-                            )
+                        picker::footer_button("confirm-create-remote", "Confirm")
+                            .key_binding(picker::footer_key_cap(&menu::Confirm, &focus_handle, cx))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.delegate.confirm(false, window, cx);
                             }))

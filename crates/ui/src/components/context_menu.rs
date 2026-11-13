@@ -1984,7 +1984,7 @@ impl ContextMenu {
         let icon_color = if *disabled {
             Color::Muted
         } else if toggle.is_some() {
-            icon_color.unwrap_or(Color::Accent)
+            icon_color.unwrap_or(Color::Default)
         } else {
             icon_color.unwrap_or(Color::Default)
         };

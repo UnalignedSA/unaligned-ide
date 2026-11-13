@@ -1,7 +1,6 @@
 use crate::KeyBinding;
 use crate::prelude::*;
-use gpui::{AnyElement, App, BoxShadow, FontStyle, Hsla, IntoElement, Window};
-use theme::Appearance;
+use gpui::{AnyElement, App, Hsla, IntoElement, Window};
 
 /// Represents a hint for a keybinding, optionally with a prefix and suffix.
 ///
@@ -207,17 +206,10 @@ impl KeybindingHint {
 impl RenderOnce for KeybindingHint {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let is_light = cx.theme().appearance() == Appearance::Light;
 
-        let border_color =
-            self.background_color
-                .blend(colors.text.alpha(if is_light { 0.08 } else { 0.16 }));
-
-        let bg_color = self
-            .background_color
-            .blend(colors.text_accent.alpha(if is_light { 0.05 } else { 0.1 }));
-
-        let shadow_color = colors.text.alpha(if is_light { 0.04 } else { 0.08 });
+        // A flat keycap: the caller's ground with a 1px strong line, no tint, no shadow.
+        let border_color = colors.border_strong;
+        let bg_color = self.background_color;
 
         let size = self
             .size
@@ -225,11 +217,8 @@ impl RenderOnce for KeybindingHint {
 
         let kb_size = size - px(2.0);
 
-        let mut base = h_flex();
-
-        base.text_style().font_style = Some(FontStyle::Italic);
-
-        base.gap_1()
+        h_flex()
+            .gap_1()
             .font_buffer(cx)
             .text_size(size)
             .text_color(colors.text_disabled)
@@ -237,12 +226,11 @@ impl RenderOnce for KeybindingHint {
             .child(
                 h_flex()
                     .rounded_sm()
-                    .px_0p5()
+                    .px_1()
                     .mr_0p5()
                     .border_1()
                     .border_color(border_color)
                     .bg(bg_color)
-                    .shadow(vec![BoxShadow::new(px(0.), px(1.), shadow_color)])
                     .child(self.keybinding.size(rems_from_px(kb_size))),
             )
             .children(self.suffix)

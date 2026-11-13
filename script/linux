@@ -37,6 +37,7 @@ if [[ -n $apt ]]; then
     libgit2-dev
     libglib2.0-dev
     libssl-dev
+    # Next line: only needed with --features call/webrtc (the default build has no WebRTC).
     libva-dev
     libvulkan1
     libwayland-dev
@@ -68,6 +69,8 @@ if [[ -n $apt ]]; then
   elif (grep -qP 'PRETTY_NAME="((Debian|Raspbian).+12|Linux Mint 21|.+22\.04)' /etc/os-release); then
     deps+=( libstdc++-12-dev )
   elif (grep -qP 'PRETTY_NAME="((Debian|Raspbian).+11|Linux Mint 20|.+20\.04)' /etc/os-release); then
+    # This whole branch is only needed with --features call/webrtc: the default build
+    # has no WebRTC and does not compile webrtc-sys.
     # Ubuntu 20.04 ships clang-10 and libstdc++-10 which lack adequate C++20
     # support for building webrtc-sys (requires -std=c++20, lambdas in
     # unevaluated contexts from clang 17+, and working std::ranges in the
@@ -119,6 +122,7 @@ if [[ -n $dnf ]] || [[ -n $yum ]]; then
     alsa-lib-devel
     fontconfig-devel
     glib2-devel
+    # Next line: only needed with --features call/webrtc (the default build has no WebRTC).
     libva-devel
     wayland-devel
     libxcb-devel
@@ -185,6 +189,7 @@ if [[ -n $zyp ]]; then
     cmake
     fontconfig-devel
     gcc
+    # Next line: only needed with --features call/webrtc (the default build has no WebRTC).
     libva-devel
     gcc-c++
     glib2-devel
@@ -224,6 +229,7 @@ if [[ -n $pacman ]]; then
     alsa-lib
     fontconfig
     glib2
+    # Next line: only needed with --features call/webrtc (the default build has no WebRTC).
     libva
     wayland
     libgit2
@@ -259,6 +265,7 @@ if [[ -n $xbps ]]; then
     alsa-lib-devel
     fontconfig-devel
     glib-devel
+    # Next line: only needed with --features call/webrtc (the default build has no WebRTC).
     libva-devel
     libxcb-devel
     libxkbcommon-devel
@@ -289,6 +296,7 @@ if [[ -n $emerge ]]; then
     llvm-core/lld
     media-libs/alsa-lib
     media-libs/fontconfig
+    # Next line: only needed with --features call/webrtc (the default build has no WebRTC).
     media-libs/libva
     media-libs/vulkan-loader
     x11-libs/libxcb

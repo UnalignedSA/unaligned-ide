@@ -57,6 +57,8 @@ impl VsCodeThemeConverter {
             appearance,
             style: ThemeStyleContent {
                 window_background_appearance: Some(WindowBackgroundContent::Opaque),
+                // VS Code themes do not describe corners: the IDE's default (round) applies.
+                corners: None,
                 accents: Vec::new(), //TODO can we read this from the theme?
                 colors: theme_colors,
                 status: status_colors,
@@ -186,6 +188,15 @@ impl VsCodeThemeConverter {
             surface_background: vscode_colors.panel.background.as_deref().map(Into::into),
             background: vscode_editor_background.as_deref().map(Into::into),
             element_background: vscode_colors.button.background.as_deref().map(Into::into),
+            // VS Code's primary button is the accent fill: taking its three colours keeps the
+            // imported theme's own button instead of the computed fallbacks.
+            accent_background: vscode_colors.button.background.as_deref().map(Into::into),
+            accent_hover: vscode_colors
+                .button
+                .hover_background
+                .as_deref()
+                .map(Into::into),
+            accent_foreground: vscode_colors.button.foreground.as_deref().map(Into::into),
             element_hover: vscode_colors
                 .list
                 .hover_background

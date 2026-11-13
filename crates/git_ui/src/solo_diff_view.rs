@@ -27,7 +27,7 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use ui::{DiffStat, Divider, Tooltip, prelude::*};
+use ui::{Divider, Tooltip, prelude::*};
 use util::paths::{PathExt as _, PathStyle};
 use workspace::{
     Item, ItemHandle, ItemNavHistory, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
@@ -777,7 +777,12 @@ impl Render for SoloDiffGitToolbar {
             .flex_wrap()
             .justify_between()
             .children(diff_stat.map(|stat| {
-                DiffStat::new("solo-diff-stat", stat.added as usize, stat.deleted as usize)
+                crate::diff_stat_text(
+                    "solo-diff-stat",
+                    stat.added as usize,
+                    stat.deleted as usize,
+                    cx,
+                )
             }))
             .child(Divider::vertical().ml_1())
             .child(

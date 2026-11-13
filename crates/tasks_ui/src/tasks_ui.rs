@@ -385,7 +385,7 @@ pub fn task_contexts(
 
     let active_editor = active_item.and_then(|item| item.act_as::<Editor>(cx));
     // Files from single-file worktrees provide no worktree context, but their editors
-    // must still provide file variables such as `ZED_FILE`.
+    // must still provide file variables such as `IDE_FILE`.
     let active_project_editor = active_item_project_path
         .is_some()
         .then(|| active_editor.clone())
@@ -558,7 +558,7 @@ mod tests {
         {
             "label": "print global task context",
             "command": "echo",
-            "args": ["$ZED_WORKTREE_ROOT", "$ZED_FILENAME", "${ZED_RELATIVE_FILE:no file}"]
+            "args": ["$IDE_WORKTREE_ROOT", "$IDE_FILENAME", "${IDE_RELATIVE_FILE:no file}"]
         }
     ]"#;
 
@@ -570,7 +570,7 @@ mod tests {
         fs.insert_tree(
             worktree_root,
             json!({
-                ".zed": {
+                ".unaligned": {
                     "tasks.json": "[]",
                 },
                 "scenes": {
@@ -788,8 +788,8 @@ mod tests {
                             {
                                 "label": "pytest from global tasks",
                                 "command": "python3",
-                                "args": ["-m", "pytest", "${ZED_CUSTOM_PYTHON_TEST_TARGET:.}"],
-                                "cwd": "$ZED_WORKTREE_ROOT"
+                                "args": ["-m", "pytest", "${IDE_CUSTOM_PYTHON_TEST_TARGET:.}"],
+                                "cwd": "$IDE_WORKTREE_ROOT"
                             }
                         ]"#,
                     ),
@@ -867,7 +867,7 @@ mod tests {
             ]),
             project_env: HashMap::from_iter([
                 ("SOURCE_DIRECTORY".to_string(), "zed-config".to_string()),
-                ("ZED_CONFIG_ONLY".to_string(), "1".to_string()),
+                ("IDE_CONFIG_ONLY".to_string(), "1".to_string()),
             ]),
         };
 
@@ -893,11 +893,11 @@ mod tests {
                     label: "print global task context".to_string(),
                     command: "echo".to_string(),
                     args: vec![
-                        "$ZED_WORKTREE_ROOT".to_string(),
-                        "$ZED_FILENAME".to_string(),
-                        "${ZED_RELATIVE_FILE:no file}".to_string(),
-                        "${ZED_MAIN_GIT_WORKTREE:no repository}".to_string(),
-                        "${ZED_CUSTOM_PYTHON_TEST_TARGET:.}".to_string(),
+                        "$IDE_WORKTREE_ROOT".to_string(),
+                        "$IDE_FILENAME".to_string(),
+                        "${IDE_RELATIVE_FILE:no file}".to_string(),
+                        "${IDE_MAIN_GIT_WORKTREE:no repository}".to_string(),
+                        "${IDE_CUSTOM_PYTHON_TEST_TARGET:.}".to_string(),
                     ],
                     ..TaskTemplate::default()
                 },
@@ -915,20 +915,20 @@ mod tests {
             ]
         );
         assert_eq!(global_task.resolved.cwd.as_deref(), Some(project_root));
-        assert_eq!(global_task.resolved.env.get("ZED_CONFIG_ONLY"), None);
+        assert_eq!(global_task.resolved.env.get("IDE_CONFIG_ONLY"), None);
         assert_eq!(global_task.resolved.env.get("SOURCE_DIRECTORY"), None);
 
         let worktree_task = task_contexts
             .resolve_task(
                 &TaskSourceKind::Worktree {
                     id: project_worktree_id,
-                    directory_in_worktree: rel_path(".zed").into(),
+                    directory_in_worktree: rel_path(".unaligned").into(),
                     id_base: "local worktree tasks".into(),
                 },
                 &TaskTemplate {
                     label: "print worktree root".to_string(),
                     command: "echo".to_string(),
-                    args: vec!["$ZED_WORKTREE_ROOT".to_string()],
+                    args: vec!["$IDE_WORKTREE_ROOT".to_string()],
                     ..TaskTemplate::default()
                 },
             )
@@ -1040,17 +1040,17 @@ mod tests {
         fs.insert_tree(
             path!("/project"),
             json!({
-                ".zed": {
+                ".unaligned": {
                     "tasks.json": r#"[
                         {
                             "label": "print worktree root",
                             "command": "echo",
-                            "args": ["$ZED_WORKTREE_ROOT", "${ZED_FILENAME:no file}"]
+                            "args": ["$IDE_WORKTREE_ROOT", "${IDE_FILENAME:no file}"]
                         },
                         {
                             "label": "print worktree root and file",
                             "command": "echo",
-                            "args": ["$ZED_WORKTREE_ROOT", "${ZED_RELATIVE_FILE:no file}", "${ZED_FILENAME:no file}"]
+                            "args": ["$IDE_WORKTREE_ROOT", "${IDE_RELATIVE_FILE:no file}", "${IDE_FILENAME:no file}"]
                         }
                     ]"#,
                 },
@@ -1197,7 +1197,7 @@ mod tests {
         fs.insert_tree(
             path!("/dir"),
             json!({
-                ".zed": {
+                ".unaligned": {
                     "tasks.json": r#"[
                             {
                                 "label": "example task",

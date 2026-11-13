@@ -1,5 +1,4 @@
 {
-  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
   "name": "Gruvbox",
   "author": "Zed Industries",
   "themes": [
@@ -9,6 +8,7 @@
       "style": {
         "accents": ["#cc241dff", "#98971aff", "#d79921ff", "#458588ff", "#b16286ff", "#689d6aff", "#d65d0eff"],
         "border": "#5b534dff",
+        "border.strong": "#736b65ff",
         "border.variant": "#494340ff",
         "border.focused": "#303a36ff",
         "border.selected": "#303a36ff",
@@ -431,6 +431,7 @@
       "style": {
         "accents": ["#cc241dff", "#98971aff", "#d79921ff", "#458588ff", "#b16286ff", "#689d6aff", "#d65d0eff"],
         "border": "#5b534dff",
+        "border.strong": "#736b65ff",
         "border.variant": "#494340ff",
         "border.focused": "#303a36ff",
         "border.selected": "#303a36ff",
@@ -853,6 +854,7 @@
       "style": {
         "accents": ["#cc241dff", "#98971aff", "#d79921ff", "#458588ff", "#b16286ff", "#689d6aff", "#d65d0eff"],
         "border": "#5b534dff",
+        "border.strong": "#736b65ff",
         "border.variant": "#494340ff",
         "border.focused": "#303a36ff",
         "border.selected": "#303a36ff",
@@ -1275,6 +1277,7 @@
       "style": {
         "accents": ["#cc241dff", "#98971aff", "#d79921ff", "#458588ff", "#b16286ff", "#689d6aff", "#d65d0eff"],
         "border": "#c8b899ff",
+        "border.strong": "#ac9c7dff",
         "border.variant": "#ddcca7ff",
         "border.focused": "#adc5ccff",
         "border.selected": "#adc5ccff",
@@ -1697,6 +1700,7 @@
       "style": {
         "accents": ["#cc241dff", "#98971aff", "#d79921ff", "#458588ff", "#b16286ff", "#689d6aff", "#d65d0eff"],
         "border": "#c8b899ff",
+        "border.strong": "#ac9c7dff",
         "border.variant": "#ddcca7ff",
         "border.focused": "#adc5ccff",
         "border.selected": "#adc5ccff",
@@ -2119,6 +2123,7 @@
       "style": {
         "accents": ["#cc241dff", "#98971aff", "#d79921ff", "#458588ff", "#b16286ff", "#689d6aff", "#d65d0eff"],
         "border": "#c8b899ff",
+        "border.strong": "#ac9c7dff",
         "border.variant": "#ddcca7ff",
         "border.focused": "#adc5ccff",
         "border.selected": "#adc5ccff",

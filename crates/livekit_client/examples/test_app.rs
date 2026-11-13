@@ -24,10 +24,10 @@ fn main() {
     SimpleLogger::init(LevelFilter::Info, Default::default()).expect("could not initialize logger");
 
     gpui_platform::application().run(|cx| {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", not(feature = "webrtc")))]
         println!("USING TEST LIVEKIT");
 
-        #[cfg(not(any(test, feature = "test-support")))]
+        #[cfg(not(any(test, feature = "test-support", not(feature = "webrtc"))))]
         println!("USING REAL LIVEKIT");
 
         gpui_tokio::init(cx);

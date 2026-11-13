@@ -21,9 +21,17 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use ui::{ContextMenu, PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*};
+use ui::{
+    CommonAnimationExt as _, ContextMenu, PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*,
+};
 use util::truncate_and_trailoff;
-use workspace::{StatusItemView, Workspace, item::ItemHandle};
+use workspace::{
+    StatusItemView, Workspace,
+    active_file_name::{
+        status_bar_icon, status_bar_item, status_bar_item_content, status_bar_text,
+    },
+    item::ItemHandle,
+};
 
 const GIT_OPERATION_DELAY: Duration = Duration::from_millis(0);
 pub const DEFERRED_SCAN_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -746,41 +754,51 @@ impl Render for ActivityIndicator {
         let activity_indicator = cx.entity().downgrade();
         let truncate_content = content.message.len() > MAX_MESSAGE_LEN;
         let has_click_handler = content.on_click.is_some();
+        let label = if truncate_content {
+            truncate_and_trailoff(&content.message, MAX_MESSAGE_LEN)
+        } else {
+            content.message.clone()
+        };
 
         result.child(
             PopoverMenu::new("activity-indicator-popover")
                 .trigger(
-                    Button::new("activity-indicator-trigger", {
-                        if truncate_content {
-                            truncate_and_trailoff(&content.message, MAX_MESSAGE_LEN)
-                        } else {
-                            content.message.clone()
-                        }
-                    })
-                    .label_size(LabelSize::Small)
-                    .tab_index(0isize)
-                    .map(|this| match content.icon {
-                        ActivityIcon::LoadingSpinner => this.loading(true),
-                        ActivityIcon::Icon(icon_name) => this.start_icon(
-                            Icon::new(icon_name)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        ),
-                    })
-                    .map(|button| {
-                        if truncate_content {
-                            button.tooltip(Tooltip::text(content.message))
-                        } else {
-                            button.when_some(content.tooltip_message, |this, tooltip_message| {
-                                this.tooltip(Tooltip::text(tooltip_message))
-                            })
-                        }
-                    })
-                    .when_some(content.on_click, |this, handler| {
-                        this.on_click(cx.listener(move |this, _, window, cx| {
-                            handler(this, window, cx);
-                        }))
-                    }),
+                    status_bar_item("activity-indicator-trigger", cx)
+                        .tab_index(0isize)
+                        .aria_label(label.clone())
+                        .child(
+                            status_bar_item_content()
+                                .map(|this| match content.icon {
+                                    ActivityIcon::LoadingSpinner => this.child(
+                                        status_bar_icon(IconName::LoadCircle)
+                                            .with_keyed_rotate_animation(
+                                                "activity-indicator-spinner",
+                                                2,
+                                            ),
+                                    ),
+                                    ActivityIcon::Icon(icon_name) => {
+                                        this.child(status_bar_icon(icon_name))
+                                    }
+                                })
+                                .child(status_bar_text(label, cx)),
+                        )
+                        .map(|button| {
+                            if truncate_content {
+                                button.tooltip(Tooltip::text(content.message))
+                            } else {
+                                button.when_some(
+                                    content.tooltip_message,
+                                    |this, tooltip_message| {
+                                        this.tooltip(Tooltip::text(tooltip_message))
+                                    },
+                                )
+                            }
+                        })
+                        .when_some(content.on_click, |this, handler| {
+                            this.on_click(cx.listener(move |this, _, window, cx| {
+                                handler(this, window, cx);
+                            }))
+                        }),
                 )
                 .anchor(gpui::Anchor::BottomLeft)
                 .when(!has_click_handler, |this| {

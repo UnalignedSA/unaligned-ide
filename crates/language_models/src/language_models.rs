@@ -17,7 +17,6 @@ pub use crate::extension::init_proxy as init_extension_proxy;
 use crate::provider::anthropic::AnthropicLanguageModelProvider;
 use crate::provider::anthropic_compatible::AnthropicCompatibleLanguageModelProvider;
 use crate::provider::bedrock::BedrockLanguageModelProvider;
-use crate::provider::cloud::CloudLanguageModelProvider;
 use crate::provider::copilot_chat::CopilotChatLanguageModelProvider;
 use crate::provider::google::GoogleLanguageModelProvider;
 use crate::provider::llama_cpp::LlamaCppLanguageModelProvider;
@@ -29,10 +28,15 @@ use crate::provider::open_ai_compatible::OpenAiCompatibleLanguageModelProvider;
 use crate::provider::open_router::OpenRouterLanguageModelProvider;
 use crate::provider::openai_subscribed::OpenAiSubscribedProvider;
 use crate::provider::opencode::OpenCodeLanguageModelProvider;
+use crate::provider::unaligned::UnalignedLanguageModelProvider;
 use crate::provider::vercel_ai_gateway::VercelAiGatewayLanguageModelProvider;
 use crate::provider::x_ai::XAiLanguageModelProvider;
 use crate::provider::x_ai_subscribed::XAiSubscribedProvider;
 pub use crate::settings::*;
+
+/// The id of the Unaligned provider in the [`LanguageModelRegistry`]: the one
+/// place that spells it, for everything that features this provider.
+pub const UNALIGNED_PROVIDER_ID: &str = "unaligned";
 
 pub fn init(user_store: Entity<UserStore>, client: Arc<Client>, cx: &mut App) {
     language_model::set_credentials_read_gate::<SettingsStore>(ai_disabled, cx);
@@ -227,19 +231,14 @@ fn register_compatible_providers(
 
 fn register_language_model_providers(
     registry: &mut LanguageModelRegistry,
-    user_store: Entity<UserStore>,
+    _user_store: Entity<UserStore>,
     client: Arc<Client>,
     credentials_provider: Arc<dyn CredentialsProvider>,
     cx: &mut Context<LanguageModelRegistry>,
 ) {
-    registry.register_provider(
-        Arc::new(CloudLanguageModelProvider::new(
-            user_store,
-            client.clone(),
-            cx,
-        )),
-        cx,
-    );
+    // The Zed hosted provider ("zed.dev") is deliberately not registered: it
+    // needs a Zed account, and this build connects through Unaligned instead.
+    // Its code stays in `provider::cloud`.
     registry.register_provider(
         Arc::new(AnthropicLanguageModelProvider::new(
             client.http_client(),
@@ -320,6 +319,13 @@ fn register_language_model_providers(
         )),
         cx,
     );
+    let unaligned = Arc::new(UnalignedLanguageModelProvider::new(
+        client.http_client(),
+        credentials_provider.clone(),
+        cx,
+    ));
+    UnalignedLanguageModelProvider::set_global(unaligned.clone(), cx);
+    registry.register_provider(unaligned, cx);
     registry.register_provider(
         Arc::new(VercelAiGatewayLanguageModelProvider::new(
             client.http_client(),
@@ -361,6 +367,133 @@ fn register_language_model_providers(
         )),
         cx,
     );
+}
+
+/// The models of a custom endpoint, in the dialect the endpoint speaks.
+pub enum CompatibleProviderModels {
+    OpenAi(Vec<::settings::OpenAiCompatibleAvailableModel>),
+    Anthropic(Vec<::settings::AnthropicCompatibleAvailableModel>),
+}
+
+impl CompatibleProviderModels {
+    /// Models known only by their id, with the defaults the settings form
+    /// starts from. Enough to connect; limits can be tuned in settings.json.
+    pub fn from_model_ids(anthropic: bool, ids: impl IntoIterator<Item = String>) -> Self {
+        const MAX_TOKENS: u64 = 200_000;
+        const MAX_OUTPUT_TOKENS: u64 = 32_000;
+
+        if anthropic {
+            Self::Anthropic(
+                ids.into_iter()
+                    .map(|name| ::settings::AnthropicCompatibleAvailableModel {
+                        name,
+                        display_name: None,
+                        max_tokens: MAX_TOKENS,
+                        tool_override: None,
+                        max_output_tokens: Some(MAX_OUTPUT_TOKENS),
+                        default_temperature: None,
+                        extra_beta_headers: Vec::new(),
+                        mode: None,
+                        capabilities: ::settings::AnthropicCompatibleModelCapabilities {
+                            tools: true,
+                            images: false,
+                            prompt_caching: false,
+                        },
+                    })
+                    .collect(),
+            )
+        } else {
+            Self::OpenAi(
+                ids.into_iter()
+                    .map(|name| ::settings::OpenAiCompatibleAvailableModel {
+                        name,
+                        display_name: None,
+                        max_tokens: MAX_TOKENS,
+                        max_output_tokens: Some(MAX_OUTPUT_TOKENS),
+                        max_completion_tokens: Some(MAX_TOKENS),
+                        reasoning_effort: None,
+                        capabilities: ::settings::OpenAiCompatibleModelCapabilities::default(),
+                    })
+                    .collect(),
+            )
+        }
+    }
+}
+
+/// Why `name` cannot be used for a new custom endpoint, if it cannot.
+pub fn compatible_provider_name_error(name: &str, cx: &App) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("Provider Name cannot be empty");
+    }
+    let taken = LanguageModelRegistry::read_global(cx)
+        .providers()
+        .iter()
+        .any(|provider| provider.id().0.as_ref() == name || provider.name().0.as_ref() == name);
+    taken.then_some("Provider Name is already taken by another provider")
+}
+
+/// Adds an OpenAI- or Anthropic-compatible endpoint: writes it to
+/// `language_models.{openai,anthropic}_compatible` in the settings file, waits
+/// for the provider this registers, then stores its API key in the keychain.
+/// The one code path behind every "add custom endpoint" form.
+pub fn add_compatible_provider(
+    name: String,
+    api_url: String,
+    api_key: String,
+    models: CompatibleProviderModels,
+    fs: Arc<dyn fs::Fs>,
+    cx: &mut App,
+) -> gpui::Task<anyhow::Result<LanguageModelProviderId>> {
+    let provider_id = LanguageModelProviderId(name.clone().into());
+    let settings_update =
+        ::settings::update_settings_file_with_completion(fs, cx, move |settings, _cx| {
+            let language_models = settings.language_models.get_or_insert_default();
+            let key: Arc<str> = Arc::from(name.as_str());
+            match models {
+                CompatibleProviderModels::OpenAi(available_models) => {
+                    language_models
+                        .openai_compatible
+                        .get_or_insert_default()
+                        .insert(
+                            key,
+                            ::settings::OpenAiCompatibleSettingsContent {
+                                api_url,
+                                available_models,
+                                custom_headers: None,
+                            },
+                        );
+                }
+                CompatibleProviderModels::Anthropic(available_models) => {
+                    language_models
+                        .anthropic_compatible
+                        .get_or_insert_default()
+                        .insert(
+                            key,
+                            ::settings::AnthropicCompatibleSettingsContent {
+                                api_url,
+                                available_models,
+                                custom_headers: None,
+                            },
+                        );
+                }
+            }
+        });
+
+    cx.spawn(async move |cx| {
+        settings_update
+            .await
+            .map_err(|_| anyhow::anyhow!("Settings update was canceled"))??;
+
+        let set_api_key = cx.update(|cx| {
+            let provider = LanguageModelRegistry::read_global(cx)
+                .provider(&provider_id)
+                .ok_or_else(|| anyhow::anyhow!("Provider was not registered"))?;
+            anyhow::Ok(provider.set_api_key(Some(api_key), cx))
+        })?;
+        set_api_key.await?;
+
+        Ok(provider_id)
+    })
 }
 
 #[cfg(test)]

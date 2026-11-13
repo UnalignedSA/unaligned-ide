@@ -22,6 +22,7 @@ agent_settings.workspace = true
 agent_skills.workspace = true
 anyhow.workspace = true
 audio.workspace = true
+branding.workspace = true
 client.workspace = true
 cloud_api_types.workspace = true
 component.workspace = true
@@ -72,8 +73,8 @@ url.workspace = true
 ui_input.workspace = true
 util.workspace = true
 workspace.workspace = true
-zed_actions.workspace = true
-zed_credentials_provider.workspace = true
+app_actions.workspace = true
+app_credentials_provider.workspace = true
 
 [dev-dependencies]
 credentials_provider = { workspace = true, features = ["test-support"] }

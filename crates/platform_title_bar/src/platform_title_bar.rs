@@ -4,7 +4,7 @@ mod title_bar_settings;
 
 use gpui::{
     Action, AnyElement, App, Context, Decorations, Entity, Hsla, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, StatefulInteractiveElement, Styled, WeakEntity, Window,
+    MouseButton, ParentElement, Pixels, StatefulInteractiveElement, Styled, WeakEntity, Window,
     WindowButtonLayout, WindowControlArea, div, px,
 };
 use project::DisableAiSettings;
@@ -48,6 +48,219 @@ pub fn apply_title_bar_insets<E: Styled + FluentBuilder>(
         .when(right_window_controls, |header| header.pr(inset))
 }
 
+/// Left padding of the bar's content where no window control sits on that
+/// side, in rems (`pl_2`).
+const EDGE_PADDING: f32 = 0.5;
+
+/// The platform whose title bar is drawn: the one the app was built for.
+///
+/// Debug builds accept `UNALIGNED_TITLE_BAR_STYLE=windows|linux|mac` to draw
+/// another platform's bar (Linux with client-side decorations), so that the
+/// layout of the release targets can be looked at on the development machine.
+/// Only the drawing is switched: the window keeps its real behaviour.
+pub fn platform_style() -> PlatformStyle {
+    #[cfg(debug_assertions)]
+    if let Some(style) = forced_platform_style() {
+        return style;
+    }
+    PlatformStyle::platform()
+}
+
+#[cfg(debug_assertions)]
+fn forced_platform_style() -> Option<PlatformStyle> {
+    static FORCED: std::sync::OnceLock<Option<PlatformStyle>> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(
+        || match std::env::var("UNALIGNED_TITLE_BAR_STYLE").ok()?.as_str() {
+            "windows" => Some(PlatformStyle::Windows),
+            "linux" => Some(PlatformStyle::Linux),
+            "mac" => Some(PlatformStyle::Mac),
+            _ => None,
+        },
+    )
+}
+
+/// Whether a debug build was asked to draw the Linux bar on another platform.
+fn linux_style_is_forced() -> bool {
+    #[cfg(debug_assertions)]
+    if forced_platform_style() == Some(PlatformStyle::Linux)
+        && PlatformStyle::platform() != PlatformStyle::Linux
+    {
+        return true;
+    }
+    false
+}
+
+/// The window's decoration mode, as the title bar draws it (see
+/// [`platform_style`] for the debug-only switch).
+fn window_decorations(window: &Window) -> Decorations {
+    if linux_style_is_forced() {
+        return Decorations::Client {
+            tiling: gpui::Tiling::default(),
+        };
+    }
+    window.window_decorations()
+}
+
+/// Debug-only stand-in for the desktop's button layout when the Linux bar is
+/// drawn on another platform: `UNALIGNED_TITLE_BAR_BUTTONS` in GNOME's form
+/// without spaces ("close,minimize:maximize"), by default
+/// ":minimize,maximize,close".
+fn forced_button_layout() -> WindowButtonLayout {
+    fn side(names: &str) -> [Option<gpui::WindowButton>; gpui::MAX_BUTTONS_PER_SIDE] {
+        let mut buttons = [None; gpui::MAX_BUTTONS_PER_SIDE];
+        let known = names.split(',').filter_map(|name| match name {
+            "minimize" => Some(gpui::WindowButton::Minimize),
+            "maximize" => Some(gpui::WindowButton::Maximize),
+            "close" => Some(gpui::WindowButton::Close),
+            _ => None,
+        });
+        for (slot, button) in buttons.iter_mut().zip(known) {
+            *slot = Some(button);
+        }
+        buttons
+    }
+
+    let spec = std::env::var("UNALIGNED_TITLE_BAR_BUTTONS")
+        .unwrap_or_else(|_| ":minimize,maximize,close".to_string());
+    let (left, right) = spec.split_once(':').unwrap_or(("", spec.as_str()));
+    WindowButtonLayout {
+        left: side(left),
+        right: side(right),
+    }
+}
+
+/// Everything that decides where the window controls sit and how wide they
+/// are. Plain data, so the arithmetic can be checked for platforms that cannot
+/// be run on the machine at hand.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowControlLayout {
+    pub platform_style: PlatformStyle,
+    /// Native or simple fullscreen: no controls are drawn.
+    pub fullscreen: bool,
+    /// Linux only: the app draws the decorations itself.
+    pub client_decorations: bool,
+    /// Linux only: which buttons the desktop puts on which side.
+    pub button_layout: Option<WindowButtonLayout>,
+    /// Whether the window can be minimized (else that button is not drawn).
+    pub can_minimize: bool,
+    /// Whether the window can be maximized (else that button is not drawn).
+    pub can_maximize: bool,
+    pub rem_size: Pixels,
+}
+
+impl WindowControlLayout {
+    /// The layout of `window`. `button_layout` is the user's setting
+    /// (`title_bar.button_layout`), which wins over the desktop's.
+    pub fn for_window(
+        button_layout: Option<WindowButtonLayout>,
+        window: &Window,
+        cx: &App,
+    ) -> Self {
+        let platform_style = platform_style();
+        let client_decorations = matches!(window_decorations(window), Decorations::Client { .. });
+        let supported_controls = window.window_controls();
+        Self {
+            platform_style,
+            fullscreen: window.is_fullscreen() || window.is_simple_fullscreen(),
+            client_decorations,
+            button_layout: effective_button_layout(
+                platform_style,
+                client_decorations,
+                button_layout,
+                cx,
+            ),
+            can_minimize: supported_controls.minimize,
+            can_maximize: supported_controls.maximize,
+            rem_size: window.rem_size(),
+        }
+    }
+
+    /// Width taken by the window controls on the left and on the right.
+    ///
+    /// - macOS: the traffic lights' room on the left, nothing on the right.
+    /// - Windows: nothing on the left, the three caption buttons on the right.
+    /// - Linux, client-side decorations: the buttons the desktop's layout
+    ///   puts on each side.
+    /// - Linux with server-side decorations, and fullscreen everywhere: 0, 0.
+    pub fn insets(&self) -> (Pixels, Pixels) {
+        if self.fullscreen {
+            return (px(0.), px(0.));
+        }
+        match self.platform_style {
+            PlatformStyle::Mac => (px(TRAFFIC_LIGHT_PADDING), px(0.)),
+            PlatformStyle::Windows => (px(0.), platform_windows::controls_width()),
+            PlatformStyle::Linux => {
+                let Some(button_layout) = self.button_layout.filter(|_| self.client_decorations)
+                else {
+                    return (px(0.), px(0.));
+                };
+                let width = |buttons| {
+                    let count = platform_linux::drawn_buttons(
+                        buttons,
+                        self.can_minimize,
+                        self.can_maximize,
+                    )
+                    .count();
+                    platform_linux::controls_width(count, self.rem_size)
+                };
+                (width(&button_layout.left), width(&button_layout.right))
+            }
+        }
+    }
+
+    /// Distance from each end of the bar to the row that holds its content:
+    /// the controls of [`Self::insets`], or the bar's own padding on a left
+    /// side without controls. `left_controls` and `right_controls` are false
+    /// when a sidebar open on that side draws the controls instead of the bar.
+    pub fn content_insets(&self, left_controls: bool, right_controls: bool) -> (Pixels, Pixels) {
+        let padding = self.rem_size * EDGE_PADDING;
+        let (left, right) = self.insets();
+        // A side the desktop gives buttons to is laid out as a control group
+        // even when none of them can be drawn: no padding then.
+        let has_left_group = match self.platform_style {
+            PlatformStyle::Mac => true,
+            PlatformStyle::Windows => false,
+            PlatformStyle::Linux => {
+                self.client_decorations
+                    && self
+                        .button_layout
+                        .is_some_and(|layout| layout.left[0].is_some())
+            }
+        };
+        let left = if !self.fullscreen && left_controls && has_left_group {
+            left
+        } else {
+            padding
+        };
+        let right = if right_controls { right } else { px(0.) };
+        (left, right)
+    }
+}
+
+/// Width taken by the window controls on the left and on the right of
+/// `window`'s title bar, for the current platform and decoration mode. See
+/// [`WindowControlLayout::insets`].
+pub fn window_control_insets(window: &Window, cx: &App) -> (Pixels, Pixels) {
+    let button_layout = TitleBarSettings::get_global(cx).button_layout;
+    WindowControlLayout::for_window(button_layout, window, cx).insets()
+}
+
+fn effective_button_layout(
+    platform_style: PlatformStyle,
+    client_decorations: bool,
+    button_layout: Option<WindowButtonLayout>,
+    cx: &App,
+) -> Option<WindowButtonLayout> {
+    if platform_style == PlatformStyle::Linux && client_decorations {
+        if linux_style_is_forced() {
+            return Some(forced_button_layout());
+        }
+        button_layout.or_else(|| cx.button_layout())
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SidebarWindowControls {
     pub traffic_lights: bool,
@@ -82,7 +295,7 @@ pub struct PlatformTitleBar {
 
 impl PlatformTitleBar {
     pub fn new(id: impl Into<ElementId>, cx: &mut Context<Self>) -> Self {
-        let platform_style = PlatformStyle::platform();
+        let platform_style = platform_style();
         let system_window_tabs = Some(cx.new(|_cx| SystemWindowTabs::new()));
 
         Self {
@@ -138,13 +351,23 @@ impl PlatformTitleBar {
         decorations: &Decorations,
         cx: &App,
     ) -> Option<WindowButtonLayout> {
-        if self.platform_style == PlatformStyle::Linux
-            && matches!(decorations, Decorations::Client { .. })
-        {
-            self.button_layout.or_else(|| cx.button_layout())
-        } else {
-            None
-        }
+        effective_button_layout(
+            self.platform_style,
+            matches!(decorations, Decorations::Client { .. }),
+            self.button_layout,
+            cx,
+        )
+    }
+
+    /// Distance from each end of the bar to the row its children are laid out
+    /// in, as this bar will draw it (call after [`Self::set_button_layout`]).
+    /// A row that centres something on the window needs both.
+    pub fn content_insets(&self, window: &Window, cx: &App) -> (Pixels, Pixels) {
+        let sidebar = self.sidebar_render_state(cx);
+        WindowControlLayout::for_window(self.button_layout, window, cx).content_insets(
+            !(sidebar.open && sidebar.side == SidebarSide::Left),
+            !(sidebar.open && sidebar.side == SidebarSide::Right),
+        )
     }
 
     pub fn init(cx: &mut App) {
@@ -173,10 +396,10 @@ pub fn render_left_window_controls(
     close_action: Box<dyn Action>,
     window: &Window,
 ) -> Option<AnyElement> {
-    if PlatformStyle::platform() != PlatformStyle::Linux {
+    if platform_style() != PlatformStyle::Linux {
         return None;
     }
-    if !matches!(window.window_decorations(), Decorations::Client { .. }) {
+    if !matches!(window_decorations(window), Decorations::Client { .. }) {
         return None;
     }
     let button_layout = button_layout?;
@@ -202,10 +425,10 @@ pub fn render_right_window_controls(
     close_action: Box<dyn Action>,
     window: &Window,
 ) -> Option<AnyElement> {
-    let decorations = window.window_decorations();
+    let decorations = window_decorations(window);
     let height = platform_title_bar_height(window);
 
-    match PlatformStyle::platform() {
+    match platform_style() {
         PlatformStyle::Linux => {
             if !matches!(decorations, Decorations::Client { .. }) {
                 return None;
@@ -233,7 +456,7 @@ pub fn render_right_window_controls(
 impl Render for PlatformTitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let supported_controls = window.window_controls();
-        let decorations = window.window_decorations();
+        let decorations = window_decorations(window);
         let height = platform_title_bar_height(window);
         let titlebar_color = self.title_bar_color(window, cx);
         let close_action = Box::new(workspace::CloseWindow);
@@ -295,8 +518,9 @@ impl Render for PlatformTitleBar {
             .map(|this| {
                 let show_left_controls = !(sidebar.open && sidebar.side == SidebarSide::Left);
 
+                // Keep in sync with `WindowControlLayout::content_insets`.
                 if window.is_fullscreen() || window.is_simple_fullscreen() {
-                    this.pl_2()
+                    this.pl(rems(EDGE_PADDING))
                 } else if self.platform_style == PlatformStyle::Mac && show_left_controls {
                     this.pl(px(TRAFFIC_LIGHT_PADDING))
                 } else if let Some(controls) = show_left_controls
@@ -311,7 +535,7 @@ impl Render for PlatformTitleBar {
                 {
                     this.child(controls)
                 } else {
-                    this.pl_2()
+                    this.pl(rems(EDGE_PADDING))
                 }
             })
             .map(|el| match decorations {
@@ -335,6 +559,19 @@ impl Render for PlatformTitleBar {
             })
             .bg(titlebar_color)
             .content_stretch()
+            .relative()
+            // Flat bar closed by a 1px line; drawn as an overlay so the bar keeps
+            // the height other headers align to. It is the only line between
+            // the bar and the workspace, which draws none of its own.
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .h_px()
+                    .bg(cx.theme().colors().border),
+            )
             .child(
                 div()
                     .id(self.id.clone())
@@ -343,7 +580,11 @@ impl Render for PlatformTitleBar {
                     .items_center()
                     .justify_between()
                     .overflow_x_hidden()
-                    .w_full()
+                    // Exactly the room the controls leave, so a child can
+                    // work out where the middle of the bar is.
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
                     .children(children),
             )
             .when(
@@ -387,5 +628,157 @@ impl Render for PlatformTitleBar {
 impl ParentElement for PlatformTitleBar {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
         self.children.extend(elements)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::WindowButton::{Close, Maximize, Minimize};
+
+    const REM: Pixels = px(16.);
+
+    fn layout(platform_style: PlatformStyle) -> WindowControlLayout {
+        WindowControlLayout {
+            platform_style,
+            fullscreen: false,
+            client_decorations: false,
+            button_layout: None,
+            can_minimize: true,
+            can_maximize: true,
+            rem_size: REM,
+        }
+    }
+
+    fn linux(
+        left: [Option<gpui::WindowButton>; 3],
+        right: [Option<gpui::WindowButton>; 3],
+    ) -> WindowControlLayout {
+        WindowControlLayout {
+            client_decorations: true,
+            button_layout: Some(WindowButtonLayout { left, right }),
+            ..layout(PlatformStyle::Linux)
+        }
+    }
+
+    #[test]
+    fn test_macos_insets() {
+        let mac = layout(PlatformStyle::Mac);
+        assert_eq!(mac.insets(), (px(TRAFFIC_LIGHT_PADDING), px(0.)));
+        assert_eq!(
+            mac.content_insets(true, true),
+            (px(TRAFFIC_LIGHT_PADDING), px(0.))
+        );
+        // A sidebar open on the left holds the traffic lights.
+        assert_eq!(mac.content_insets(false, true), (px(8.), px(0.)));
+
+        let fullscreen = WindowControlLayout {
+            fullscreen: true,
+            ..mac
+        };
+        assert_eq!(fullscreen.insets(), (px(0.), px(0.)));
+        assert_eq!(fullscreen.content_insets(true, true), (px(8.), px(0.)));
+    }
+
+    #[test]
+    fn test_windows_insets() {
+        let windows = layout(PlatformStyle::Windows);
+        // Three caption buttons of 36px, whatever the UI font size.
+        assert_eq!(windows.insets(), (px(0.), px(108.)));
+        assert_eq!(windows.content_insets(true, true), (px(8.), px(108.)));
+        assert_eq!(windows.content_insets(true, false), (px(8.), px(0.)));
+
+        let large_font = WindowControlLayout {
+            rem_size: px(20.),
+            ..windows
+        };
+        assert_eq!(large_font.insets(), (px(0.), px(108.)));
+        assert_eq!(large_font.content_insets(true, true), (px(10.), px(108.)));
+
+        let fullscreen = WindowControlLayout {
+            fullscreen: true,
+            ..windows
+        };
+        assert_eq!(fullscreen.insets(), (px(0.), px(0.)));
+        assert_eq!(fullscreen.content_insets(true, true), (px(8.), px(0.)));
+    }
+
+    #[test]
+    fn test_linux_insets_follow_the_button_layout() {
+        // Three buttons: 3 x 20 + 2 x 12 between + 2 x 12 around = 108.
+        let right_hand = linux([None; 3], [Some(Minimize), Some(Maximize), Some(Close)]);
+        assert_eq!(right_hand.insets(), (px(0.), px(108.)));
+        assert_eq!(right_hand.content_insets(true, true), (px(8.), px(108.)));
+
+        // GNOME with the buttons moved to the left.
+        let left_hand = linux([Some(Close), Some(Minimize), Some(Maximize)], [None; 3]);
+        assert_eq!(left_hand.insets(), (px(108.), px(0.)));
+        assert_eq!(left_hand.content_insets(true, true), (px(108.), px(0.)));
+        // A sidebar open on the left draws them: the bar pads instead.
+        assert_eq!(left_hand.content_insets(false, true), (px(8.), px(0.)));
+
+        // elementary OS: close on the left, maximize on the right.
+        let split = linux([Some(Close), None, None], [Some(Maximize), None, None]);
+        assert_eq!(split.insets(), (px(44.), px(44.)));
+        assert_eq!(split.content_insets(true, true), (px(44.), px(44.)));
+
+        // Close only (GNOME's default): 20 + 2 x 12.
+        let close_only = linux([None; 3], [Some(Close), None, None]);
+        assert_eq!(close_only.insets(), (px(0.), px(44.)));
+
+        // Sizes are rems: they follow the UI font size.
+        let large_font = WindowControlLayout {
+            rem_size: px(20.),
+            ..right_hand
+        };
+        assert_eq!(large_font.insets(), (px(0.), px(135.)));
+    }
+
+    #[test]
+    fn test_linux_insets_skip_buttons_the_window_cannot_use() {
+        let dialog = WindowControlLayout {
+            can_minimize: false,
+            can_maximize: false,
+            ..linux([None; 3], [Some(Minimize), Some(Maximize), Some(Close)])
+        };
+        assert_eq!(dialog.insets(), (px(0.), px(44.)));
+
+        // A left group whose only button cannot be drawn takes no room and
+        // leaves no padding either: the bar lays it out as an empty group.
+        let empty_left_group = WindowControlLayout {
+            can_minimize: false,
+            ..linux([Some(Minimize), None, None], [Some(Close), None, None])
+        };
+        assert_eq!(empty_left_group.insets(), (px(0.), px(44.)));
+        assert_eq!(
+            empty_left_group.content_insets(true, true),
+            (px(0.), px(44.))
+        );
+    }
+
+    #[test]
+    fn test_linux_insets_without_client_decorations() {
+        // Server-side decorations: the desktop draws the controls outside
+        // the window's content.
+        let server_side = WindowControlLayout {
+            client_decorations: false,
+            ..linux([None; 3], [Some(Minimize), Some(Maximize), Some(Close)])
+        };
+        assert_eq!(server_side.insets(), (px(0.), px(0.)));
+        assert_eq!(server_side.content_insets(true, true), (px(8.), px(0.)));
+
+        let fullscreen = WindowControlLayout {
+            fullscreen: true,
+            ..linux([Some(Close), None, None], [Some(Maximize), None, None])
+        };
+        assert_eq!(fullscreen.insets(), (px(0.), px(0.)));
+        assert_eq!(fullscreen.content_insets(true, true), (px(8.), px(0.)));
+
+        // No layout known at all.
+        let unknown = WindowControlLayout {
+            client_decorations: true,
+            ..layout(PlatformStyle::Linux)
+        };
+        assert_eq!(unknown.insets(), (px(0.), px(0.)));
     }
 }

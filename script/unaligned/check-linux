@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Type-check the fork for Linux inside Docker (the container's native target).
+#
+#   script/unaligned/check-linux                 # cargo check -p ide
+#   script/unaligned/check-linux -p ui -p workspace
+#
+# Ends with a PASS or FAIL line. See docs/unaligned/PLATFORM-CHECKS.md.
+
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker/check.sh" linux "$@"

@@ -1,0 +1,142 @@
+# Allowlist of script/unaligned/check-branding.
+# One entry per line, three fields separated by a TAB: path-glob<TAB>regex<TAB>reason
+# `*` in the glob also crosses `/`. The regex is searched in the hit's source line; `.*` covers the
+# whole file. Keep entries narrow: a file with an allowed identifier must still fail on a new
+# product-name use. Run `script/unaligned/check-branding --unused` to find entries that no longer
+# match anything, and `--stats` for the number of hits each reason covers.
+
+# --- Crates and files that are not shipped, not loaded or not registered
+crates/collab_ui/**	.*	not loaded: the collaboration panel (kept for merges)
+crates/extension_cli/**	.*	not shipped: upstream's extension packaging tool
+crates/eval*/**	.*	not shipped: evaluation tools
+crates/benchmarks/**	.*	not shipped: benchmarks
+crates/etw_tracing/**	.*	not shipped: Windows tracing tool for developers
+crates/auto_update_helper/**	.*	not shipped: the updater's Windows helper (nothing is installed by the app)
+crates/explorer_command_injector/**	.*	not shipped: the Windows Explorer helper of upstream's installer
+crates/language_models/src/provider/cloud.rs	.*	not registered: Zed's hosted model provider
+crates/language_models_cloud/**	.*	not registered: Zed's hosted model provider
+crates/cloud_*/**	.*	not reachable: clients of Zed's cloud, gated off (W2-01)
+crates/agent_ui/src/ui/end_trial_upsell.rs	.*	not shown: Zed Pro upsell, accounts do not exist
+crates/ide/src/visual_test_runner.rs	.*	not shipped: built only with the visual-tests feature
+
+# --- Test code, examples, benchmarks and fixtures outside `#[cfg(test)]` blocks
+crates/*/tests/**	.*	test code, example or fixture
+crates/*/src/**/tests/**	.*	test code, example or fixture
+crates/**/*_tests.rs	.*	test code, example or fixture
+crates/**/*_test.rs	.*	test code, example or fixture
+crates/**/tests.rs	.*	test code, example or fixture
+crates/**/test.rs	.*	test code, example or fixture
+crates/*/examples/**	.*	test code, example or fixture
+crates/*/benches/**	.*	test code, example or fixture
+crates/**/fixtures/**	.*	test code, example or fixture
+crates/**/evals/**	.*	test code, example or fixture
+
+# --- Internal identifiers that must not be renamed (research 01, section 1.7; standing rules)
+crates/agent/src/agent.rs	AgentId::new\("Zed Agent"\)	persisted id of the built-in agent (its label is "Agent")
+crates/settings/src/settings_store.rs	"Zed Plex (Mono|Sans)"	font family names accepted from old settings files
+crates/gpui/src/text_system.rs	"Zed Plex (Mono|Sans)"	font family names accepted from old settings files
+crates/gpui_windows/src/window.rs	w!\("Zed::Window"\)	window class name, Apache-2.0 crate that must not depend on branding
+crates/gpui_windows/src/platform.rs	w!\("Zed::PlatformWindow"\)	window class name, Apache-2.0 crate that must not depend on branding
+crates/keymap_editor/src/keymap_editor.rs	Zed Keybind Context	internal language name, never listed
+crates/settings_ui/src/settings_ui.rs	Zed Keybind Context	internal language name, never listed
+crates/ide/src/main.rs	must not be \\"zed\\"	the guard that refuses to run under upstream's identity
+
+# --- Setting values and persisted ids
+crates/theme/src/icon_theme.rs	LEGACY_DEFAULT_ICON_THEME_NAME: &str = "Zed \(Default\)"	legacy icon theme name kept as an alias for old settings files (G4)
+crates/language_model/src/registry.rs	LanguageModelProviderId\("zed\.dev"	provider id of the unregistered hosted provider, read from old settings
+crates/language_model_core/src/provider.rs	IDE_CLOUD_PROVIDER_ID|LanguageModelProviderName::new\("Zed"\)	id and name of the unregistered hosted provider
+crates/settings_content/src/language_model.rs	serde\(rename = "zed\.dev"\)	settings key of the unregistered hosted provider, kept so old files parse
+crates/web_search_providers/src/cloud.rs	IDE_WEB_SEARCH_PROVIDER_ID	provider id of the hosted web search, not reachable without an account
+
+# --- Zed's services still used on purpose, and their gated host tables
+crates/extensions_ui/src/extensions_ui.rs	Extensions come from the Zed extension registry	the one sentence that tells the user where extensions come from (W3-10)
+crates/http_client/src/http_client.rs	zed\.dev|Zed cloud services are not available in this build	gated host mappings: every builder refuses unless the host is explicitly allowed (W2-01)
+
+# --- Packages published by upstream and fetched by name from GitHub or npm (not a Zed service); listed for the owner
+crates/project/src/debugger/session.rs	@zed-industries/js-debug-companion-cli	npm package name of the JavaScript debugger companion
+crates/dap_adapters/src/go.rs	zed-industries/delve-shim-dap	GitHub repository of the Go debug adapter shim
+crates/languages/src/json.rs	zed-industries/package-version-server	GitHub repository of the package.json version server
+
+# --- The tooling's own guards and descriptions, which must name what they refuse
+script/unaligned/bundle-linux	must not be \\"zed\\"|still names Zed	guard text of the bundle script
+script/unaligned/bundle-mac	names things as Zed|== "zed"|must not be Zed's	guard text of the bundle script
+script/unaligned/bundle-windows.ps1	builds Zed's installer|must not be "zed"	guard text of the bundle script
+script/unaligned/install.sh	installed Zed|Zed lives in|APP_ID is	guard text of the install script
+script/unaligned/check-themes	zed\.dev	the theme checker refuses a zed.dev schema
+script/unaligned/netcheck	zed\.dev|Zed	the network checker names the hosts it denies
+script/unaligned/make-icons	Zed's plan stamps	describes the upstream art it empties
+script/unaligned/scenes.json	the credit to Zed|no Zed\.	scene descriptions that state what must be absent
+
+# --- Upstream credit
+README.md	fork of the \[Zed\]|Zed's editor|The name \"Zed\" is still shown where it states a fact|Zed's extension registry|still told that the editor is Zed|A `\.zed/` folder is not read|based on \[Zed\]	the README states the fork's origin, its differences and its limits (W4-11)
+
+# --- Zed's hosted edit predictions: code kept for merges, not reachable without an account (W2-01)
+crates/edit_prediction/src/edit_prediction.rs	You must update to Zed version|github\.com[:/]zed-industries/	hosted edit predictions are unreachable; the strip_prefix lines are upstream's data-collection rule for its own repositories
+crates/edit_prediction/src/zeta.rs	ErrorAction::link\("Update Zed"	hosted edit predictions are unreachable
+crates/edit_prediction/src/zed_edit_prediction_delegate.rs	Zed's Edit Predictions	display name of the hosted provider, which cannot be selected without an account
+crates/sandbox/src/windows_wsl.rs	cloud\.zed\.dev/releases	not reachable: the WSL helper download is refused in ensure_wsl_zed_helper (DOWNLOAD_HELPER = false)
+
+# --- Upstream credit and upstream bug reports
+crates/windows_resources/src/windows_resources.rs	Copyright 2022 - 2025 Zed Industries, Inc\. Modified by	upstream's copyright line kept in the exe metadata, followed by the fork's
+crates/gpui_wgpu/src/wgpu_renderer.rs	github\.com/zed-industries/zed/issues	log line about a GPUI bug that belongs upstream; Apache-2.0 crate
+
+# --- OPEN: known and not fixed (a reason that starts with OPEN is counted on a NOTE line)
+crates/copilot_chat/src/copilot_chat.rs	"Zed/\{\}"	OPEN: editor identity sent to GitHub Copilot, which accepts known editors only; third-party identity left for the owner
+
+# --- Kept lists of the wave-5 reports (W5-04)
+crates/auto_update/src/auto_update.rs	UPSTREAM_REPOSITORY_OWNER: &str = "zed-industries"	guard: the updater refuses a brand file that names upstream's releases repository
+
+# --- Kept list of W5-03's report (setting values, persisted keys, internal identifiers)
+crates/settings_content/src/language.rs	EditPredictionProvider::Zed => Some\("Zed AI"\)	name of upstream's hosted predictions, reachable only through an old "provider": "zed"; offered in no list
+crates/theme/src/fallback_themes.rs	name: "Zed Default"\.into\(\)	family name of the fallback theme built in code, never listed
+
+# --- Lowercase `zed` (kind `word`): what stays, and why
+# Not shipped, or test support that is not under a test attribute
+crates/sandbox/src/wsl_sandbox_test_helper.rs	.*	not shipped: test helper binary, built only with the wsl-test feature
+crates/vim/src/test/**	.*	test code, example or fixture
+crates/gpui/src/platform/test/**	zed\.keyboard\.example	test code, example or fixture
+crates/util/src/paths.rs	PathBuf::from\("(/Users/|C:\\\\Users\\\\|/home/)zed"\)	home directory used only under cfg!(test)
+# The extension API: extensions from the registry are compiled against these names
+crates/extension/src/extension.rs	zed:api-version	extension API: name of the wasm section that carries the API version
+crates/extension/src/extension_builder.rs	zed:api-version	extension API: name of the wasm section that carries the API version
+crates/extension_api/src/extension_api.rs	zed:api-version	extension API: name of the wasm section that carries the API version
+crates/extension_host/src/wasm_host.rs	zed:api-version	extension API: name of the wasm section that carries the API version
+crates/extension_host/src/wasm_host/wit/**	"zed:extension/	extension API: names of the WIT interfaces
+# Guards that must name what they refuse
+crates/branding/src/branding.rs	APP_ID must not be \\"zed\\"	guard: the build fails when the brand file names upstream's identifier
+crates/ide/src/main.rs	eq_ignore_ascii_case\(b"zed"\)	the guard that refuses to run under upstream's identity
+crates/install_cli/src/install_cli_binary.rs	UPSTREAM_COMMAND_NAMES: \[&str; 4\] =|never upstream's `zed`	guard: the command is never installed under one of upstream's names
+crates/install_cli/src/register_zed_scheme.rs	UPSTREAM_URL_SCHEMES: \[&str; 3\] =|never upstream's `zed`	guard: upstream's link schemes are never registered with the system
+crates/command_palette/src/command_palette.rs	UPSTREAM_WORD: &str = "zed"	the palette replaces this word with the product's name inside action names
+# Internal identifiers: not shown, not sent
+crates/edit_prediction/src/edit_prediction.rs	IDE_PREDICT_DATA_COLLECTION_CHOICE: &str =	persisted key of the key-value store, never shown
+crates/title_bar/src/onboarding_banner.rs	"zed_git_banner_dismissed_at"	persisted key of the key-value store, never shown
+crates/edit_prediction_ui/src/edit_prediction_button.rs	EditPredictionProvider::Zed => "zed",	telemetry property of upstream's hosted predictions; the product has no telemetry sender
+crates/languages/src/lib.rs	name: "zed-keybind-context",	internal language name, never listed
+crates/theme/src/fallback_themes.rs	id: "zed-default"\.to_string\(\)	id of the fallback theme family built in code, never listed
+crates/theme/src/icon_theme.rs	id: "zed"\.into\(\)	id of the built-in icon theme; the name it is listed under is the product's
+crates/proto/build.rs	proto/zed\.proto	file and package name of the wire protocol with the remote server, build-time only
+crates/proto/src/proto.rs	/zed\.messages\.rs	file and package name of the wire protocol with the remote server, build-time only
+crates/release_channel/build.rs	__do_not_set_zed_release_channel	name of a build-time cfg
+crates/remote_server/src/server.rs	filename\.starts_with\("zed"\)	prefix of legacy panic files looked for in the logs directory; nothing writes them any more
+# Values read from files written for upstream
+crates/migrator/src/migrations/m_2026_02_03/settings.rs	"zeta2" => "zed",	migration of an old upstream settings value to the kept value "zed" (old files only)
+crates/dev_container/src/devcontainer_json.rs	value\.get\("zed"\)	devcontainer.json key `customizations.zed`, written for upstream and read after the product's own
+# Not reachable
+crates/client/src/client.rs	"x-zed-(protocol-version|app-version|release-channel|system-id|metrics-id)"	not reachable: headers of the collaboration connection, which needs an account (W2-01)
+crates/sandbox/src/windows_wsl.rs	libexec/zed-editor	not reachable: layout of upstream's Linux tarball in the WSL helper download script (DOWNLOAD_HELPER = false)
+# OPEN: identities registered with third parties under upstream's name, and names only the rename tool can change; the owner decides
+crates/copilot/src/copilot.rs	name: "zed(-copilot)?"\.into\(\)	OPEN: editor and plugin identity sent to the GitHub Copilot language server, which accepts known editors only
+crates/openai_subscribed/src/openai_subscribed.rs	HeaderValue::from_static\("zed"\)|append_pair\("originator", "zed"\)	OPEN: `originator` of the ChatGPT subscription sign-in and of its requests, known to OpenAI under upstream's name; changing it may break sign-in
+crates/edit_prediction/src/mercury.rs	provider_name: "zed",	OPEN: integration name sent to Inception with the feedback on Mercury predictions
+# The tooling
+script/unaligned/rename-upstream-names	.*	the rename tool must spell every upstream name it renames
+script/unaligned/install.sh	"\$APP_ID" = "zed"	guard text of the install script
+script/unaligned/make-icons	zed_(logo|x_copilot|agent|predict)|ai_zed	asset file names kept from upstream: embedded in the binary, never shown
+script/unaligned/bundle-linux	== "zed"|grep -q -i -w 'zed'|installs them as zed\.png	guard text of the bundle script, and its note on upstream's icon file name
+script/unaligned/bundle-mac	`get_zed_cli_path`	names the Rust function that finds the command (an identifier, not renamed)
+crates/gpui/src/text_system.rs	font\("\.Zed(Mono|Sans)"\)	internal alias of a bundled font, resolved by GPUI before any font is looked up; Apache-2.0 crate
+crates/editor/src/editor.rs	MINIMAP_FONT_FAMILY: SharedString = SharedString::new_static\("\.ZedMono"\)	internal alias of a bundled font, resolved by GPUI before any font is looked up
+crates/settings/src/settings_store.rs	^"\.Zed(Mono|Sans)",$	font aliases accepted from old settings files; the schema accepts them through a pattern and does not suggest them
+crates/gpui_windows/src/window.rs	w!\("ZedModule"\)	only the address of this literal is used (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS), the text names nothing; Apache-2.0 crate
+crates/settings_content/src/settings_content.rs	alias = "Zed"	base keymap value accepted from old settings files; it is written and listed as "Native"

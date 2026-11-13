@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+#
+# Builds the macOS application of the product, under the product's own names
+# (crates/branding/brand.env), on the `stable` channel, with nothing uploaded
+# anywhere. Written for this fork; upstream's own bundle script for macOS is no
+# longer in this repository. What it writes:
+#
+#   target/<triple>/release/bundle/<PRODUCT_NAME>.app
+#   target/release/<APP_ID>-macos-<arch>.dmg        a disk image: the application
+#                                                   and a link to /Applications
+#
+# The application is signed "ad hoc" only: no developer identity, no
+# notarisation. macOS refuses to open such an application when it was
+# downloaded, until the download mark is removed from the installed copy:
+#
+#   xattr -dr com.apple.quarantine "/Applications/<PRODUCT_NAME>.app"
+#
+# Rules and what was never executed: docs/unaligned/PACKAGING.md.
+
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+brand_file="crates/branding/brand.env"
+channel_file="crates/ide/RELEASE_CHANNEL"
+
+usage() {
+    cat <<EOF
+Usage: ${0##*/} [options] [target]
+
+  target              aarch64-apple-darwin (Apple Silicon) or x86_64-apple-darwin
+                      (Intel). Default: this machine's. Either can be built on
+                      either kind of Mac.
+
+  --runtime-shaders   Compile the Metal shaders when the application starts
+                      instead of at build time: for a Mac that has the Command
+                      Line Tools but not Xcode.
+  --package-only      Do not build: package the binaries already in the target
+                      directory.
+  -h, --help          This text.
+EOF
+}
+
+fail() {
+    echo "${0##*/}: $*" >&2
+    exit 1
+}
+
+mode="build"
+runtime_shaders=false
+target_triple=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        --package-only) mode="package" ;;
+        --runtime-shaders) runtime_shaders=true ;;
+        aarch64-apple-darwin | x86_64-apple-darwin) target_triple="$1" ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+# --- Brand -------------------------------------------------------------------
+
+# The brand file is plain KEY="value" lines. Anything else is refused before it
+# is sourced, as the branding crate's build script does.
+load_brand() {
+    local line number=0
+    local pattern='^[A-Z][A-Z0-9_]*="[^"\\$`]*"$'
+    [[ -f "$brand_file" ]] || fail "$brand_file not found"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        number=$((number + 1))
+        if [[ -z "$line" || "$line" == \#* ]]; then
+            continue
+        fi
+        if ! [[ "$line" =~ $pattern ]]; then
+            fail "$brand_file:$number is not a KEY=\"value\" line"
+        fi
+    done <"$brand_file"
+    # shellcheck source=/dev/null
+    source "$brand_file"
+
+    local key
+    for key in PRODUCT_NAME APP_ID REVERSE_DNS_ID URL_SCHEME; do
+        [[ -n "${!key:-}" ]] || fail "$key is empty or missing in $brand_file"
+    done
+    if [[ "$APP_ID" == "zed" || "$URL_SCHEME" == "zed" || "$REVERSE_DNS_ID" == dev.zed.* ]]; then
+        fail "APP_ID, URL_SCHEME and REVERSE_DNS_ID must not be Zed's: the application would collide with an installed Zed"
+    fi
+    # These go into an XML file and into file names.
+    for key in PRODUCT_NAME APP_ID REVERSE_DNS_ID URL_SCHEME; do
+        if [[ "${!key}" == *[\<\>\&/]* ]]; then
+            fail "$key must not contain <, >, & or /"
+        fi
+    done
+    RELEASES_REPOSITORY="${RELEASES_REPOSITORY:-}"
+}
+
+load_brand
+
+# --- Preconditions -----------------------------------------------------------
+
+[[ "$(uname -s)" == "Darwin" ]] || fail "the macOS application is built on macOS; this system is $(uname -s)"
+
+if [[ -n "${RUSTFLAGS+x}" || -n "${CARGO_ENCODED_RUSTFLAGS+x}" ]]; then
+    fail "unset RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS: they replace the flags of .cargo/config.toml"
+fi
+# A build that sees the first variable sends crash reports to that address; the
+# second one signs telemetry requests. Neither belongs in this product.
+for forbidden in IDE_MINIDUMP_ENDPOINT IDE_CLIENT_CHECKSUM_SEED; do
+    if [[ -n "${!forbidden+x}" ]]; then
+        fail "$forbidden is set in the environment: unset it, a bundle must never be built with it"
+    fi
+done
+
+for tool in cargo rustc rustup sips iconutil plutil codesign ditto; do
+    command -v "$tool" >/dev/null 2>&1 || fail "$tool not found"
+done
+
+if [[ -z "$target_triple" ]]; then
+    target_triple="$(rustc --version --verbose | sed -n 's/^host: //p')"
+fi
+case $target_triple in
+    aarch64-apple-darwin) arch="aarch64" ;;
+    x86_64-apple-darwin) arch="x86_64" ;;
+    *) fail "unsupported target: $target_triple" ;;
+esac
+
+version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/ide/Cargo.toml | head -n 1)"
+[[ -n "$version" ]] || fail "could not read the version of the ide package"
+
+target_dir="${CARGO_TARGET_DIR:-target}"
+build_dir="${target_dir}/${target_triple}/release"
+out_dir="${target_dir}/release"
+app_path="${build_dir}/bundle/${PRODUCT_NAME}.app"
+archive="${out_dir}/${APP_ID}-macos-${arch}.dmg"
+
+# --- Cleanup (temporary files, and the release channel file) -----------------
+
+temp_dir="$(mktemp -d)"
+channel_backup=""
+
+cleanup() {
+    local status=$?
+    if [[ -n "$channel_backup" && -f "$channel_backup" ]]; then
+        # -p keeps the modification time, so development builds are not invalidated.
+        cp -p "$channel_backup" "$channel_file"
+        echo "Restored $channel_file to '$(tr -d '\n' <"$channel_file")'."
+    fi
+    rm -rf "$temp_dir"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+# --- Build -------------------------------------------------------------------
+
+if [[ $mode == "build" ]]; then
+    # IDE_BUNDLE is left unset on purpose: with it the application looks for a
+    # `git` of its own inside the bundle, which this script does not ship. It
+    # uses the system's git instead.
+    export RELEASE_VERSION="$version"
+    export MACOSX_DEPLOYMENT_TARGET=12.0
+    export CXXFLAGS="-stdlib=libc++"
+
+    # The updater is already inert without a releases repository. This text is
+    # what "Check for Updates" shows in that case; a packager's own text wins.
+    if [[ -z "$RELEASES_REPOSITORY" && -z "${IDE_UPDATE_EXPLANATION+x}" ]]; then
+        export IDE_UPDATE_EXPLANATION="This build of ${PRODUCT_NAME} has no releases page to check. Get a newer build from where you got this one."
+    fi
+
+    if [[ ! -s assets/licenses.md ]]; then
+        echo "${0##*/}: warning: assets/licenses.md is missing (script/generate-licenses writes it): the licences page of this build will say so. Do not distribute it." >&2
+    fi
+
+    # Names and update behaviour follow the channel compiled in: build as
+    # `stable`, then put the file back (see cleanup).
+    if [[ "$(tr -d '[:space:]' <"$channel_file")" != "stable" ]]; then
+        cp -p "$channel_file" "$temp_dir/RELEASE_CHANNEL.backup"
+        channel_backup="$temp_dir/RELEASE_CHANNEL.backup"
+        echo "stable" >"$channel_file"
+    fi
+    # The build script of the ide package picks the icon from this one.
+    export RELEASE_CHANNEL="stable"
+
+    rustup target add "$target_triple"
+
+    features=()
+    if [[ $runtime_shaders == true ]]; then
+        features=(--features gpui_platform/runtime_shaders)
+    fi
+
+    # Two invocations, as upstream: one feature set per binary. No call/webrtc.
+    cargo_config=(--config .cargo/bundle-config.toml --config 'profile.release.debug=false')
+    cargo "${cargo_config[@]}" build --release --locked --target "$target_triple" --package ide --bin unaligned-ide ${features[@]+"${features[@]}"}
+    cargo "${cargo_config[@]}" build --release --locked --target "$target_triple" --package cli
+fi
+
+[[ -x "$build_dir/unaligned-ide" ]] || fail "$build_dir/unaligned-ide not found: build first (run without --package-only)"
+[[ -x "$build_dir/cli" ]] || fail "$build_dir/cli not found: build first (run without --package-only)"
+
+# --- Application -------------------------------------------------------------
+
+rm -rf "$app_path"
+contents="$app_path/Contents"
+mkdir -p "$contents/MacOS" "$contents/Resources"
+
+# The editor looks for the command beside itself, under the name `cli`
+# (crates/util/src/util.rs, `get_zed_cli_path`).
+cp "$build_dir/unaligned-ide" "$contents/MacOS/$APP_ID"
+cp "$build_dir/cli" "$contents/MacOS/cli"
+strip -x "$contents/MacOS/$APP_ID" "$contents/MacOS/cli" 2>/dev/null || true
+chmod 755 "$contents/MacOS/$APP_ID" "$contents/MacOS/cli"
+
+# The icon, in every size the system asks for, from the 1024 px picture.
+icon_source="crates/ide/resources/app-icon@2x.png"
+[[ -f "$icon_source" ]] || fail "$icon_source not found"
+iconset="$temp_dir/app.iconset"
+mkdir -p "$iconset"
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$icon_source" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    sips -z "$((size * 2))" "$((size * 2))" "$icon_source" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$contents/Resources/${APP_ID}.icns"
+
+if [[ -f crates/ide/resources/Document.icns ]]; then
+    cp crates/ide/resources/Document.icns "$contents/Resources/Document.icns"
+fi
+if [[ -s assets/licenses.md ]]; then
+    cp assets/licenses.md "$contents/Resources/licenses.md"
+fi
+cp LICENSE-GPL LICENSE-APACHE "$contents/Resources/" 2>/dev/null || true
+
+{
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+<key>CFBundleDevelopmentRegion</key>
+<string>English</string>
+<key>CFBundleDisplayName</key>
+<string>${PRODUCT_NAME}</string>
+<key>CFBundleName</key>
+<string>${PRODUCT_NAME}</string>
+<key>CFBundleExecutable</key>
+<string>${APP_ID}</string>
+<key>CFBundleIconFile</key>
+<string>${APP_ID}.icns</string>
+<key>CFBundleIdentifier</key>
+<string>${REVERSE_DNS_ID}</string>
+<key>CFBundleInfoDictionaryVersion</key>
+<string>6.0</string>
+<key>CFBundlePackageType</key>
+<string>APPL</string>
+<key>CFBundleShortVersionString</key>
+<string>${version}</string>
+<key>CFBundleVersion</key>
+<string>${version}</string>
+<key>LSApplicationCategoryType</key>
+<string>public.app-category.developer-tools</string>
+<key>LSMinimumSystemVersion</key>
+<string>12.0</string>
+<key>NSHighResolutionCapable</key>
+<true/>
+<key>CFBundleURLTypes</key>
+<array>
+    <dict>
+        <key>CFBundleURLName</key>
+        <string>${PRODUCT_NAME}</string>
+        <key>CFBundleURLSchemes</key>
+        <array>
+            <string>${URL_SCHEME}</string>
+        </array>
+    </dict>
+</array>
+EOF
+    # Document types, the sentences of the permission prompts, the platform:
+    # the same pieces upstream's bundler appends.
+    cat crates/ide/resources/info/*.plist
+    cat <<EOF
+</dict>
+</plist>
+EOF
+} >"$contents/Info.plist"
+plutil -lint "$contents/Info.plist" >/dev/null || fail "the Info.plist that was written is not valid"
+
+# Ad hoc: a signature with no identity. Apple Silicon runs nothing unsigned.
+codesign --force --deep --entitlements crates/ide/resources/app.entitlements --sign - "$app_path"
+codesign --verify --deep --strict "$app_path" || fail "the signature of the application does not verify"
+
+# The command answers under the product's name, and names the application it
+# found beside itself. Only when it can run here: an Intel build runs on Apple
+# Silicon through Rosetta, when that is installed.
+if "$contents/MacOS/cli" --version >"$temp_dir/version.txt" 2>&1; then
+    echo "The command says: $(head -n 1 "$temp_dir/version.txt")"
+else
+    echo "${0##*/}: warning: could not run the command here to ask its version (another architecture?)" >&2
+fi
+
+mkdir -p "$out_dir"
+rm -f "$archive"
+# A disk image with the application and a link to /Applications: the user opens
+# it and drags one onto the other. ditto keeps the signature.
+dmg_dir="$temp_dir/dmg"
+mkdir -p "$dmg_dir"
+ditto "$app_path" "$dmg_dir/${PRODUCT_NAME}.app"
+ln -s /Applications "$dmg_dir/Applications"
+hdiutil create -quiet -volname "$PRODUCT_NAME" -srcfolder "$dmg_dir" -fs HFS+ -format UDZO -ov "$archive"
+hdiutil verify -quiet "$archive" || fail "the disk image does not verify"
+
+echo
+echo "Application: $app_path"
+echo "Disk image:  $archive ($(du -h "$archive" | cut -f1))"

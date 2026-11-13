@@ -1,24 +1,139 @@
 mod icon_theme_selector;
 
+use app_actions::{ExtensionCategoryFilter, Extensions};
 use fs::Fs;
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
-    App, Context, DismissEvent, Entity, EventEmitter, Focusable, Render, UpdateGlobal, WeakEntity,
-    Window, actions,
+    App, Context, DismissEvent, Entity, EventEmitter, Focusable, Hsla, Render, UpdateGlobal,
+    WeakEntity, Window, actions,
 };
-use picker::{Picker, PickerDelegate};
+use picker::{Picker, PickerDelegate, PickerEmptyAction};
 use settings::{Settings, SettingsStore, update_settings_file};
 use std::sync::Arc;
 use theme::{Appearance, SystemAppearance, Theme, ThemeMeta, ThemeRegistry};
 use theme_settings::{
     ThemeAppearanceMode, ThemeName, ThemeSelection, ThemeSettings, appearance_to_mode,
 };
-use ui::{ListItem, ListItemSpacing, prelude::*, v_flex};
+use ui::{ListItem, ListItemSpacing, SectionLabel, prelude::*, v_flex};
 use util::ResultExt;
 use workspace::{ModalView, Workspace, ui::HighlightedLabel, with_active_or_new_workspace};
-use zed_actions::{ExtensionCategoryFilter, Extensions};
 
 use crate::icon_theme_selector::{IconThemeSelector, IconThemeSelectorDelegate};
+
+/// The product's own themes, in the order the selector offers them. These are
+/// the names the bundled theme files carry (`assets/themes/unaligned`).
+const FAMILY_ORDER: [&str; 5] = [
+    "Unaligned",
+    "Unaligned Light",
+    "Unaligned Dusk",
+    "Unaligned Midnight",
+    "Unaligned Contrast",
+];
+
+/// Any other theme whose name starts like this is listed with the family
+/// (later additions such as "Unaligned Mono").
+const FAMILY_PREFIX: &str = "Unaligned ";
+
+/// Where a theme sits in the list: the family in its fixed order, then other
+/// themes of the family by name, then everything else, dark before light.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum ThemeRank {
+    Family(usize),
+    FamilyExtra,
+    Other { is_light: bool },
+}
+
+/// The sections of the unfiltered list, each under its label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThemeSection {
+    Family,
+    OtherDark,
+    OtherLight,
+}
+
+impl ThemeSection {
+    /// Written in sentence case; `SectionLabel` shows it in uppercase.
+    fn label(self) -> SharedString {
+        match self {
+            Self::Family => branding::PRODUCT_SHORT_NAME.into(),
+            Self::OtherDark => "Other dark".into(),
+            Self::OtherLight => "Other light".into(),
+        }
+    }
+}
+
+/// One row of the list: a section label, or the theme of `matches[_]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Row {
+    Label(ThemeSection),
+    Match(usize),
+}
+
+impl ThemeRank {
+    fn of(meta: &ThemeMeta) -> Self {
+        if let Some(position) = FAMILY_ORDER
+            .iter()
+            .position(|name| *name == meta.name.as_ref())
+        {
+            Self::Family(position)
+        } else if meta.name.starts_with(FAMILY_PREFIX) {
+            Self::FamilyExtra
+        } else {
+            Self::Other {
+                is_light: meta.appearance.is_light(),
+            }
+        }
+    }
+
+    fn section(&self) -> ThemeSection {
+        match self {
+            Self::Family(_) | Self::FamilyExtra => ThemeSection::Family,
+            Self::Other { is_light: false } => ThemeSection::OtherDark,
+            Self::Other { is_light: true } => ThemeSection::OtherLight,
+        }
+    }
+}
+
+/// The three colours that tell one theme from another at a glance: its chrome
+/// ground, its sheet ground and its accent.
+#[derive(Clone, Copy)]
+struct ThemeSwatch {
+    chrome: Hsla,
+    sheet: Hsla,
+    accent: Hsla,
+}
+
+impl ThemeSwatch {
+    fn of(theme: &Theme) -> Self {
+        let colors = theme.colors();
+        Self {
+            chrome: colors.background,
+            sheet: colors.editor_background,
+            accent: colors.accent_background,
+        }
+    }
+
+    /// 28×16: three flat rectangles inside a 1px line.
+    fn render(self, cx: &App) -> impl IntoElement {
+        h_flex()
+            .flex_none()
+            .w(rems_from_px(28_f32))
+            .h(rems_from_px(16_f32))
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .overflow_hidden()
+            .child(div().flex_1().h_full().bg(self.chrome))
+            .child(div().flex_1().h_full().bg(self.sheet))
+            .child(div().flex_1().h_full().bg(self.accent))
+    }
+}
+
+fn more_themes_action() -> Box<dyn gpui::Action> {
+    Box::new(Extensions {
+        category_filter: Some(ExtensionCategoryFilter::Themes),
+        id: None,
+    })
+}
 
 actions!(
     theme_selector,
@@ -29,13 +144,13 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
-    cx.on_action(|action: &zed_actions::theme_selector::Toggle, cx| {
+    cx.on_action(|action: &app_actions::theme_selector::Toggle, cx| {
         let action = action.clone();
         with_active_or_new_workspace(cx, move |workspace, window, cx| {
             toggle_theme_selector(workspace, &action, window, cx);
         });
     });
-    cx.on_action(|action: &zed_actions::icon_theme_selector::Toggle, cx| {
+    cx.on_action(|action: &app_actions::icon_theme_selector::Toggle, cx| {
         let action = action.clone();
         with_active_or_new_workspace(cx, move |workspace, window, cx| {
             toggle_icon_theme_selector(workspace, &action, window, cx);
@@ -45,7 +160,7 @@ pub fn init(cx: &mut App) {
 
 fn toggle_theme_selector(
     workspace: &mut Workspace,
-    toggle: &zed_actions::theme_selector::Toggle,
+    toggle: &app_actions::theme_selector::Toggle,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -63,7 +178,7 @@ fn toggle_theme_selector(
 
 fn toggle_icon_theme_selector(
     workspace: &mut Workspace,
-    toggle: &zed_actions::icon_theme_selector::Toggle,
+    toggle: &app_actions::icon_theme_selector::Toggle,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -127,7 +242,14 @@ impl ThemeSelector {
 struct ThemeSelectorDelegate {
     fs: Arc<dyn Fs>,
     themes: Vec<ThemeMeta>,
+    /// One swatch per entry of `themes` (none if the theme failed to load).
+    swatches: Vec<Option<ThemeSwatch>>,
+    /// The section of each entry of `themes`.
+    sections: Vec<ThemeSection>,
     matches: Vec<StringMatch>,
+    /// What the list shows: `matches`, and while there is no query the label
+    /// of each section before its first theme. Selection indices are rows.
+    rows: Vec<Row>,
     /// The theme that was selected before the `ThemeSelector` menu was opened.
     ///
     /// We use this to return back to theme that was set if the user dismisses the menu.
@@ -174,13 +296,26 @@ impl ThemeSelectorDelegate {
             })
             .collect::<Vec<_>>();
 
-        // Sort by dark vs light, then by name.
+        // The product's family first, in its own order; then the rest, dark
+        // before light, by name.
         themes.sort_unstable_by(|a, b| {
-            a.appearance
-                .is_light()
-                .cmp(&b.appearance.is_light())
-                .then(a.name.cmp(&b.name))
+            ThemeRank::of(a)
+                .cmp(&ThemeRank::of(b))
+                .then_with(|| a.name.cmp(&b.name))
         });
+        let sections = themes
+            .iter()
+            .map(|meta| ThemeRank::of(meta).section())
+            .collect::<Vec<_>>();
+        let swatches = themes
+            .iter()
+            .map(|meta| {
+                registry
+                    .get(&meta.name)
+                    .ok()
+                    .map(|theme| ThemeSwatch::of(&theme))
+            })
+            .collect();
 
         let original_theme_id = themes
             .iter()
@@ -197,16 +332,22 @@ impl ThemeSelectorDelegate {
             })
             .collect();
 
+        let rows = Self::rows_for(&matches, &sections, true);
+
         // The current theme is likely in this list, so default to first showing that.
         let selected_index = matches
             .iter()
             .position(|mat| mat.string == original_theme.name)
-            .unwrap_or(0);
+            .and_then(|match_ix| Self::row_of(&rows, match_ix))
+            .unwrap_or_else(|| Self::first_selectable_row(&rows));
 
         Self {
             fs,
             themes,
+            swatches,
+            sections,
             matches,
+            rows,
             original_theme_settings,
             original_system_appearance,
             original_theme_id,
@@ -218,9 +359,55 @@ impl ThemeSelectorDelegate {
         }
     }
 
+    /// The rows for `matches`. A list in the selector's own order (no query)
+    /// is labelled by section when it holds more than one; a filtered list is
+    /// in score order and has no labels.
+    fn rows_for(matches: &[StringMatch], sections: &[ThemeSection], labelled: bool) -> Vec<Row> {
+        let section_of = |mat: &StringMatch| sections.get(mat.candidate_id).copied();
+        let labelled = labelled
+            && matches.first().is_some_and(|first| {
+                matches
+                    .iter()
+                    .any(|mat| section_of(mat) != section_of(first))
+            });
+
+        let mut rows = Vec::with_capacity(matches.len() + 3);
+        let mut current_section = None;
+        for (match_ix, mat) in matches.iter().enumerate() {
+            let section = section_of(mat);
+            if labelled
+                && section != current_section
+                && let Some(section) = section
+            {
+                rows.push(Row::Label(section));
+            }
+            current_section = section;
+            rows.push(Row::Match(match_ix));
+        }
+        rows
+    }
+
+    /// The row that shows `matches[match_ix]`.
+    fn row_of(rows: &[Row], match_ix: usize) -> Option<usize> {
+        rows.iter().position(|row| *row == Row::Match(match_ix))
+    }
+
+    fn first_selectable_row(rows: &[Row]) -> usize {
+        rows.iter()
+            .position(|row| matches!(row, Row::Match(_)))
+            .unwrap_or(0)
+    }
+
+    /// The theme shown in row `ix`; `None` for a label.
+    fn match_at(&self, ix: usize) -> Option<&StringMatch> {
+        match self.rows.get(ix)? {
+            Row::Match(match_ix) => self.matches.get(*match_ix),
+            Row::Label(_) => None,
+        }
+    }
+
     fn is_original_theme(&self, index: usize) -> bool {
-        self.matches
-            .get(index)
+        self.match_at(index)
             .zip(self.original_theme_id)
             .is_some_and(|(mat, original_theme_id)| mat.candidate_id == original_theme_id)
     }
@@ -229,7 +416,7 @@ impl ThemeSelectorDelegate {
         &mut self,
         cx: &mut Context<Picker<ThemeSelectorDelegate>>,
     ) -> Option<Arc<Theme>> {
-        if let Some(mat) = self.matches.get(self.selected_index) {
+        if let Some(mat) = self.match_at(self.selected_index).cloned() {
             let registry = ThemeRegistry::global(cx);
 
             match registry.get(&mat.string) {
@@ -383,11 +570,23 @@ impl PickerDelegate for ThemeSelectorDelegate {
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
-        "Select Theme...".into()
+        "Select Theme…".into()
     }
 
     fn match_count(&self) -> usize {
-        self.matches.len()
+        self.rows.len()
+    }
+
+    fn can_select(&self, ix: usize, _window: &mut Window, _cx: &mut Context<Picker<Self>>) -> bool {
+        matches!(self.rows.get(ix), Some(Row::Match(_)))
+    }
+
+    fn no_matches_action(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Picker<Self>>,
+    ) -> Option<PickerEmptyAction> {
+        Some(PickerEmptyAction::new("More Themes…", more_themes_action()))
     }
 
     fn confirm(
@@ -475,23 +674,28 @@ impl PickerDelegate for ThemeSelectorDelegate {
             };
 
             this.update(cx, |this, cx| {
-                this.delegate.matches = matches;
-                if query.is_empty() && this.delegate.selected_theme.is_none() {
-                    this.delegate.selected_index = this
-                        .delegate
-                        .selected_index
-                        .min(this.delegate.matches.len().saturating_sub(1));
-                } else if let Some(selected) = this.delegate.selected_theme.as_ref() {
-                    this.delegate.selected_index = this
-                        .delegate
+                let delegate = &mut this.delegate;
+                delegate.rows = Self::rows_for(&matches, &delegate.sections, query.is_empty());
+                delegate.matches = matches;
+                let first_row = Self::first_selectable_row(&delegate.rows);
+                if query.is_empty() && delegate.selected_theme.is_none() {
+                    let last_row = delegate.rows.len().saturating_sub(1);
+                    delegate.selected_index = delegate.selected_index.clamp(first_row, last_row);
+                    if matches!(
+                        delegate.rows.get(delegate.selected_index),
+                        Some(Row::Label(_))
+                    ) {
+                        delegate.selected_index += 1;
+                    }
+                } else if let Some(selected) = delegate.selected_theme.as_ref() {
+                    delegate.selected_index = delegate
                         .matches
                         .iter()
-                        .enumerate()
-                        .find(|(_, mtch)| mtch.string == selected.name)
-                        .map(|(ix, _)| ix)
-                        .unwrap_or_default();
+                        .position(|mtch| mtch.string == selected.name)
+                        .and_then(|match_ix| Self::row_of(&delegate.rows, match_ix))
+                        .unwrap_or(first_row);
                 } else {
-                    this.delegate.selected_index = 0;
+                    delegate.selected_index = first_row;
                 }
                 // Preserve the previously selected theme when the filter yields no results.
                 if let Some(theme) = this.delegate.show_selected_theme(cx) {
@@ -507,16 +711,32 @@ impl PickerDelegate for ThemeSelectorDelegate {
         ix: usize,
         selected: bool,
         _window: &mut Window,
-        _cx: &mut Context<Picker<Self>>,
+        cx: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
-        let theme_match = &self.matches.get(ix)?;
+        if let Some(Row::Label(section)) = self.rows.get(ix) {
+            return Some(
+                ListItem::new(("theme-section", ix))
+                    .inset(true)
+                    .spacing(ListItemSpacing::Dense)
+                    .selectable(false)
+                    .child(SectionLabel::new(section.label())),
+            );
+        }
+
+        let theme_match = self.match_at(ix)?;
         let is_original_theme = self.is_original_theme(ix);
+        let swatch = self
+            .swatches
+            .get(theme_match.candidate_id)
+            .copied()
+            .flatten();
 
         Some(
             ListItem::new(ix)
                 .inset(true)
-                .spacing(ListItemSpacing::Sparse)
+                .spacing(ListItemSpacing::Dense)
                 .toggle_state(selected)
+                .start_slot::<AnyElement>(swatch.map(|swatch| swatch.render(cx).into_any_element()))
                 .child(HighlightedLabel::new(
                     theme_match.string.clone(),
                     theme_match.positions.clone(),
@@ -532,37 +752,16 @@ impl PickerDelegate for ThemeSelectorDelegate {
         _: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Option<gpui::AnyElement> {
+        // With nothing to list, the empty state offers the same action.
+        if self.matches.is_empty() {
+            return None;
+        }
         Some(
-            h_flex()
-                .p_2()
-                .w_full()
-                .justify_between()
-                .gap_2()
-                .border_t_1()
-                .border_color(cx.theme().colors().border_variant)
+            picker::footer(cx)
+                .justify_end()
                 .child(
-                    Button::new("docs", "View Theme Docs")
-                        .end_icon(
-                            Icon::new(IconName::ArrowUpRight)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.open_url("https://zed.dev/docs/themes");
-                        })),
-                )
-                .child(
-                    Button::new("more-themes", "Install Themes").on_click(cx.listener({
-                        move |_, _, window, cx| {
-                            window.dispatch_action(
-                                Box::new(Extensions {
-                                    category_filter: Some(ExtensionCategoryFilter::Themes),
-                                    id: None,
-                                }),
-                                cx,
-                            );
-                        }
-                    })),
+                    picker::footer_button("more-themes", "More Themes…")
+                        .on_click(|_, window, cx| window.dispatch_action(more_themes_action(), cx)),
                 )
                 .into_any_element(),
         )
@@ -633,7 +832,7 @@ mod tests {
         workspace: &Entity<workspace::Workspace>,
         cx: &mut VisualTestContext,
     ) -> Entity<Picker<ThemeSelectorDelegate>> {
-        cx.dispatch_action(zed_actions::theme_selector::Toggle {
+        cx.dispatch_action(app_actions::theme_selector::Toggle {
             themes_filter: None,
         });
         cx.run_until_parked();
@@ -654,8 +853,7 @@ mod tests {
         picker.read_with(cx, |picker, _| {
             picker
                 .delegate
-                .matches
-                .get(picker.delegate.selected_index)
+                .match_at(picker.delegate.selected_index)
                 .expect("selected index should point to a match")
                 .string
                 .clone()
@@ -685,6 +883,7 @@ mod tests {
                 .matches
                 .iter()
                 .position(|m| m.string == "Test Light")
+                .and_then(|match_ix| ThemeSelectorDelegate::row_of(&picker.delegate.rows, match_ix))
                 .unwrap()
         });
         picker.update_in(cx, |picker, window, cx| {
@@ -714,5 +913,144 @@ mod tests {
             "Test Light",
             "previewed theme should be preserved after clearing an empty filter"
         );
+    }
+
+    fn register_family_themes(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let registry = ThemeRegistry::global(cx);
+            let base_theme = registry.get("One Dark").unwrap();
+            // Registered out of order, with one later addition to the family.
+            let themes = [
+                ("Unaligned Mono", Appearance::Dark),
+                ("Unaligned Contrast", Appearance::Dark),
+                ("Unaligned Midnight", Appearance::Dark),
+                ("Unaligned Dusk", Appearance::Dark),
+                ("Unaligned Light", Appearance::Light),
+                ("Unaligned", Appearance::Dark),
+            ]
+            .into_iter()
+            .map(|(name, appearance)| {
+                let mut theme = (*base_theme).clone();
+                theme.id = name.to_lowercase().replace(' ', "-");
+                theme.name = name.into();
+                theme.appearance = appearance;
+                theme
+            })
+            .collect();
+
+            registry.register_test_themes([ThemeFamily {
+                id: "test-product-family".to_string(),
+                name: "Test Product Family".into(),
+                author: "test".into(),
+                themes,
+                scales: default_color_scales(),
+            }]);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_theme_selector_lists_the_family_first(cx: &mut TestAppContext) {
+        let app_state = setup_test(cx).await;
+        register_family_themes(cx);
+        let project = Project::test(app_state.fs.clone(), [path!("/test").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let picker = open_theme_selector(&workspace, cx);
+
+        let family = [
+            "Unaligned",
+            "Unaligned Light",
+            "Unaligned Dusk",
+            "Unaligned Midnight",
+            "Unaligned Contrast",
+            "Unaligned Mono",
+        ];
+        picker.read_with(cx, |picker, _| {
+            let delegate = &picker.delegate;
+            let names = delegate
+                .themes
+                .iter()
+                .map(|meta| meta.name.to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(&names[..family.len()], &family);
+
+            // The rest: dark before light, then by name.
+            let rest = delegate.themes[family.len()..]
+                .iter()
+                .map(|meta| (meta.appearance.is_light(), meta.name.to_string()))
+                .collect::<Vec<_>>();
+            let mut sorted = rest.clone();
+            sorted.sort();
+            assert_eq!(rest, sorted);
+            assert!(names.contains(&"Test Light".to_string()));
+
+            // Each section under its label, which is a row that no theme owns.
+            let labels = delegate
+                .rows
+                .iter()
+                .enumerate()
+                .filter_map(|(ix, row)| match row {
+                    Row::Label(section) => Some((ix, *section)),
+                    Row::Match(_) => None,
+                })
+                .collect::<Vec<_>>();
+            let first_light =
+                family.len() + rest.iter().position(|(is_light, _)| *is_light).unwrap();
+            assert_eq!(
+                labels,
+                [
+                    (0, ThemeSection::Family),
+                    (family.len() + 1, ThemeSection::OtherDark),
+                    (first_light + 2, ThemeSection::OtherLight),
+                ]
+            );
+            assert_eq!(delegate.match_count(), names.len() + 3);
+            assert!(delegate.match_at(0).is_none());
+            assert_eq!(delegate.match_at(1).unwrap().string, "Unaligned");
+        });
+
+        // Moving through the list previews each theme and steps over the labels.
+        picker.update_in(cx, |picker, window, cx| {
+            picker.set_selected_index(2, None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(previewed_theme_name(&picker, cx), "Unaligned Light");
+
+        picker.update_in(cx, |picker, window, cx| {
+            picker.set_selected_index(family.len(), None, true, window, cx);
+            picker.select_next(&Default::default(), window, cx);
+        });
+        cx.run_until_parked();
+        let first_other = picker.read_with(cx, |picker, _| {
+            assert_eq!(picker.delegate.selected_index, family.len() + 2);
+            picker.delegate.themes[family.len()].name.to_string()
+        });
+        assert_eq!(selected_theme_name(&picker, cx), first_other);
+        assert_eq!(previewed_theme_name(&picker, cx), first_other);
+
+        // A label cannot be selected.
+        picker.update_in(cx, |picker, window, cx| {
+            picker.set_selected_index(0, None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(selected_theme_name(&picker, cx), first_other);
+
+        // A query lists matches only, without labels.
+        picker.update_in(cx, |picker, window, cx| {
+            picker.update_matches("dusk".to_string(), window, cx);
+        });
+        cx.run_until_parked();
+        picker.read_with(cx, |picker, _| {
+            assert!(
+                picker
+                    .delegate
+                    .rows
+                    .iter()
+                    .all(|row| matches!(row, Row::Match(_)))
+            );
+            assert_eq!(picker.delegate.matches[0].string, "Unaligned Dusk");
+        });
     }
 }

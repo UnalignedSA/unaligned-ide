@@ -1,4 +1,4 @@
-use crate::{Divider, DividerColor, KeyBinding, prelude::*};
+use crate::{KeyBinding, prelude::*};
 use gpui::{ClickEvent, FocusHandle};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -45,9 +45,12 @@ impl ProjectEmptyState {
 }
 
 impl RenderOnce for ProjectEmptyState {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let id = format!("empty-state-{}", self.label);
-        let label = format!("Choose one of the options below to use the {}", self.label);
+        let label = format!(
+            "Open a folder or clone a repository to use the {}.",
+            self.label
+        );
 
         v_flex()
             .id(id)
@@ -57,18 +60,25 @@ impl RenderOnce for ProjectEmptyState {
             .justify_center()
             .track_focus(&self.focus_handle)
             .child(
+                // Same language as the welcome page: mono label, one muted line,
+                // filled primary action, outlined secondary.
                 v_flex()
-                    .w_48()
+                    .w_56()
                     .max_w_full()
-                    .gap_1()
+                    .gap_2()
+                    .child(
+                        Label::new("NO PROJECT OPEN")
+                            .buffer_font(cx)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Placeholder),
+                    )
                     .child(
                         div()
-                            .text_center()
                             .mb_2()
                             .child(Label::new(label).size(LabelSize::Small).color(Color::Muted)),
                     )
                     .child(
-                        Button::new("open_project", "Open Project")
+                        Button::primary("open_project", "Open Project")
                             .full_width()
                             .key_binding(self.open_project_key_binding)
                             .wrap_key_binding(true)
@@ -77,15 +87,9 @@ impl RenderOnce for ProjectEmptyState {
                             }),
                     )
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(Divider::horizontal().color(DividerColor::Border))
-                            .child(Label::new("or").size(LabelSize::XSmall).color(Color::Muted))
-                            .child(Divider::horizontal().color(DividerColor::Border)),
-                    )
-                    .child(
                         Button::new("clone_repo", "Clone Repository")
                             .full_width()
+                            .style(ButtonStyle::Outlined)
                             .when_some(self.on_clone_repo, |button, handler| {
                                 button.on_click(handler)
                             }),

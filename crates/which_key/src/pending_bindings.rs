@@ -234,9 +234,9 @@ impl RenderOnce for PendingBindings {
             .px_2()
             .py_1()
             .child(
+                // Rows sit flush: 24px pitch, like every other list.
                 v_flex()
                     .w(key_column_width)
-                    .gap_1()
                     .items_end()
                     .flex_shrink_0()
                     .children(self.bindings.iter().zip(&binding_widths).map(
@@ -252,7 +252,6 @@ impl RenderOnce for PendingBindings {
             )
             .child(
                 v_flex()
-                    .gap_1()
                     .flex_1()
                     .min_w_0()
                     .children(self.bindings.iter().map(|binding| {
@@ -460,23 +459,23 @@ mod tests {
         ];
         for bindings in [
             vec![
-                KeyBinding::new("cmd-k cmd-s", zed_actions::OpenKeymap, Some("Workspace"))
+                KeyBinding::new("cmd-k cmd-s", app_actions::OpenKeymap, Some("Workspace"))
                     .with_meta(KeybindSource::User.meta()),
-                KeyBinding::new("cmd-k cmd-s", zed_actions::OpenSettings, Some("Workspace"))
+                KeyBinding::new("cmd-k cmd-s", app_actions::OpenSettings, Some("Workspace"))
                     .with_meta(KeybindSource::User.meta()),
             ],
             vec![
-                KeyBinding::new("cmd-k cmd-s", zed_actions::OpenSettings, Some("Editor"))
+                KeyBinding::new("cmd-k cmd-s", app_actions::OpenSettings, Some("Editor"))
                     .with_meta(KeybindSource::Default.meta()),
-                KeyBinding::new("cmd-k cmd-s", zed_actions::OpenKeymap, Some("Workspace"))
+                KeyBinding::new("cmd-k cmd-s", app_actions::OpenKeymap, Some("Workspace"))
                     .with_meta(KeybindSource::User.meta()),
             ],
             vec![
-                KeyBinding::new("cmd-k cmd-s", zed_actions::OpenKeymap, Some("Workspace"))
+                KeyBinding::new("cmd-k cmd-s", app_actions::OpenKeymap, Some("Workspace"))
                     .with_meta(KeybindSource::Default.meta()),
                 KeyBinding::load(
                     "cmd-k cmd-s",
-                    Box::new(zed_actions::OpenSettings),
+                    Box::new(app_actions::OpenSettings),
                     Some(
                         gpui::KeyBindingContextPredicate::parse("Workspace")
                             .expect("valid context")
@@ -495,7 +494,7 @@ mod tests {
             let first_match = matches.first().expect("matching binding");
             assert_eq!(
                 first_match.action().name(),
-                zed_actions::OpenSettings.name()
+                app_actions::OpenSettings.name()
             );
 
             let candidates = keymap.possible_next_bindings_for_input(&input[..1], &contexts);
@@ -505,8 +504,8 @@ mod tests {
                     .map(|binding| binding.action().name())
                     .collect::<Vec<_>>(),
                 vec![
-                    zed_actions::OpenSettings.name(),
-                    zed_actions::OpenKeymap.name()
+                    app_actions::OpenSettings.name(),
+                    app_actions::OpenKeymap.name()
                 ],
             );
             let pending = candidates
@@ -531,7 +530,7 @@ mod tests {
     fn test_prepare_pending_bindings_sorts_shorter_chords_first(cx: &mut App) {
         let bindings = prepare_pending_bindings(
             vec![
-                binding_after_first_keystroke("cmd-k z a", "zed::OpenSettings"),
+                binding_after_first_keystroke("cmd-k z a", "app::OpenSettings"),
                 binding_after_first_keystroke("cmd-k cmd-shift-t", "theme::ToggleMode"),
             ],
             cx,
@@ -595,8 +594,8 @@ mod tests {
             // Custom bindings are needed to exercise a display collision: é and É
             // are distinct keys, but non-Vim formatting capitalizes both to "É".
             let mut bindings = vec![
-                binding_after_first_keystroke("cmd-k é", "zed::OpenSettings"),
-                binding_after_first_keystroke("cmd-k É", "zed::OpenKeymap"),
+                binding_after_first_keystroke("cmd-k é", "app::OpenSettings"),
+                binding_after_first_keystroke("cmd-k É", "app::OpenKeymap"),
             ];
             let first = bindings.first().expect("first binding");
             let second = bindings.last().expect("second binding");
@@ -615,7 +614,9 @@ mod tests {
                 .map(|row| row.action_name.as_ref())
                 .collect::<Vec<_>>();
             action_names.sort();
-            assert_eq!(action_names, vec!["zed: open keymap", "zed: open settings"]);
+            // Command names are Title Case and the `zed::` namespace reads "App"
+            // (`command_palette::humanize_action_name`).
+            assert_eq!(action_names, vec!["App: Open Keymap", "App: Open Settings"]);
             assert!(rows.iter().all(|row| !row.is_group));
         }
     }
@@ -627,8 +628,8 @@ mod tests {
         ui::KeyBinding::set_vim_mode(cx, false);
         let rows = prepare_pending_bindings(
             vec![
-                binding_after_first_keystroke("cmd-k é", "zed::OpenSettings"),
-                binding_after_first_keystroke("cmd-k É", "zed::OpenSettings"),
+                binding_after_first_keystroke("cmd-k é", "app::OpenSettings"),
+                binding_after_first_keystroke("cmd-k É", "app::OpenSettings"),
             ],
             cx,
         );
@@ -638,7 +639,8 @@ mod tests {
         assert_eq!(keys, vec![vec!["É"], vec!["é"]]);
         for row in rows {
             assert_eq!(text_for_keybinding_keystrokes(&row.keystrokes, cx), "É");
-            assert_eq!(row.action_name.as_ref(), "zed: open settings");
+            // Title Case command name, `zed::` shown as "App".
+            assert_eq!(row.action_name.as_ref(), "App: Open Settings");
             assert!(!row.is_group);
         }
     }
@@ -649,9 +651,9 @@ mod tests {
         // A user keymap can extend the default cmd-k cmd-s binding with longer chords.
         let rows = prepare_pending_bindings(
             vec![
-                binding_after_first_keystroke("cmd-k cmd-s", "zed::OpenKeymap"),
-                binding_after_first_keystroke("cmd-k cmd-s cmd-,", "zed::OpenSettings"),
-                binding_after_first_keystroke("cmd-k cmd-s cmd-.", "zed::OpenKeymapFile"),
+                binding_after_first_keystroke("cmd-k cmd-s", "app::OpenKeymap"),
+                binding_after_first_keystroke("cmd-k cmd-s cmd-,", "app::OpenSettings"),
+                binding_after_first_keystroke("cmd-k cmd-s cmd-.", "app::OpenKeymapFile"),
                 binding_after_first_keystroke("cmd-k cmd-o", "workspace::Open"),
                 binding_after_first_keystroke("cmd-k cmd-o cmd-p", "workspace::ReopenLastPicker"),
                 binding_after_first_keystroke("cmd-k z a", "theme::ToggleMode"),
@@ -668,12 +670,13 @@ mod tests {
                     row.is_group,
                 ))
                 .collect::<Vec<_>>(),
+            // Title Case command names, `zed::` shown as "App".
             vec![
-                (parse_keystrokes("cmd-o"), "workspace: open", false),
-                (parse_keystrokes("cmd-s"), "zed: open keymap", false),
+                (parse_keystrokes("cmd-o"), "Workspace: Open", false),
+                (parse_keystrokes("cmd-s"), "App: Open Keymap", false),
                 (
                     parse_keystrokes("cmd-o cmd-p"),
-                    "workspace: reopen last picker",
+                    "Workspace: Reopen Last Picker",
                     false
                 ),
                 (parse_keystrokes("z"), "+2 keybinds", true),
@@ -711,13 +714,13 @@ mod tests {
             KeyContext::parse("Editor").expect("valid context"),
         ];
         let keymap = Keymap::new(vec![
-            KeyBinding::new("cmd-k cmd-s", zed_actions::OpenKeymap, Some("Workspace")),
+            KeyBinding::new("cmd-k cmd-s", app_actions::OpenKeymap, Some("Workspace")),
             KeyBinding::new(
                 "cmd-k cmd-s cmd-,",
-                zed_actions::OpenKeymapFile,
+                app_actions::OpenKeymapFile,
                 Some("Workspace"),
             ),
-            KeyBinding::new("cmd-k cmd-s", zed_actions::OpenSettings, Some("Editor")),
+            KeyBinding::new("cmd-k cmd-s", app_actions::OpenSettings, Some("Editor")),
         ]);
         let input = [
             Keystroke::parse("cmd-k").expect("valid keystroke"),
@@ -728,7 +731,7 @@ mod tests {
         let first_match = matches.first().expect("matching binding");
         assert_eq!(
             first_match.action().name(),
-            zed_actions::OpenSettings.name()
+            app_actions::OpenSettings.name()
         );
 
         // The longer chord comes between the two cmd-k cmd-s bindings, so they aren't adjacent.
@@ -739,9 +742,9 @@ mod tests {
                 .map(|binding| binding.action().name())
                 .collect::<Vec<_>>(),
             vec![
-                zed_actions::OpenSettings.name(),
-                zed_actions::OpenKeymapFile.name(),
-                zed_actions::OpenKeymap.name(),
+                app_actions::OpenSettings.name(),
+                app_actions::OpenKeymapFile.name(),
+                app_actions::OpenKeymap.name(),
             ],
         );
 
@@ -769,7 +772,7 @@ mod tests {
                 ),
                 (
                     parse_keystrokes("cmd-s cmd-,"),
-                    command_palette::humanize_action_name(zed_actions::OpenKeymapFile.name()),
+                    command_palette::humanize_action_name(app_actions::OpenKeymapFile.name()),
                     false,
                 ),
             ],

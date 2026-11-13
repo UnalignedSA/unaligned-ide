@@ -40,13 +40,13 @@ use gpui::{
 };
 use heck::ToSnakeCase as _;
 use language_model::{
-    CompletionIntent, LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent,
-    LanguageModelId, LanguageModelImage, LanguageModelProviderId, LanguageModelRegistry,
-    LanguageModelRequest, LanguageModelRequestMessage, LanguageModelRequestTool,
-    LanguageModelToolChoice, LanguageModelToolResult, LanguageModelToolResultContent,
-    LanguageModelToolUse, LanguageModelToolUseId, MessageContent, PromptCompactionStrategy,
-    ProviderErrorCategory, Role, SelectedModel, Speed, StopReason, TokenUsage,
-    ZED_CLOUD_PROVIDER_ID,
+    CompletionIntent, IDE_CLOUD_PROVIDER_ID, LanguageModel, LanguageModelCompletionError,
+    LanguageModelCompletionEvent, LanguageModelId, LanguageModelImage, LanguageModelProviderId,
+    LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage,
+    LanguageModelRequestTool, LanguageModelToolChoice, LanguageModelToolResult,
+    LanguageModelToolResultContent, LanguageModelToolUse, LanguageModelToolUseId, MessageContent,
+    PromptCompactionStrategy, ProviderErrorCategory, Role, SelectedModel, Speed, StopReason,
+    TokenUsage,
 };
 use project::{Project, trusted_worktrees::TrustedWorktrees};
 use prompt_store::ProjectContext;
@@ -76,6 +76,10 @@ const TOOL_CALL_INTERRUPTED_BY_FOLLOW_UP_MESSAGE: &str =
 pub(crate) const FOLLOW_UP_PERMISSION_DENIED_OPTION_ID: &str = "follow_up_permission_denied";
 pub const MAX_TOOL_NAME_LENGTH: usize = 64;
 pub const MAX_SUBAGENT_DEPTH: u8 = 1;
+
+/// What a tool answers when it is called while no folder is open: one
+/// sentence for the model, shown to the user in the tool's row.
+pub const NO_FOLDER_TOOL_ERROR: &str = "No folder is open. Ask the user to open one.";
 
 pub(crate) fn provider_compatible_tool_name(tool_name: &str) -> String {
     let mut sanitized = String::new();
@@ -1331,6 +1335,15 @@ pub struct Thread {
     /// `cumulative_token_usage` for the in-flight completion request. Reset at
     /// the start of each request.
     current_request_token_usage: TokenUsage,
+    /// What the requests of this session have cost, in US dollars, priced
+    /// request by request with the prices of the provider that served them
+    /// (`LanguageModelProvider::usage_cost`). `None` until a request was made
+    /// with a model whose price is known.
+    cost_usd: Option<f64>,
+    /// `cumulative_token_usage` as it was read from the database. The stored
+    /// thread keeps tokens, not dollars, so what was spent before the thread
+    /// was reopened is estimated from this, at the price of the thread's model.
+    restored_token_usage: Option<TokenUsage>,
     pending_compaction_telemetry: Option<CompactionTelemetry>,
     #[allow(unused)]
     initial_project_snapshot: Shared<Task<Option<Arc<ProjectSnapshot>>>>,
@@ -1482,6 +1495,8 @@ impl Thread {
             context_usage: None,
             cumulative_token_usage: TokenUsage::default(),
             current_request_token_usage: TokenUsage::default(),
+            cost_usd: None,
+            restored_token_usage: None,
             pending_compaction_telemetry: None,
             initial_project_snapshot: {
                 let project_snapshot = Self::project_snapshot(project.clone(), cx);
@@ -1574,7 +1589,7 @@ impl Thread {
         }
 
         let temp_dir = tempfile::Builder::new()
-            .prefix("zed-agent-terminal-")
+            .prefix("ide-agent-terminal-")
             .tempdir()
             .context("failed to create sandboxed terminal temp directory")?;
         let temp_dir = temp_dir.keep();
@@ -1861,6 +1876,9 @@ impl Thread {
             context_usage,
             cumulative_token_usage: db_thread.cumulative_token_usage,
             current_request_token_usage: TokenUsage::default(),
+            cost_usd: None,
+            restored_token_usage: (db_thread.cumulative_token_usage.total_tokens() > 0)
+                .then_some(db_thread.cumulative_token_usage),
             pending_compaction_telemetry: None,
             initial_project_snapshot: Task::ready(db_thread.initial_project_snapshot).shared(),
             context_server_registry,
@@ -2324,6 +2342,23 @@ impl Thread {
         &self.profile_id
     }
 
+    /// Whether a folder is open in the window this chat belongs to.
+    ///
+    /// Unaligned: the chat works without one, but its working directory would
+    /// then be the user's home directory (`Project::default_path_list`). So
+    /// without a folder the agent answers questions and gets no tool that
+    /// reads, lists or writes files or runs a command: see
+    /// [`AgentTool::works_without_folder`] and `Thread::enabled_tools`.
+    pub fn has_open_folder(&self, cx: &App) -> bool {
+        self.project.read(cx).visible_worktrees(cx).next().is_some()
+    }
+
+    /// The names of the tools offered to the model for the next request, as
+    /// the model sees them.
+    pub fn enabled_tool_names(&self, cx: &App) -> Vec<SharedString> {
+        self.enabled_tools(cx).into_keys().collect()
+    }
+
     /// Whether this thread's profile was downgraded to `minimal` at thread start
     /// because the workspace is restricted.
     pub fn profile_was_downgraded(&self) -> bool {
@@ -2422,7 +2457,15 @@ impl Thread {
         self.end_turn_at_next_boundary
     }
 
-    fn accumulate_token_usage(&mut self, update: language_model::TokenUsage) {
+    /// Adds what a request has used since its last report to the session's
+    /// totals: tokens, and dollars when the provider of `model` (the model the
+    /// request was sent to) knows its price.
+    fn accumulate_token_usage(
+        &mut self,
+        update: language_model::TokenUsage,
+        model: Option<&LanguageModel>,
+        cx: &App,
+    ) {
         let previous_accounted_usage = self.current_request_token_usage;
         let current_accounted_usage = TokenUsage {
             input_tokens: previous_accounted_usage
@@ -2439,25 +2482,72 @@ impl Thread {
                 .max(update.cache_read_input_tokens),
         };
         self.current_request_token_usage = current_accounted_usage;
-        self.cumulative_token_usage = self.cumulative_token_usage
-            + TokenUsage {
-                input_tokens: current_accounted_usage
-                    .input_tokens
-                    .saturating_sub(previous_accounted_usage.input_tokens),
-                output_tokens: current_accounted_usage
-                    .output_tokens
-                    .saturating_sub(previous_accounted_usage.output_tokens),
-                cache_creation_input_tokens: current_accounted_usage
-                    .cache_creation_input_tokens
-                    .saturating_sub(previous_accounted_usage.cache_creation_input_tokens),
-                cache_read_input_tokens: current_accounted_usage
-                    .cache_read_input_tokens
-                    .saturating_sub(previous_accounted_usage.cache_read_input_tokens),
-            };
+        let newly_accounted_usage = TokenUsage {
+            input_tokens: current_accounted_usage
+                .input_tokens
+                .saturating_sub(previous_accounted_usage.input_tokens),
+            output_tokens: current_accounted_usage
+                .output_tokens
+                .saturating_sub(previous_accounted_usage.output_tokens),
+            cache_creation_input_tokens: current_accounted_usage
+                .cache_creation_input_tokens
+                .saturating_sub(previous_accounted_usage.cache_creation_input_tokens),
+            cache_read_input_tokens: current_accounted_usage
+                .cache_read_input_tokens
+                .saturating_sub(previous_accounted_usage.cache_read_input_tokens),
+        };
+        self.cumulative_token_usage = self.cumulative_token_usage + newly_accounted_usage;
+
+        // Prices are per token, so pricing each increment adds up to the price
+        // of the whole request, and a request that is cancelled or fails after
+        // it reported usage is counted too: the provider bills it.
+        if let Some(model) = model {
+            self.settle_restored_token_usage(cx);
+            if let Some(cost) = usage_cost_usd(model, &newly_accounted_usage, cx) {
+                self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + cost);
+            }
+        }
+    }
+
+    /// What this session has cost so far in US dollars, as far as the IDE can
+    /// tell from the providers' prices. `None` when no request was made with a
+    /// model that has a price (a subscription, a local model, a provider that
+    /// publishes no prices): nothing is shown then.
+    ///
+    /// Requests made since the thread was opened are priced one by one with
+    /// the model each was sent to. What was spent before the thread was
+    /// reopened is an estimate from the stored token totals at the price of
+    /// the thread's current model. Requests for the title and the summary are
+    /// not counted.
+    pub fn cost_usd(&self, cx: &App) -> Option<f64> {
+        let restored_cost = self.restored_token_usage.and_then(|usage| {
+            let model = self.model.as_model()?;
+            usage_cost_usd(model, &usage, cx)
+        });
+        match (self.cost_usd, restored_cost) {
+            (None, None) => None,
+            (cost, restored_cost) => Some(cost.unwrap_or(0.0) + restored_cost.unwrap_or(0.0)),
+        }
+    }
+
+    /// Fixes the estimate of what was spent before the thread was reopened,
+    /// so that a later change of model does not change the past.
+    fn settle_restored_token_usage(&mut self, cx: &App) {
+        let Some(usage) = self.restored_token_usage else {
+            return;
+        };
+        let Some(model) = self.model.as_model() else {
+            return;
+        };
+        if let Some(cost) = usage_cost_usd(model, &usage, cx) {
+            self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + cost);
+            self.restored_token_usage = None;
+        }
     }
 
     fn update_token_usage(&mut self, update: language_model::TokenUsage, cx: &mut Context<Self>) {
-        self.accumulate_token_usage(update);
+        let model = self.model().cloned();
+        self.accumulate_token_usage(update, model.as_ref(), cx);
         self.record_request_usage(update, cx);
     }
 
@@ -3469,8 +3559,8 @@ impl Thread {
                         event_stream.send_context_compaction_update(compaction_id.clone(), &text);
                     }
                     LanguageModelCompletionEvent::UsageUpdate(usage) => {
-                        this.update(cx, |this, _cx| {
-                            this.accumulate_token_usage(usage);
+                        this.update(cx, |this, cx| {
+                            this.accumulate_token_usage(usage, Some(&model), cx);
                         })?;
                     }
                     LanguageModelCompletionEvent::Stop(_)
@@ -3628,7 +3718,7 @@ impl Thread {
             return Err(anyhow!(error));
         };
 
-        let auto_retry = if model.provider_id() == ZED_CLOUD_PROVIDER_ID {
+        let auto_retry = if model.provider_id() == IDE_CLOUD_PROVIDER_ID {
             plan.is_some()
         } else {
             true
@@ -3924,6 +4014,23 @@ impl Thread {
                     is_error: true,
                     content: vec![LanguageModelToolResultContent::Text(Arc::from(
                         "workspace has become restricted",
+                    ))],
+                    output: None,
+                },
+            ));
+        }
+
+        // The same for a folder: the last one can be closed while a turn runs.
+        // Without a folder nothing may touch the home directory.
+        if !tool.works_without_folder() && !self.has_open_folder(cx) {
+            return Task::ready((
+                owning_message_ix,
+                LanguageModelToolResult {
+                    tool_use_id,
+                    tool_name,
+                    is_error: true,
+                    content: vec![LanguageModelToolResultContent::Text(Arc::from(
+                        NO_FOLDER_TOOL_ERROR,
                     ))],
                     output: None,
                 },
@@ -4424,10 +4531,20 @@ impl Thread {
         let is_restricted =
             TrustedWorktrees::has_restricted_worktrees(&self.project.read(cx).worktree_store(), cx);
 
+        // Unaligned: with no folder open the agent only answers. Built-in
+        // tools that touch files, a terminal or another agent are not offered
+        // whatever the profile says, and a context server's tools only when
+        // the "ask" profile enables them too (by default it enables none).
+        let no_folder = !self.has_open_folder(cx);
+        let ask_profile = AgentSettings::get_global(cx)
+            .profiles
+            .get(&AgentProfileId(builtin_profiles::ASK.into()));
+
         let mut tools = self
             .tools
             .iter()
             .filter(|(_, tool)| !is_restricted || tool.allow_in_restricted_mode())
+            .filter(|(_, tool)| !no_folder || tool.works_without_folder())
             .filter_map(|(tool_name, tool)| {
                 let terminal_variant = matches!(
                     tool_name.as_ref(),
@@ -4464,6 +4581,13 @@ impl Thread {
         let mut duplicate_tool_names = HashSet::default();
         for (server_id, server_tools) in self.context_server_registry.read(cx).servers() {
             for (tool_name, tool) in server_tools {
+                if no_folder
+                    && !ask_profile.is_some_and(|ask| {
+                        ask.is_context_server_tool_enabled(&server_id.0, &tool_name)
+                    })
+                {
+                    continue;
+                }
                 if profile.is_context_server_tool_enabled(&server_id.0, &tool_name) {
                     let tool_name: SharedString =
                         provider_compatible_tool_name(tool_name.as_ref()).into();
@@ -4635,6 +4759,8 @@ impl Thread {
             ),
             is_linux: cfg!(target_os = "linux"),
             is_windows: cfg!(target_os = "windows"),
+            product_name: branding::PRODUCT_NAME,
+            no_folder: !self.has_open_folder(cx),
         }
         .render(&self.templates)
         .context("failed to build system prompt")
@@ -4761,10 +4887,46 @@ impl Thread {
         Some(end_index)
     }
 
+    /// The model that writes the summary of a compaction: the one the user
+    /// chose (`agent.compaction_model`), else the cheap helper model of the
+    /// chat model's provider when the conversation fits in it, else the chat
+    /// model itself.
     fn compaction_model(&self, cx: &App) -> Option<LanguageModel> {
         LanguageModelRegistry::read_global(cx)
             .compaction_model()
+            .or_else(|| self.fast_compaction_model(cx))
             .or_else(|| self.model().cloned())
+    }
+
+    /// The `default_fast_model` of the chat model's provider, when it can read
+    /// what there is to summarize. A summary is a whole-conversation request:
+    /// on a pay-as-you-go provider the helper model makes it cost a fraction
+    /// of what the chat model would charge, as it does for titles.
+    ///
+    /// `None` when the size of the conversation is not known, or when it does
+    /// not fit in the helper model with room to spare: a summary that fails
+    /// on a context overflow would cost more than it saves.
+    fn fast_compaction_model(&self, cx: &App) -> Option<LanguageModel> {
+        let thread_model = self.model()?;
+        let fast_model = LanguageModelRegistry::read_global(cx)
+            .provider(&thread_model.provider_id)?
+            .default_fast_model(cx)?;
+        if fast_model.provider_id == thread_model.provider_id && fast_model.id == thread_model.id {
+            return None;
+        }
+
+        let usage = self.context_usage?;
+        let active_tokens = total_input_tokens(usage).saturating_add(usage.output_tokens);
+        let capacity = compaction_input_capacity(
+            fast_model.max_input_tokens(),
+            fast_model.max_total_tokens(),
+            fast_model.max_output_tokens(),
+        );
+        // The count comes from the chat model's tokenizer and the helper model
+        // has its own, so only a conversation well inside the window is sent.
+        let fits =
+            active_tokens <= (capacity as f64 * FAST_COMPACTION_MODEL_MAX_CONTEXT_SHARE) as u64;
+        fits.then_some(fast_model)
     }
 
     fn build_compaction_request(
@@ -5011,13 +5173,39 @@ fn compaction_input_capacity(
     })
 }
 
+/// The share of the helper model's input capacity a conversation may fill and
+/// still be summarized by it (see `Thread::fast_compaction_model`).
+const FAST_COMPACTION_MODEL_MAX_CONTEXT_SHARE: f64 = 0.8;
+
+/// What `usage` costs in US dollars at the prices of the provider that serves
+/// `model`, or `None` when that provider has no price for it.
+fn usage_cost_usd(model: &LanguageModel, usage: &TokenUsage, cx: &App) -> Option<f64> {
+    LanguageModelRegistry::read_global(cx)
+        .provider(&model.provider_id)?
+        .usage_cost(&model.id, usage, cx)
+}
+
+/// The most tokens a chat may hold before auto-compaction runs when the
+/// threshold is a share of the context window (the default, "90%").
+///
+/// Every request sends the whole conversation again and is billed for it, so
+/// on a pay-as-you-go provider the price of a turn grows with the context. A
+/// share of the window is a fine limit for a 128k or 200k model; for a model
+/// with a 1M window, "90%" would let each turn carry 900k input tokens (dollars
+/// per message at the usual prices) before anything is summarized. Past this
+/// many tokens the conversation is compacted whatever the size of the window.
+/// A threshold given in tokens (`100000`, `-20000`) is the user's own number
+/// and is not capped.
+pub const AUTO_COMPACT_PERCENTAGE_TOKEN_CAP: u64 = 200_000;
+
 fn auto_compact_threshold_token_count(
     threshold: AutoCompactThreshold,
     max_token_count: u64,
 ) -> u64 {
     match threshold {
         AutoCompactThreshold::Percentage(percent) => {
-            ((max_token_count as f64) * percent).ceil() as u64
+            let share_of_window = ((max_token_count as f64) * percent).ceil() as u64;
+            share_of_window.min(AUTO_COMPACT_PERCENTAGE_TOKEN_CAP)
         }
         AutoCompactThreshold::TokensUsed(tokens) => tokens,
         AutoCompactThreshold::TokensRemaining(tokens) => {
@@ -5560,6 +5748,18 @@ where
         true
     }
 
+    /// Whether this tool is offered while no folder is open in the window.
+    ///
+    /// Unaligned: without a folder the chat's working directory would be the
+    /// user's home directory, so the agent only answers questions then. A
+    /// tool that reads, lists or writes files, runs a command, or hands work
+    /// to another agent keeps the default (`false`): it is not offered to the
+    /// model and fails if it is called. Only tools that touch nothing on this
+    /// machine return `true`.
+    fn works_without_folder() -> bool {
+        false
+    }
+
     /// Runs the tool with the provided input.
     ///
     /// Returns `Result<Self::Output, Self::Output>` rather than `Result<Self::Output, anyhow::Error>`
@@ -5626,6 +5826,10 @@ pub trait AnyAgentTool {
     fn allow_in_restricted_mode(&self) -> bool {
         true
     }
+    /// See [`AgentTool::works_without_folder`]. Tools of context servers
+    /// answer `true` here: without a folder they are offered only when the
+    /// "ask" profile enables them (see `Thread::enabled_tools`).
+    fn works_without_folder(&self) -> bool;
     /// See [`AgentTool::run`] for why this returns `Result<AgentToolOutput, AgentToolOutput>`.
     fn run(
         self: Arc<Self>,
@@ -5679,6 +5883,10 @@ where
 
     fn allow_in_restricted_mode(&self) -> bool {
         T::allow_in_restricted_mode()
+    }
+
+    fn works_without_folder(&self) -> bool {
+        T::works_without_folder()
     }
 
     fn run(
@@ -6270,7 +6478,7 @@ impl ToolCallEventStream {
         let allow_thread_label = if self.is_subagent(cx) {
             "Allow for this subagent"
         } else {
-            "Allow for this thread"
+            "Allow for this chat"
         };
         let options = acp_thread::PermissionOptions::Flat(vec![
             acp_v2::PermissionOption::new(
@@ -6640,7 +6848,7 @@ impl ToolCallEventStream {
         let allow_thread_label = if self.is_subagent(cx) {
             "Run without sandbox for this subagent"
         } else {
-            "Run without sandbox for this thread"
+            "Run without sandbox for this chat"
         };
         let options = acp_thread::PermissionOptions::Flat(vec![
             // Retry isn't an allow/deny choice; the UI renders it with its own
@@ -8024,10 +8232,42 @@ mod tests {
         );
     }
 
+    /// The tokens at which `thread` starts to compact: the smallest context
+    /// for which `compaction_message_target_ix` gives a target.
+    fn compaction_starts_at(
+        thread: &mut Thread,
+        user_message_id: &ClientUserMessageId,
+        expected_threshold: u64,
+        cx: &App,
+    ) {
+        for (input_tokens, expected_target) in [
+            (expected_threshold - 1, None),
+            (expected_threshold, Some(2)),
+        ] {
+            insert_request_token_usage(
+                thread,
+                user_message_id.clone(),
+                language_model::TokenUsage {
+                    input_tokens,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                thread.compaction_message_target_ix(cx),
+                expected_target,
+                "with {input_tokens} tokens in the context"
+            );
+        }
+    }
+
     #[gpui::test]
     async fn test_compaction_threshold_uses_percentage_setting(cx: &mut TestAppContext) {
         let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
-        let model = fake.model("fake");
+        // The default threshold is "90%".
+        let model = fake.update_model("fake", |model| {
+            model.max_token_count = 128_000;
+            model.max_input_tokens = 128_000;
+        });
         let user_message_id = ClientUserMessageId::new();
 
         cx.update(|cx| {
@@ -8037,27 +8277,136 @@ mod tests {
                     .messages
                     .push(user_text_message(user_message_id.clone(), "below limit"));
                 thread.messages.push(agent_text_message("answer"));
+
+                // 90% of 128 000.
+                compaction_starts_at(thread, &user_message_id, 115_200, cx);
+            });
+        });
+    }
+
+    /// A share of a very large context window is capped: every request is
+    /// billed for the whole conversation, so a 1M-token model is compacted at
+    /// 200 000 tokens, not at 900 000. A threshold in tokens is not capped.
+    #[gpui::test]
+    async fn test_percentage_compaction_threshold_is_capped_for_large_windows(
+        cx: &mut TestAppContext,
+    ) {
+        let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
+        let model = fake.model("fake");
+        assert_eq!(model.max_token_count(), 1_000_000);
+        let user_message_id = ClientUserMessageId::new();
+
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model.clone(), cx);
+                thread
+                    .messages
+                    .push(user_text_message(user_message_id.clone(), "below limit"));
+                thread.messages.push(agent_text_message("answer"));
+
+                // The default, "90%": 900 000 tokens, capped.
+                assert_eq!(AUTO_COMPACT_PERCENTAGE_TOKEN_CAP, 200_000);
+                compaction_starts_at(thread, &user_message_id, 200_000, cx);
+
+                // A share that stays under the cap is used as it is.
+                set_auto_compact_settings(
+                    cx,
+                    agent_settings::AutoCompactSettings {
+                        enabled: true,
+                        threshold: AutoCompactThreshold::Percentage(0.15),
+                    },
+                );
+                compaction_starts_at(thread, &user_message_id, 150_000, cx);
+
+                // The user's own numbers are respected, above the cap too.
+                set_auto_compact_settings(
+                    cx,
+                    agent_settings::AutoCompactSettings {
+                        enabled: true,
+                        threshold: AutoCompactThreshold::TokensUsed(600_000),
+                    },
+                );
+                compaction_starts_at(thread, &user_message_id, 600_000, cx);
+
+                set_auto_compact_settings(
+                    cx,
+                    agent_settings::AutoCompactSettings {
+                        enabled: true,
+                        threshold: AutoCompactThreshold::TokensRemaining(100_000),
+                    },
+                );
+                compaction_starts_at(thread, &user_message_id, 900_001, cx);
+            });
+        });
+    }
+
+    /// Without `agent.compaction_model`, the summary is written by the cheap
+    /// helper model of the chat model's provider when the conversation fits
+    /// in it, and by the chat model otherwise.
+    #[gpui::test]
+    async fn test_compaction_uses_the_fast_model_when_the_conversation_fits(
+        cx: &mut TestAppContext,
+    ) {
+        let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
+        // The fake provider's fast model is its first one, "fake".
+        let fast_model = fake.update_model("fake", |model| {
+            model.max_token_count = 128_000;
+            model.max_input_tokens = 128_000;
+        });
+        let thread_model = fake.model("chat");
+        let user_message_id = ClientUserMessageId::new();
+
+        cx.update(|cx| {
+            set_registry_compaction_model(cx, None);
+            thread.update(cx, |thread, cx| {
+                thread.set_model(thread_model.clone(), cx);
+                thread
+                    .messages
+                    .push(user_text_message(user_message_id.clone(), "old user"));
+                thread.messages.push(agent_text_message("old assistant"));
+
+                // Unknown size: the chat model.
+                assert_eq!(
+                    thread.compaction_model(cx).map(|model| model.id),
+                    Some(thread_model.id.clone())
+                );
+
+                // 80% of the helper model's 128 000 tokens is 102 400.
+                for (input_tokens, expected_model) in
+                    [(102_400, &fast_model), (102_401, &thread_model)]
+                {
+                    insert_request_token_usage(
+                        thread,
+                        user_message_id.clone(),
+                        language_model::TokenUsage {
+                            input_tokens,
+                            ..Default::default()
+                        },
+                    );
+                    assert_eq!(
+                        thread.compaction_model(cx).map(|model| model.id),
+                        Some(expected_model.id.clone()),
+                        "with {input_tokens} tokens in the context"
+                    );
+                }
+            });
+
+            // The user's choice wins over the helper model.
+            let configured_model = fake.model("configured");
+            set_registry_compaction_model(cx, Some(configured_model.clone()));
+            thread.update(cx, |thread, cx| {
                 insert_request_token_usage(
                     thread,
                     user_message_id.clone(),
                     language_model::TokenUsage {
-                        input_tokens: 899_999,
+                        input_tokens: 1_000,
                         ..Default::default()
                     },
                 );
-
-                assert_eq!(thread.compaction_message_target_ix(cx), None);
-
-                insert_request_token_usage(
-                    thread,
-                    user_message_id.clone(),
-                    language_model::TokenUsage {
-                        input_tokens: 900_000,
-                        ..Default::default()
-                    },
+                assert_eq!(
+                    thread.compaction_model(cx).map(|model| model.id),
+                    Some(configured_model.id)
                 );
-
-                assert_eq!(thread.compaction_message_target_ix(cx), Some(2));
             });
         });
     }
@@ -8065,7 +8414,14 @@ mod tests {
     #[gpui::test]
     async fn test_compaction_threshold_accounts_for_max_output_tokens(cx: &mut TestAppContext) {
         let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
-        let model = fake.update_model("fake", |model| model.max_output_tokens = Some(32_000));
+        // Unaligned default: a 200 000-token window, so that "90%" of what is
+        // left after the output reservation (168 000) stays under the cap on
+        // percentage thresholds (`AUTO_COMPACT_PERCENTAGE_TOKEN_CAP`).
+        let model = fake.update_model("fake", |model| {
+            model.max_token_count = 200_000;
+            model.max_input_tokens = 200_000;
+            model.max_output_tokens = Some(32_000);
+        });
         let user_message_id = ClientUserMessageId::new();
 
         cx.update(|cx| {
@@ -8080,7 +8436,7 @@ mod tests {
                     thread,
                     user_message_id.clone(),
                     language_model::TokenUsage {
-                        input_tokens: 871_199,
+                        input_tokens: 151_199,
                         ..Default::default()
                     },
                 );
@@ -8091,7 +8447,7 @@ mod tests {
                     thread,
                     user_message_id.clone(),
                     language_model::TokenUsage {
-                        input_tokens: 871_200,
+                        input_tokens: 151_200,
                         ..Default::default()
                     },
                 );
@@ -8109,7 +8465,7 @@ mod tests {
                     thread,
                     user_message_id.clone(),
                     language_model::TokenUsage {
-                        input_tokens: 948_000,
+                        input_tokens: 148_000,
                         ..Default::default()
                     },
                 );
@@ -8120,7 +8476,7 @@ mod tests {
                     thread,
                     user_message_id.clone(),
                     language_model::TokenUsage {
-                        input_tokens: 948_001,
+                        input_tokens: 148_001,
                         ..Default::default()
                     },
                 );
@@ -9547,6 +9903,10 @@ mod tests {
 
         const NAME: &'static str = "registered_image_tool";
 
+        fn works_without_folder() -> bool {
+            true
+        }
+
         fn kind() -> acp_v2::ToolKind {
             acp_v2::ToolKind::Other
         }
@@ -9635,7 +9995,7 @@ mod tests {
                 ),
                 (
                     "allow_thread",
-                    "Allow for this thread",
+                    "Allow for this chat",
                     acp_v2::PermissionOptionKind::AllowAlways,
                 ),
                 (
@@ -9713,7 +10073,7 @@ mod tests {
             vec![
                 ("retry", "Retry"),
                 ("allow", "Run without sandbox once"),
-                ("allow_thread", "Run without sandbox for this thread"),
+                ("allow_thread", "Run without sandbox for this chat"),
                 ("allow_always", "Always run without sandbox"),
                 ("deny", "Deny"),
             ]

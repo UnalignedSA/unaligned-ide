@@ -78,6 +78,11 @@ impl AgentTool for AskUserTool {
         acp_v2::ToolKind::Other
     }
 
+    // A question to the user.
+    fn works_without_folder() -> bool {
+        true
+    }
+
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,

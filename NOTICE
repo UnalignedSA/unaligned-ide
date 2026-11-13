@@ -1,0 +1,149 @@
+Unaligned IDE
+=============
+
+Unaligned IDE is free software. You may redistribute it and modify it under the
+terms of the GNU General Public License, version 3 or (at your option) any
+later version: see LICENSE-GPL. It comes with NO WARRANTY, to the extent
+permitted by law. Some crates of this repository are licensed under the Apache
+License, version 2.0, instead: see LICENSE-APACHE and "Licences in this
+repository" below.
+
+
+Based on Zed
+------------
+
+Unaligned IDE is a modified version (a fork) of the Zed editor.
+
+    Zed
+    Copyright 2022 - 2025 Zed Industries, Inc.
+    https://github.com/zed-industries/zed
+
+Zed is licensed under GPL-3.0-or-later (the application) and Apache-2.0 (GPUI
+and other crates). This fork keeps both licences on the code they cover.
+
+Fork point: upstream commit 3e23a0c48201a9cc34ad4a3a4225910247de41f4
+(2026-11-12), which carries the version number 1.30.0.
+
+Modified by the Unaligned IDE contributors since 2026. The history of this
+repository after the fork point is the record of the changes.
+
+"Zed" is the name of the upstream project. It appears here and in the product
+only to say where the code comes from. Unaligned IDE is a separate project and
+is not presented as Zed.
+
+
+Licences in this repository
+---------------------------
+
+Each crate's Cargo.toml says which licence covers it in its `license` field,
+and each crate directory carries a LICENSE-GPL or LICENSE-APACHE link.
+
+  GPL-3.0-or-later   the application: editor, workspace, project, agent, the
+                     user interface crates, and everything this fork added
+                     (among others the `branding` crate and the Unaligned
+                     provider).
+  Apache-2.0         GPUI and its platform layers, and the support crates that
+                     upstream publishes under that licence (among others
+                     `util`, `collections`, `sum_tree`, `refineable`,
+                     `http_client`, `extension_api`).
+
+Nine upstream manifests have no `license` field (`dev_container`, `grammars`,
+`language_core`, `tabular_data_preview`, the four `*_benchmarks` crates and
+`tooling/lints`). This fork did not change that.
+
+
+Files changed in Apache-2.0 crates
+----------------------------------
+
+The Apache License, section 4(b), asks that changed files say so. Compared
+with the fork point, this fork changed the following files of Apache-2.0
+crates (state of 2026-11-12):
+
+  crates/gpui/src/style.rs
+      A process-wide scale for the named corner radii
+      (`set_corner_radius_scale`, `corner_radius_scale`, `scaled_radius`).
+
+  crates/gpui_macros/src/styles.rs
+      The named radii (`rounded_xs` to `rounded_3xl`) go through
+      `scaled_radius`.
+
+  crates/http_client/src/http_client.rs
+      URLs of Zed's hosted services are refused unless the environment
+      variable ZED_SERVER_URL is set (`zed_hosted_services_enabled`,
+      `ZED_CLOUD_UNAVAILABLE_MESSAGE`, `is_fake`).
+
+  crates/cloud_api_client/src/cloud_api_client.rs
+      The three feedback calls fail without sending a request.
+
+  crates/oauth_callback_server/src/oauth_callback_server.rs
+      The page shown in the browser after a sign-in names no product.
+
+  crates/util/src/util.rs
+      Messages and helper names use the product's own name and identifiers.
+
+  crates/extension_suggest/src/extension_suggest.rs
+      Wording and links no longer refer to Zed's hosted services.
+
+To list them again after later changes (run from the repository root):
+
+    git diff --stat 3e23a0c482 -- $(grep -rl --include=Cargo.toml \
+        '^license = "Apache-2.0"' crates extensions tooling | xargs -n1 dirname)
+
+
+Bundled fonts
+-------------
+
+The fonts in assets/fonts are embedded in the application, unmodified. Each is
+under the SIL Open Font License, version 1.1; the licence and the copyright
+notice are beside the font files.
+
+  Onest            Copyright 2021 The Onest Project Authors
+                   assets/fonts/onest/OFL.txt
+  JetBrains Mono   Copyright 2020 The JetBrains Mono Project Authors
+                   assets/fonts/jetbrains-mono/OFL.txt
+  Unbounded        Copyright 2022 The Unbounded Project Authors
+                   assets/fonts/unbounded/OFL.txt
+  IBM Plex Sans    Copyright (c) 2017 IBM Corp. with Reserved Font Name "Plex"
+                   assets/fonts/ibm-plex-sans/license.txt
+  Lilex            Copyright 2019 The Lilex Project Authors
+                   assets/fonts/lilex/OFL.txt
+
+
+Bundled themes
+--------------
+
+Each theme family has its licence in its directory; assets/themes/LICENSES
+holds them all. All four are under the MIT License.
+
+  Unaligned (Unaligned, Light, Dusk, Midnight, Contrast)
+                   Copyright (c) 2026 Unaligned
+                   assets/themes/unaligned/LICENSE
+  One (Dark, Light)
+                   Copyright (c) 2014 GitHub Inc.
+                   assets/themes/one/LICENSE
+  Ayu (Dark, Light, Mirage)
+                   Copyright (c) 2016 Ike Ku
+                   assets/themes/ayu/LICENSE
+  Gruvbox (Dark and Light, each also Hard and Soft)
+                   Copyright (c) Pavel Pertsev
+                   assets/themes/gruvbox/LICENSE
+
+
+Bundled icons
+-------------
+
+Most interface icons in assets/icons come from upstream. They include icons of
+the Lucide set (ISC License; portions from Feather, MIT License): see
+assets/icons/LICENSES. The product's mark and its application icons are
+generated from the Unaligned logo by script/unaligned/make-icons.
+
+
+Dependencies
+------------
+
+The licences of the Rust dependencies are not listed here. They are collected
+when the application is packaged: script/generate-licenses (Linux, macOS) and
+script/generate-licenses.ps1 (Windows) write assets/licenses.md, which holds
+the theme, icon and font licences above followed by the licence of every
+dependency. The application shows that file, with the text of the GNU General
+Public License, on its licences page.

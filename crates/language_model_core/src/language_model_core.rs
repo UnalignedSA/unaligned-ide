@@ -341,7 +341,7 @@ impl LanguageModelCompletionError {
         {
             let category = ProviderErrorCategory::from_http_status(status_code, &message);
             Self::from_provider_response(
-                ZED_CLOUD_PROVIDER_NAME,
+                IDE_CLOUD_PROVIDER_NAME,
                 Some(status_code),
                 Some(code),
                 message,

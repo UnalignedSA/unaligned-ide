@@ -97,9 +97,7 @@ impl Chip {
 
 impl RenderOnce for Chip {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let bg_color = self
-            .bg_color
-            .unwrap_or(cx.theme().colors().element_background);
+        let bg_color = self.bg_color.unwrap_or(gpui::transparent_black());
 
         let border_color = self.border_color.unwrap_or(cx.theme().colors().border);
 
@@ -107,7 +105,7 @@ impl RenderOnce for Chip {
             .when_some(self.height, |this, h| this.h(h))
             .when(self.truncate, |this| this.min_w_0())
             .when(!self.truncate, |this| this.flex_none())
-            .gap_0p5()
+            .gap_1()
             .px_1()
             .border_1()
             .rounded_sm()

@@ -43,8 +43,8 @@ use workspace::{
     register_serializable_item, with_active_or_new_workspace,
 };
 
+use app_actions::{ChangeKeybinding, OpenKeymap};
 pub use ui_components::*;
-use zed_actions::{ChangeKeybinding, OpenKeymap};
 
 use crate::{
     action_completion_provider::ActionCompletionProvider,
@@ -1980,7 +1980,7 @@ impl Item for KeymapEditor {
 }
 
 impl Render for KeymapEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut ui::Context<Self>) -> impl ui::IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut ui::Context<Self>) -> impl ui::IntoElement {
         if let SearchMode::KeyStroke { exact_match } = self.search_mode {
             let button = IconButton::new("keystrokes-exact-match", IconName::CaseSensitive)
                 .tooltip(move |_window, cx| {
@@ -2034,12 +2034,16 @@ impl Render for KeymapEditor {
                 this.show_hover_menus = true;
             }))
             .size_full()
-            .p_2()
-            .gap_1()
             .bg(theme.colors().editor_background)
             .child(
+                // Toolbar: the search on a sunken field, the actions beside it,
+                // closed by a 1px line above the table.
                 v_flex()
+                    .px_3()
+                    .py_2()
                     .gap_2()
+                    .border_b_1()
+                    .border_color(theme.colors().border)
                     .child(
                         h_flex()
                             .gap_2()
@@ -2052,11 +2056,21 @@ impl Render for KeymapEditor {
                                     })
                                     .flex_1()
                                     .min_w_0()
-                                    .h_8()
+                                    .h(rems_from_px(28_f32))
                                     .px_2()
+                                    .gap_1p5()
+                                    .bg(theme.colors().background)
                                     .border_1()
-                                    .border_color(theme.colors().border)
-                                    .rounded_md()
+                                    .border_color(strong_line(cx))
+                                    .when(
+                                        self.filter_editor.focus_handle(cx).is_focused(window),
+                                        |this| this.border_color(theme.colors().text),
+                                    )
+                                    .child(
+                                        Icon::new(IconName::MagnifyingGlass)
+                                            .size(IconSize::Small)
+                                            .color(Color::Muted),
+                                    )
                                     .child(self.filter_editor.clone()),
                             )
                             .child(
@@ -2099,13 +2113,14 @@ impl Render for KeymapEditor {
                                     )
                                     .child(
                                         Button::new("edit-in-json", "Edit in JSON")
+                                            .label_size(LabelSize::Small)
                                             .key_binding(
-                                                ui::KeyBinding::for_action_in(&zed_actions::OpenKeymapFile, &focus_handle, cx)
+                                                ui::KeyBinding::for_action_in(&app_actions::OpenKeymapFile, &focus_handle, cx)
                                                     .map(|kb| kb.size(rems_from_px(10_f32))),
                                             )
                                             .on_click(|_, window, cx| {
                                                 window.dispatch_action(
-                                                    zed_actions::OpenKeymapFile.boxed_clone(),
+                                                    app_actions::OpenKeymapFile.boxed_clone(),
                                                     cx,
                                                 );
                                             })
@@ -2113,6 +2128,7 @@ impl Render for KeymapEditor {
                                     .child(
                                         Button::new("create", "Create Keybinding")
                                             .style(ButtonStyle::Outlined)
+                                            .label_size(LabelSize::Small)
                                             .key_binding(
                                                 ui::KeyBinding::for_action_in(&OpenCreateKeybindingModal, &focus_handle, cx)
                                                     .map(|kb| kb.size(rems_from_px(10_f32))),
@@ -2141,7 +2157,6 @@ impl Render for KeymapEditor {
             .child(
                 Table::new(COLS)
                     .interactable(&self.table_interaction_state)
-                    .striped()
                     .empty_table_callback({
                         let this = cx.entity();
                         move |window, cx| this.read(cx).render_no_matches_hint(window, cx)
@@ -2149,7 +2164,18 @@ impl Render for KeymapEditor {
                     .width_config(ColumnWidthConfig::redistributable(
                         self.current_widths.clone(),
                     ))
-                    .header(vec!["", "Action", "Arguments", "Keystrokes", "Context", "Source"])
+                    .header(
+                        ["", "Action", "Arguments", "Keystrokes", "Context", "Source"]
+                            .into_iter()
+                            .map(|title| {
+                                // Column titles as the site's mono uppercase labels.
+                                Label::new(title.to_uppercase())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Placeholder)
+                                    .buffer_font(cx)
+                            })
+                            .collect::<Vec<_>>(),
+                    )
                     .uniform_list(
                         "keymap-editor-table",
                         row_count,
@@ -2184,8 +2210,10 @@ impl Render for KeymapEditor {
                                                     .clone()
                                                     .into_any_element()
                                             } else {
+                                                // A binding set to `null` in a keymap
+                                                // file: the keystroke is unbound there.
                                                 const NULL: SharedString =
-                                                    SharedString::new_static("<null>");
+                                                    SharedString::new_static("Unbound");
                                                 muted_styled_text(NULL, cx)
                                                     .into_any_element()
                                             }
@@ -2362,7 +2390,10 @@ impl Render for KeymapEditor {
                                             row.tooltip(Tooltip::text("This action is unbound"))
                                         }),
                                 )
-                                .border_2()
+                                // The selected row carries the 2px accent marker on its
+                                // left edge; a conflicting one keeps its error tint.
+                                .border_l_2()
+                                .border_color(gpui::transparent_black())
                                 .when(
                                     conflict.is_some_and(|conflict| {
                                         conflict.is_user_keybind_conflict()
@@ -2370,7 +2401,8 @@ impl Render for KeymapEditor {
                                     |row| row.bg(cx.theme().status().error_background),
                                 )
                                 .when(is_selected, |row| {
-                                    row.border_color(cx.theme().colors().panel_focused_border)
+                                    row.border_color(cx.theme().colors().text_accent)
+                                        .bg(cx.theme().colors().ghost_element_selected)
                                 })
                                 .into_any_element()
                         }),
@@ -2394,6 +2426,12 @@ impl Render for KeymapEditor {
                 .with_priority(1)
             }))
     }
+}
+
+/// The site's `line-strong`: the border of inputs and secondary buttons.
+/// The theme has no token for it, so it is derived from the faint text colour.
+fn strong_line(cx: &App) -> gpui::Hsla {
+    cx.theme().colors().text_disabled.opacity(0.5)
 }
 
 fn row_group_id(row_index: usize) -> SharedString {
@@ -3211,11 +3249,14 @@ impl Render for KeybindingEditorModal {
                                     Button::new("cancel", "Cancel")
                                         .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
                                 )
-                                .child(Button::new("save-btn", "Save").on_click(cx.listener(
-                                    |this, _event, _window, cx| {
-                                        this.save_or_display_error(cx);
-                                    },
-                                ))),
+                                // The modal's one primary action.
+                                .child(
+                                    Button::new("save-btn", "Save")
+                                        .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.save_or_display_error(cx);
+                                        })),
+                                ),
                         ),
                     ),
             )
@@ -3480,9 +3521,9 @@ impl Render for ActionArgumentsEditor {
         let border_color = if self.is_loading {
             colors.border_disabled
         } else if self.focus_handle.contains_focused(window, cx) {
-            colors.border_focused
+            colors.text
         } else {
-            colors.border_variant
+            strong_line(cx)
         };
 
         let text_style = {
@@ -3503,8 +3544,7 @@ impl Render for ActionArgumentsEditor {
             .min_w_48()
             .px_2()
             .flex_grow_1()
-            .rounded_md()
-            .bg(cx.theme().colors().editor_background)
+            .bg(cx.theme().colors().background)
             .border_1()
             .border_color(border_color)
             .track_focus(&self.focus_handle)
@@ -4169,8 +4209,8 @@ mod tests {
     #[gpui::test]
     async fn test_modifier_search_keeps_matching_shortcuts_after_release(cx: &mut TestAppContext) {
         let keymap_content = r#"[{"bindings": {
-            "ctrl-k": "zed::OpenKeymap",
-            "ctrl": "zed::OpenKeymap"
+            "ctrl-k": "app::OpenKeymap",
+            "ctrl": "app::OpenKeymap"
         }}]"#;
         let (_fs, keymap_editor, mut cx) = setup_keymap_editor(cx, keymap_content).await;
         let workspace = keymap_editor.read_with(&cx, |editor, _| editor.workspace.clone());
@@ -4199,7 +4239,7 @@ mod tests {
         cx.simulate_modifiers_change(gpui::Modifiers::control());
         cx.run_until_parked();
         keymap_editor.read_with(&cx, |editor, cx| {
-            assert_eq!(visible_rows_for_action(editor, "zed::OpenKeymap").len(), 1);
+            assert_eq!(visible_rows_for_action(editor, "app::OpenKeymap").len(), 1);
             let query = editor.current_keystroke_query(cx);
             assert_eq!(query.len(), 1);
             assert!(query[0].key().is_empty());
@@ -4215,7 +4255,7 @@ mod tests {
             assert_eq!(query[0].key(), "control");
             assert!(!query[0].modifiers().modified());
             assert_eq!(
-                visible_rows_for_action(editor, "zed::OpenKeymap").len(),
+                visible_rows_for_action(editor, "app::OpenKeymap").len(),
                 2,
                 "Control must find both the standalone binding and Ctrl-K; query: {:?}",
                 query
@@ -4228,7 +4268,7 @@ mod tests {
         });
         cx.run_until_parked();
         keymap_editor.read_with(&cx, |editor, _| {
-            let rows = visible_rows_for_action(editor, "zed::OpenKeymap");
+            let rows = visible_rows_for_action(editor, "app::OpenKeymap");
             assert_eq!(rows.len(), 1);
             let binding = &editor.keybindings[editor.matches[rows[0]].candidate_id];
             let keystrokes = binding.keystrokes().expect("binding has keystrokes");
@@ -4242,7 +4282,7 @@ mod tests {
         });
         cx.run_until_parked();
         keymap_editor.read_with(&cx, |editor, _| {
-            assert_eq!(visible_rows_for_action(editor, "zed::OpenKeymap").len(), 2);
+            assert_eq!(visible_rows_for_action(editor, "app::OpenKeymap").len(), 2);
         });
     }
 
@@ -4251,12 +4291,12 @@ mod tests {
         let keymap_content = r#"[
     {
         "bindings": {
-            "alt-cmd-shift-c": "zed::OpenKeymap"
+            "alt-cmd-shift-c": "app::OpenKeymap"
         }
     },
     {
         "bindings": {
-            "alt-cmd-shift-c": "zed::OpenKeymap"
+            "alt-cmd-shift-c": "app::OpenKeymap"
         }
     }
 ]"#;
@@ -4264,7 +4304,7 @@ mod tests {
         let cx = &mut cx;
 
         let rows = keymap_editor.read_with(cx, |editor, _| {
-            visible_rows_for_action(editor, "zed::OpenKeymap")
+            visible_rows_for_action(editor, "app::OpenKeymap")
         });
         assert_eq!(
             rows.len(),
@@ -4290,7 +4330,7 @@ mod tests {
         cx.run_until_parked();
 
         let rows = keymap_editor.read_with(cx, |editor, _| {
-            visible_rows_for_action(editor, "zed::OpenKeymap")
+            visible_rows_for_action(editor, "app::OpenKeymap")
         });
         assert_eq!(rows.len(), 1, "expected one row remaining after deletion");
     }
@@ -4518,7 +4558,7 @@ mod tests {
 
     #[test]
     fn binding_is_unbound_by_unbind_respects_precedence() {
-        let binding = gpui::KeyBinding::new("tab", zed_actions::OpenKeymap, None);
+        let binding = gpui::KeyBinding::new("tab", app_actions::OpenKeymap, None);
         let unbind =
             gpui::KeyBinding::new("tab", gpui::Unbind(binding.action().name().into()), None);
 

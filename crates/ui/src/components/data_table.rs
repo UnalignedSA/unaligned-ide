@@ -650,7 +650,7 @@ pub fn render_table_row(
         .size_full()
         .when_some(bg, |row, bg| row.bg(bg))
         .when(table_context.show_row_hover, |row| {
-            row.hover(|s| s.bg(cx.theme().colors().element_hover.opacity(0.6)))
+            row.hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
         });
 
     let pinned_cols = table_context.pinned_cols;
@@ -761,7 +761,7 @@ pub fn render_table_header(
         .py_1()
         .w_full()
         .border_b_1()
-        .border_color(cx.theme().colors().border_variant);
+        .border_color(cx.theme().colors().border);
 
     let use_ui_font = table_context.use_ui_font;
     let resize_info_ref = resize_info.as_ref();

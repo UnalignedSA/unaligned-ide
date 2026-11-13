@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
+use app_actions::OpenBrowser;
 use gpui::{Action, SharedString};
 use ui::{IconName, IconPosition};
-use zed_actions::OpenBrowser;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorSeverity {
@@ -196,9 +196,8 @@ impl WorkspaceError for PortalError {
     }
 
     fn primary_action(&self) -> ErrorAction {
-        ErrorAction::link(
-            "See docs",
-            "https://zed.dev/docs/linux#i-cant-open-any-files",
-        )
+        // Upstream linked its own Linux documentation here. The product has no such page:
+        // the built-in path prompt opens right after this notification, so closing is enough.
+        ErrorAction::dismiss()
     }
 }

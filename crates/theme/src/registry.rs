@@ -12,7 +12,8 @@ use thiserror::Error;
 
 use crate::{
     Appearance, AppearanceContent, ChevronIcons, DEFAULT_ICON_THEME_NAME, DirectoryIcons,
-    IconDefinition, IconTheme, Theme, ThemeFamily, default_icon_theme, deserialize_icon_theme,
+    IconDefinition, IconTheme, LEGACY_DEFAULT_ICON_THEME_NAME, Theme, ThemeFamily,
+    default_icon_theme, deserialize_icon_theme,
 };
 
 /// The metadata for a theme.
@@ -241,6 +242,12 @@ impl ThemeRegistry {
 
     /// Returns the icon theme with the specified name.
     pub fn get_icon_theme(&self, name: &str) -> Result<Arc<IconTheme>, IconThemeNotFoundError> {
+        // The upstream name of the default icon theme is an alias of it.
+        let name = if name == LEGACY_DEFAULT_ICON_THEME_NAME {
+            DEFAULT_ICON_THEME_NAME
+        } else {
+            name
+        };
         self.state
             .read()
             .icon_themes
@@ -365,5 +372,24 @@ impl ThemeRegistry {
 impl Default for ThemeRegistry {
     fn default() -> Self {
         Self::new(Box::new(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_legacy_default_icon_theme_name_is_an_alias() {
+        let registry = ThemeRegistry::default();
+
+        let default = registry.get_icon_theme(DEFAULT_ICON_THEME_NAME).unwrap();
+        let legacy = registry
+            .get_icon_theme(LEGACY_DEFAULT_ICON_THEME_NAME)
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&default, &legacy));
+        assert_eq!(default.name, DEFAULT_ICON_THEME_NAME);
+        assert!(registry.get_icon_theme("No Such Icons").is_err());
     }
 }

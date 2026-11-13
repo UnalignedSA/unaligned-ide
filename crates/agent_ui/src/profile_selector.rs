@@ -51,6 +51,27 @@ pub trait ProfileProvider {
     fn profile_downgraded(&self, _cx: &App) -> bool {
         false
     }
+
+    /// Whether a folder is open in the window. Without one the agent only
+    /// answers (`agent::Thread::has_open_folder`): the switch stands on
+    /// "Ask" and says what to do to get "Agent" back.
+    fn has_open_folder(&self, _cx: &App) -> bool {
+        true
+    }
+}
+
+/// Why "Agent" cannot be chosen while no folder is open. The same sentence
+/// is on the switch's tooltip and on the line above the composer.
+pub(crate) const NO_FOLDER_REASON: &str = "Open a folder to let the agent edit files.";
+
+/// What the mode switch shows for a profile: with no folder open it always
+/// stands on "Ask", whatever mode is stored for the next folder.
+pub(crate) fn shown_mode(profile_id: &AgentProfileId, has_open_folder: bool) -> &str {
+    if has_open_folder {
+        profile_id.as_str()
+    } else {
+        builtin_profiles::ASK
+    }
 }
 
 pub struct ProfileSelector {
@@ -97,6 +118,23 @@ impl ProfileSelector {
             return;
         }
 
+        // Nothing to cycle to without a folder: the agent only answers, and
+        // the mode stored for the next folder is left alone.
+        if !self.provider.has_open_folder(cx) {
+            return;
+        }
+
+        // Two modes only: the cycle key flips between them.
+        if !crate::show_profile_management() {
+            let next = if self.provider.profile_id(cx).as_str() == builtin_profiles::ASK {
+                builtin_profiles::WRITE
+            } else {
+                builtin_profiles::ASK
+            };
+            self.set_simple_mode(next, "cycle", cx);
+            return;
+        }
+
         let profiles = AgentProfile::available_profiles(cx);
         if profiles.is_empty() {
             return;
@@ -119,6 +157,153 @@ impl ProfileSelector {
             );
             cx.notify();
         }
+    }
+
+    /// Switches between the two built-in profiles the simple panel exposes:
+    /// "Agent" is `write`, "Ask" is `ask`.
+    fn set_simple_mode(
+        &mut self,
+        profile_id: &'static str,
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.provider.profile_id(cx).as_str() == profile_id {
+            return;
+        }
+        // New chats start in the mode last chosen, as the picker did.
+        update_settings_file(self.fs.clone(), cx, move |settings, _cx| {
+            settings
+                .agent
+                .get_or_insert_default()
+                .set_profile(profile_id.into());
+        });
+        self.provider
+            .set_profile(AgentProfileId(profile_id.into()), cx);
+        telemetry::event!(
+            "Agent Profile Switched",
+            profile_id = profile_id,
+            source = source
+        );
+        cx.notify();
+    }
+
+    /// The two-state "Agent" / "Ask" switch that replaces the profile picker.
+    fn render_mode_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.provider.profile_id(cx);
+        let restricted = self.provider.is_restricted(cx)
+            && (self.provider.profile_downgraded(cx)
+                || !ProfilePickerDelegate::restricted_forbidden_tools(&current, cx).is_empty());
+        // Without a folder the agent has no file or terminal tool: the switch
+        // says so by standing on "Ask", and "Agent" opens a folder.
+        let has_open_folder = self.provider.has_open_folder(cx);
+        let shown = shown_mode(&current, has_open_folder);
+        let colors = cx.theme().colors();
+
+        let segment = |id: &'static str,
+                       label: &'static str,
+                       profile_id: &'static str,
+                       hint: &'static str| {
+            let active = shown == profile_id;
+            div()
+                .when(active, |this| this.bg(colors.element_selected))
+                .child(
+                    Button::new(id, label)
+                        .style(ButtonStyle::Transparent)
+                        .label_size(LabelSize::Small)
+                        .color(if active { Color::Default } else { Color::Muted })
+                        .map(|this| {
+                            if has_open_folder {
+                                this.tooltip(move |_window, cx| {
+                                    Tooltip::with_meta(label, Some(&CycleModeSelector), hint, cx)
+                                })
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.set_simple_mode(profile_id, "switch", cx);
+                                    },
+                                ))
+                            } else if profile_id == builtin_profiles::WRITE {
+                                this.tooltip(move |_window, cx| {
+                                    Tooltip::with_meta(
+                                        NO_FOLDER_REASON,
+                                        Some(&workspace::Open::default()),
+                                        "Click to open a folder.",
+                                        cx,
+                                    )
+                                })
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        workspace::Open::default().boxed_clone(),
+                                        cx,
+                                    );
+                                })
+                            } else {
+                                this.tooltip(Tooltip::text(
+                                    "No folder is open: the agent answers and changes nothing.",
+                                ))
+                            }
+                        }),
+                )
+        };
+
+        // A profile from the settings file that is neither of the two modes:
+        // shown as a third, selected segment, so the user sees what is active
+        // and can leave it by choosing Agent or Ask.
+        let custom_profile = (has_open_folder
+            && current.as_str() != builtin_profiles::WRITE
+            && current.as_str() != builtin_profiles::ASK)
+            .then(|| {
+                self.profiles
+                    .get(&current)
+                    .cloned()
+                    .unwrap_or_else(|| SharedString::from(current.as_str().to_string()))
+            });
+
+        h_flex()
+            .id("mode-switch")
+            .flex_none()
+            .border_1()
+            .border_color(colors.border_strong)
+            .child(segment(
+                "mode-agent",
+                "Agent",
+                builtin_profiles::WRITE,
+                "Can edit files and run tools.",
+            ))
+            .child(segment(
+                "mode-ask",
+                "Ask",
+                builtin_profiles::ASK,
+                "Answers only; never changes your files.",
+            ))
+            .when_some(custom_profile, |this, name| {
+                this.child(
+                    div()
+                        .id("mode-custom")
+                        .max_w(rems(8.))
+                        .px_1p5()
+                        .bg(colors.element_selected)
+                        .child(Label::new(name).size(LabelSize::Small).truncate())
+                        .tooltip(Tooltip::text(
+                            "A custom profile from your settings is active. Choose Agent or Ask to leave it.",
+                        )),
+                )
+            })
+            .when(restricted, |this| {
+                this.child(
+                    div()
+                        .id("mode-restricted")
+                        .px_1()
+                        .child(
+                            Icon::new(IconName::Warning)
+                                .size(IconSize::XSmall)
+                                .color(Color::Warning),
+                        )
+                        .tooltip(Tooltip::text(
+                            "This project is not trusted yet: some tools are turned off.",
+                        )),
+                )
+            })
+            .into_any_element()
     }
 
     fn ensure_picker(
@@ -187,6 +372,10 @@ impl Render for ProfileSelector {
                 .color(Color::Muted)
                 .tooltip(Tooltip::text("This model does not support tools."))
                 .into_any_element();
+        }
+
+        if !crate::show_profile_management() {
+            return self.render_mode_switch(cx);
         }
 
         let picker = self.ensure_picker(window, cx);
@@ -954,6 +1143,24 @@ mod tests {
             let active_index = delegate.index_of_profile(&AgentProfileId("write".into()));
             assert_eq!(active_index, Some(0));
         });
+    }
+
+    // Unaligned: with no folder open the agent has no file or terminal tool,
+    // and the switch must not claim otherwise.
+    #[test]
+    fn test_mode_shown_without_a_folder() {
+        let write = AgentProfileId(builtin_profiles::WRITE.into());
+        let ask = AgentProfileId(builtin_profiles::ASK.into());
+        let custom = AgentProfileId("my-profile".into());
+
+        assert_eq!(shown_mode(&write, true), builtin_profiles::WRITE);
+        assert_eq!(shown_mode(&ask, true), builtin_profiles::ASK);
+        assert_eq!(shown_mode(&custom, true), "my-profile");
+
+        for profile in [&write, &ask, &custom] {
+            assert_eq!(shown_mode(profile, false), builtin_profiles::ASK);
+        }
+        assert!(NO_FOLDER_REASON.contains("Open a folder"));
     }
 
     struct TestProfileProvider {

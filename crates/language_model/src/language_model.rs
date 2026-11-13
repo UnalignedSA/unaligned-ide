@@ -411,7 +411,7 @@ pub enum IconOrSvg {
 
 impl Default for IconOrSvg {
     fn default() -> Self {
-        Self::Icon(IconName::ZedAssistant)
+        Self::Icon(IconName::AppAssistant)
     }
 }
 
@@ -588,6 +588,13 @@ pub trait LanguageModelProvider: LanguageModelClient {
         Task::ready(Ok(()))
     }
 
+    /// Whether the key in use is kept in memory only, because the system
+    /// keychain could not store it (see `ApiKeyState::is_session_only`). The
+    /// connection screen then says that it will be asked again next time.
+    fn key_is_session_only(&self, _cx: &App) -> bool {
+        false
+    }
+
     /// Copy shown when this provider rejects a request as unauthenticated
     /// (HTTP 401). The default assumes API-key authentication; providers using
     /// other mechanisms (account or subscription based auth) should override
@@ -595,7 +602,7 @@ pub trait LanguageModelProvider: LanguageModelClient {
     fn authentication_error_message(&self) -> SharedString {
         format!(
             "The API key for {} is invalid or has expired. \
-            Update your key in Settings > AI > LLM Providers to continue.",
+            Update your key in Connections to continue.",
             self.name().0
         )
         .into()
@@ -608,7 +615,7 @@ pub trait LanguageModelProvider: LanguageModelClient {
     fn missing_credentials_error_message(&self) -> SharedString {
         format!(
             "No API key is configured for {}. \
-            Add your key in Settings > AI > LLM Providers to continue.",
+            Add your key in Connections to continue.",
             self.name().0
         )
         .into()
@@ -619,6 +626,90 @@ pub trait LanguageModelProvider: LanguageModelClient {
     /// the toggle apply silently.
     fn fast_mode_confirmation(&self, _cx: &App) -> Option<FastModeConfirmation> {
         None
+    }
+
+    /// What is known about this provider's connection without doing any work.
+    ///
+    /// The default only knows whether credentials are present. Providers that
+    /// can tell more (the server accepted the key, the balance, why the
+    /// connection needs attention) override this.
+    fn connection_status(&self, cx: &App) -> ProviderConnectionStatus {
+        if self.is_authenticated(cx) {
+            ProviderConnectionStatus::Connected { detail: None }
+        } else {
+            ProviderConnectionStatus::NotConnected
+        }
+    }
+
+    /// Checks the connection now and resolves to its status.
+    ///
+    /// The default loads the stored credentials and reports
+    /// [`Self::connection_status`]. Providers that can ask their server
+    /// whether the credentials are accepted override this. A refused key is a
+    /// status ([`ProviderConnectionStatus::NeedsAttention`]), not an error.
+    ///
+    /// The default finds the provider again through the global
+    /// [`LanguageModelRegistry`] when it is installed (as [`init`] and
+    /// `LanguageModelRegistry::test` do), and answers from `authenticate`
+    /// alone when it is not.
+    fn check_connection(&self, cx: &mut App) -> Task<Result<ProviderConnectionStatus>> {
+        let provider_id = self.id();
+        let authenticate = self.authenticate(cx);
+        cx.spawn(async move |cx| {
+            let result = authenticate.await;
+            // The provider is not `'static` here, so it is found again through
+            // the registry once its credentials are loaded.
+            // Without the registry (a test of one provider) the answer is
+            // read from the result of `authenticate` below.
+            let status = cx.update(|cx| {
+                LanguageModelRegistry::try_read_global(cx)?
+                    .provider(&provider_id)
+                    .map(|provider| provider.connection_status(cx))
+            });
+            match (status, result) {
+                (Some(status), _) => Ok(status),
+                (None, Ok(())) => Ok(ProviderConnectionStatus::Connected { detail: None }),
+                (None, Err(AuthenticateError::CredentialsNotFound)) => {
+                    Ok(ProviderConnectionStatus::NotConnected)
+                }
+                (None, Err(error)) => Err(error.into()),
+            }
+        })
+    }
+
+    /// What `usage` cost on the model `model_id`, in US dollars, for providers
+    /// that know their prices.
+    fn usage_cost(
+        &self,
+        _model_id: &LanguageModelId,
+        _usage: &TokenUsage,
+        _cx: &App,
+    ) -> Option<f64> {
+        None
+    }
+}
+
+/// How a provider's connection stands, for the screens that list providers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderConnectionStatus {
+    /// No credentials are configured.
+    NotConnected,
+    /// Credentials are present and, as far as is known, accepted.
+    Connected {
+        /// A short fact worth showing next to the provider's name, such as
+        /// "$20.50 left", "12 models" or an account name.
+        detail: Option<SharedString>,
+    },
+    /// Credentials are present but something is wrong.
+    NeedsAttention {
+        /// One sentence, shown as is.
+        reason: SharedString,
+    },
+}
+
+impl ProviderConnectionStatus {
+    pub fn is_connected(&self) -> bool {
+        matches!(self, Self::Connected { .. })
     }
 }
 
@@ -720,7 +811,7 @@ pub trait LanguageModelProviderState: 'static {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LanguageModelCostInfo {
-    /// Cost per 1,000 input and output tokens
+    /// Cost in US dollars per million input and output tokens
     TokenCost {
         input_token_cost_per_1m: f64,
         output_token_cost_per_1m: f64,
@@ -730,6 +821,8 @@ pub enum LanguageModelCostInfo {
 }
 
 impl LanguageModelCostInfo {
+    /// A short label for the model picker: "$3/$15" (input/output per million
+    /// tokens) or "0.33×" (per request).
     pub fn to_shared_string(&self) -> SharedString {
         match self {
             LanguageModelCostInfo::RequestCost { cost_per_request } => {
@@ -740,9 +833,9 @@ impl LanguageModelCostInfo {
                 input_token_cost_per_1m,
                 output_token_cost_per_1m,
             } => {
-                let input_cost = Self::cost_value_to_string(input_token_cost_per_1m);
-                let output_cost = Self::cost_value_to_string(output_token_cost_per_1m);
-                SharedString::from(format!("{}$/{}$", input_cost, output_cost))
+                let input_cost = Self::price_to_string(*input_token_cost_per_1m);
+                let output_cost = Self::price_to_string(*output_token_cost_per_1m);
+                SharedString::from(format!("${}/${}", input_cost, output_cost))
             }
         }
     }
@@ -753,5 +846,87 @@ impl LanguageModelCostInfo {
         } else {
             SharedString::from(format!("{:.2}", cost))
         }
+    }
+
+    /// A price in dollars without rounding it away: whole numbers print bare
+    /// ("3"), others with at least two decimals and as many as they need, up
+    /// to four ("1.25", "0.40", "0.375", "0.0625"). Prices under a tenth of a
+    /// cent keep two significant digits instead ("0.00012").
+    fn price_to_string(price: f64) -> String {
+        if price.fract().abs() < f64::EPSILON {
+            return format!("{price:.0}");
+        }
+        let decimals = if price.abs() >= 0.001 {
+            4
+        } else {
+            ((-price.abs().log10()).ceil() as usize + 1).min(12)
+        };
+        let formatted = format!("{price:.decimals$}");
+        let trimmed = formatted.trim_end_matches('0');
+        let kept_decimals = trimmed.rsplit('.').next().map_or(0, str::len);
+        if kept_decimals < 2 {
+            format!("{price:.2}")
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_cost_label_keeps_small_prices_readable() {
+        let label = |input, output| {
+            LanguageModelCostInfo::TokenCost {
+                input_token_cost_per_1m: input,
+                output_token_cost_per_1m: output,
+            }
+            .to_shared_string()
+            .to_string()
+        };
+        assert_eq!(label(3.0, 15.0), "$3/$15");
+        assert_eq!(label(1.25, 10.0), "$1.25/$10");
+        assert_eq!(label(0.05, 0.4), "$0.05/$0.40");
+        assert_eq!(label(0.375, 1.875), "$0.375/$1.875");
+        assert_eq!(label(1.125, 6.75), "$1.125/$6.75");
+        assert_eq!(label(0.0625, 0.1), "$0.0625/$0.10");
+        assert_eq!(label(0.004125, 0.075), "$0.0041/$0.075");
+        assert_eq!(label(0.004, 0.09), "$0.004/$0.09");
+        assert_eq!(label(0.00001, 0.000123), "$0.00001/$0.00012");
+    }
+
+    #[gpui::test]
+    async fn provider_connection_defaults(cx: &mut gpui::TestAppContext) {
+        let registered = cx.update(LanguageModelRegistry::test);
+        let unregistered = fake_provider::FakeLanguageModelProvider::new(
+            LanguageModelProviderId::from("elsewhere".to_string()),
+            LanguageModelProviderName::from("Elsewhere".to_string()),
+        );
+        let connected = ProviderConnectionStatus::Connected { detail: None };
+
+        cx.read(|cx| {
+            assert_eq!(registered.connection_status(cx), connected);
+            let usage = TokenUsage {
+                input_tokens: 1_000,
+                ..Default::default()
+            };
+            let model_id = LanguageModelId::from("fake".to_string());
+            assert_eq!(registered.usage_cost(&model_id, &usage, cx), None);
+        });
+        for provider in [registered.as_ref(), &unregistered] {
+            let status = cx.update(|cx| provider.check_connection(cx)).await.unwrap();
+            assert_eq!(status, connected);
+            assert!(status.is_connected());
+        }
+    }
+
+    #[test]
+    fn request_cost_label_is_a_multiplier() {
+        let cost = LanguageModelCostInfo::RequestCost {
+            cost_per_request: 1.5,
+        };
+        assert_eq!(cost.to_shared_string().as_ref(), "1.50×");
     }
 }

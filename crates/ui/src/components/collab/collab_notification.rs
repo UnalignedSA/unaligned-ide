@@ -40,13 +40,14 @@ impl RenderOnce for CollabNotification {
             .text_ui(cx)
             .justify_between()
             .overflow_hidden()
-            .elevation_3(cx)
-            .gap_1()
+            // A flat card: raised ground and a 1px line.
+            .elevation_2(cx)
+            .gap_2()
             .child(
                 h_flex()
                     .min_w_0()
-                    .gap_4()
-                    .child(Avatar::new(self.avatar_uri).size(px(40.)))
+                    .gap_3()
+                    .child(Avatar::new(self.avatar_uri).size(px(36.)))
                     .child(v_flex().truncate().children(self.children)),
             )
             .child(
@@ -109,7 +110,7 @@ impl Component for CollabNotification {
                             Button::new("decline", "Dismiss"),
                         )
                         .child(Label::new("the user is sharing a project"))
-                        .child(Label::new("zed").color(Color::Muted)),
+                        .child(Label::new("app").color(Color::Muted)),
                     )
                     .into_any_element(),
             ),
@@ -123,12 +124,9 @@ impl Component for CollabNotification {
                             Button::new("decline", "Decline"),
                         )
                         .child(Label::new(
-                            "a_very_long_username_that_might_overflow is sharing a project in Zed:",
+                            "a_very_long_username_that_might_overflow is sharing a project:",
                         ))
-                        .child(
-                            Label::new("zed-cloud, zed, edit-prediction-bench, zed.dev")
-                                .color(Color::Muted),
-                        ),
+                        .child(Label::new("server, editor, bench, website").color(Color::Muted)),
                     )
                     .into_any_element(),
             ),
@@ -171,7 +169,7 @@ impl Component for CollabNotification {
                             Button::new("decline", "Decline"),
                         )
                         .child(Label::new(
-                            "maxbrunsfeld invited you to join the #zed channel",
+                            "maxbrunsfeld invited you to join the #app channel",
                         )),
                     )
                     .into_any_element(),

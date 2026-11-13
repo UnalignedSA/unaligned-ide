@@ -671,7 +671,7 @@ pub fn into_open_router(
 fn open_router_session_id(thread_id: Option<String>) -> Option<String> {
     thread_id.map(|thread_id| {
         let mut hasher = Sha256::new();
-        hasher.update(b"zed-openrouter-session-v1\0");
+        hasher.update(b"ide-openrouter-session-v1\0");
         hasher.update(thread_id.as_bytes());
         format!("{:x}", hasher.finalize())
     })

@@ -4,7 +4,7 @@ use crate::schema::{status_colors_refinement, syntax_overrides, theme_colors_ref
 use crate::{merge_accent_colors, merge_player_colors};
 use collections::HashMap;
 use gpui::{
-    App, Context, Font, FontFallbacks, FontStyle, FontWeight, Global, Pixels, SharedString,
+    App, Context, Font, FontFallbacks, FontStyle, FontWeight, Global, Hsla, Pixels, SharedString,
     Subscription, Window, px,
 };
 use refineable::Refineable;
@@ -13,11 +13,16 @@ use serde::{Deserialize, Serialize};
 pub use settings::{FontFamilyName, IconThemeName, ThemeAppearanceMode, ThemeName};
 use settings::{IntoGpui, RegisterSetting, Settings, SettingsContent};
 use std::sync::Arc;
-use theme::{Appearance, DEFAULT_ICON_THEME_NAME, SyntaxTheme, Theme, UiDensity};
+use theme::{
+    Appearance, CornerStyle, DEFAULT_ICON_THEME_NAME, DerivedColors, SyntaxTheme, Theme,
+    ThemeColors, UiDensity,
+};
 
 const MIN_FONT_SIZE: Pixels = px(6.0);
 const MAX_FONT_SIZE: Pixels = px(100.0);
 const MIN_LINE_HEIGHT: f32 = 1.0;
+/// The opacity of the selection drawn in a custom accent when the theme's own selection is opaque.
+const DEFAULT_SELECTION_ALPHA: f32 = 0.25;
 
 pub(crate) fn ui_density_from_settings(val: settings::UiDensity) -> UiDensity {
     match val {
@@ -101,6 +106,10 @@ pub struct ThemeSettings {
     pub ui_density: UiDensity,
     /// The amount of fading applied to unnecessary code.
     pub unnecessary_code_fade: f32,
+    /// Whether corners follow the active theme or are forced to one style.
+    pub corners: settings::CornersSetting,
+    /// The accent color chosen by the user, when the `accent` setting is not "theme".
+    pub accent: Option<Hsla>,
 }
 
 /// Returns the name of the default theme for the given [`Appearance`].
@@ -535,13 +544,84 @@ impl ThemeSettings {
             arc_theme = Arc::new(theme);
         }
 
+        // The `corners` and `accent` settings come last: they are the user's choice for every
+        // theme, so they win over what a theme or a theme override asks for.
+        Self::apply_corners_and_accent(arc_theme, self.forced_corner_style(), self.accent)
+    }
+
+    /// Writes a forced corner style and a custom accent into the theme. The theme is cloned only
+    /// when something changes.
+    fn apply_corners_and_accent(
+        mut arc_theme: Arc<Theme>,
+        corners: Option<CornerStyle>,
+        accent: Option<Hsla>,
+    ) -> Arc<Theme> {
+        let corners = corners.filter(|corners| *corners != arc_theme.styles.corners);
+        if corners.is_some() || accent.is_some() {
+            let mut theme = (*arc_theme).clone();
+            if let Some(corners) = corners {
+                theme.styles.corners = corners;
+            }
+            if let Some(accent) = accent {
+                Self::apply_accent(&mut theme, accent);
+            }
+            arc_theme = Arc::new(theme);
+        }
         arc_theme
+    }
+
+    /// The corner style forced by the `corners` setting, or `None` when it follows the theme.
+    pub fn forced_corner_style(&self) -> Option<CornerStyle> {
+        match self.corners {
+            settings::CornersSetting::Theme => None,
+            settings::CornersSetting::Square => Some(CornerStyle::Square),
+            settings::CornersSetting::Soft => Some(CornerStyle::Soft),
+            settings::CornersSetting::Round => Some(CornerStyle::Round),
+        }
+    }
+
+    /// Replaces the theme's accent: the fill of the primary action (its hover and its text are
+    /// recomputed), accent text and icons, hovered links, and the local player's cursor and
+    /// selection.
+    fn apply_accent(theme: &mut Theme, accent: Hsla) {
+        let appearance = theme.appearance;
+        let colors = &mut theme.styles.colors;
+        colors.accent_background = accent;
+        colors.accent_hover = ThemeColors::accent_hover_for(accent, appearance);
+        colors.accent_foreground = ThemeColors::accent_foreground_for(accent);
+        colors.text_accent = accent;
+        colors.icon_accent = accent;
+        colors.link_text_hover = accent;
+
+        if let Some(local) = theme.styles.player.0.first_mut() {
+            // The selection keeps the translucency the theme gave it.
+            let selection_alpha = if local.selection.a < 1.0 {
+                local.selection.a
+            } else {
+                DEFAULT_SELECTION_ALPHA
+            };
+            let previous_selection = local.selection;
+            local.cursor = accent;
+            local.selection = accent.alpha(selection_alpha);
+
+            // Selections in inputs follow the local player's selection unless the theme gave
+            // them a colour of their own (see `theme::apply_theme_color_defaults`).
+            let follows_player = colors.element_selection_background == previous_selection
+                || colors.element_selection_background
+                    == previous_selection.alpha(DEFAULT_SELECTION_ALPHA);
+            if follows_player {
+                colors.element_selection_background = local.selection;
+            }
+        }
     }
 
     fn modify_theme(base_theme: &mut Theme, theme_overrides: &settings::ThemeStyleContent) {
         if let Some(window_background_appearance) = theme_overrides.window_background_appearance {
             base_theme.styles.window_background_appearance =
                 window_background_appearance.into_gpui();
+        }
+        if let Some(corners) = theme_overrides.corners {
+            base_theme.styles.corners = crate::corner_style_from_content(corners);
         }
         let status_color_refinement = status_colors_refinement(&theme_overrides.status);
 
@@ -550,9 +630,22 @@ impl ThemeSettings {
             &status_color_refinement,
             base_theme.appearance.is_light(),
         );
+        // A derived token (accent fill and its hover and text, strong line, faint text) that
+        // still holds its fallback keeps following the colour it falls back to when that colour
+        // is overridden, unless the override states the token itself.
+        let appearance = base_theme.appearance;
+        let derived_in_sync = base_theme
+            .styles
+            .colors
+            .derived_colors_in_sync(base_theme.styles.player.local().cursor, appearance);
         base_theme.styles.colors.refine(&theme_color_refinement);
         base_theme.styles.status.refine(&status_color_refinement);
         merge_player_colors(&mut base_theme.styles.player, &theme_overrides.players);
+        base_theme.styles.colors.derive_colors(
+            derived_in_sync.and(DerivedColors::unset_in(&theme_color_refinement)),
+            base_theme.styles.player.local().cursor,
+            appearance,
+        );
         merge_accent_colors(&mut base_theme.styles.accents, &theme_overrides.accents);
         base_theme.styles.syntax = SyntaxTheme::merge(
             base_theme.styles.syntax.clone(),
@@ -719,6 +812,20 @@ fn font_fallbacks_from_settings(
     })
 }
 
+/// Reads the `accent` setting: `None` for "theme" (or unset), the color otherwise. A value that
+/// is not a color is reported once in the log and ignored.
+fn accent_from_settings(accent: Option<&settings::AccentSetting>) -> Option<Hsla> {
+    let color = accent?.custom_color()?;
+    match theme::try_parse_color(color) {
+        // An accent is a fill: a translucent one would let the ground show through buttons.
+        Ok(color) => Some(color.alpha(1.0)),
+        Err(error) => {
+            log::warn!("ignoring the `accent` setting {color:?}: {error}");
+            None
+        }
+    }
+}
+
 impl settings::Settings for ThemeSettings {
     fn from_settings(settings_content: &settings::SettingsContent) -> Self {
         let content = &settings_content.theme;
@@ -788,6 +895,8 @@ impl settings::Settings for ThemeSettings {
             icon_theme: icon_theme_selection,
             ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
             unnecessary_code_fade: content.unnecessary_code_fade.unwrap().0.clamp(0.0, 0.9),
+            corners: content.corners.unwrap_or_default(),
+            accent: accent_from_settings(content.accent.as_ref()),
         }
     }
 }
@@ -812,6 +921,291 @@ mod tests {
             colors,
             ..Default::default()
         }
+    }
+
+    fn color(hex: &str) -> Hsla {
+        ::theme::try_parse_color(hex).unwrap()
+    }
+
+    #[test]
+    fn derived_tokens_fall_back_when_the_theme_does_not_set_them() {
+        let test_theme = theme_with_colors(::settings::ThemeColorsContent {
+            border: Some("#112233".into()),
+            text_muted: Some("#445566".into()),
+            ..Default::default()
+        });
+        let colors = &test_theme.styles.colors;
+        let cursor = test_theme.styles.player.local().cursor;
+
+        assert_eq!(colors.accent_background, cursor);
+        assert_eq!(
+            colors.accent_hover,
+            ThemeColors::accent_hover_for(cursor, Appearance::Dark)
+        );
+        assert_eq!(
+            colors.accent_foreground,
+            ThemeColors::accent_foreground_for(cursor)
+        );
+        assert_eq!(colors.border_strong, color("#112233"));
+        assert_eq!(colors.text_faint, color("#445566"));
+    }
+
+    #[test]
+    fn derived_tokens_keep_the_values_of_the_theme_file() {
+        let test_theme = theme_with_colors(::settings::ThemeColorsContent {
+            border: Some("#112233".into()),
+            border_strong: Some("#3a3733".into()),
+            text_muted: Some("#445566".into()),
+            text_faint: Some("#827d75".into()),
+            accent_background: Some("#e5322d".into()),
+            accent_hover: Some("#f2453f".into()),
+            accent_foreground: Some("#ffffff".into()),
+            ..Default::default()
+        });
+        let colors = &test_theme.styles.colors;
+
+        assert_eq!(colors.accent_background, color("#e5322d"));
+        assert_eq!(colors.accent_hover, color("#f2453f"));
+        assert_eq!(colors.accent_foreground, color("#ffffff"));
+        assert_eq!(colors.border_strong, color("#3a3733"));
+        assert_eq!(colors.text_faint, color("#827d75"));
+    }
+
+    #[test]
+    fn accent_hover_and_foreground_follow_an_accent_set_by_the_theme() {
+        let test_theme = theme_with_colors(::settings::ThemeColorsContent {
+            accent_background: Some("#ffd400".into()),
+            ..Default::default()
+        });
+        let colors = &test_theme.styles.colors;
+
+        assert_eq!(
+            colors.accent_hover,
+            ThemeColors::accent_hover_for(color("#ffd400"), Appearance::Dark)
+        );
+        // Black is far more readable than white on yellow.
+        assert_eq!(colors.accent_foreground, gpui::black());
+    }
+
+    #[test]
+    fn accent_foreground_is_the_more_readable_of_black_and_white() {
+        assert_eq!(
+            ThemeColors::accent_foreground_for(color("#1a3a8a")),
+            gpui::white()
+        );
+        assert_eq!(
+            ThemeColors::accent_foreground_for(color("#74ade8")),
+            gpui::black()
+        );
+        assert!((::theme::contrast_ratio(gpui::black(), gpui::white()) - 21.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn derived_tokens_follow_an_override_of_the_color_they_fall_back_to() {
+        let mut test_theme = theme_with_colors(::settings::ThemeColorsContent::default());
+
+        ThemeSettings::modify_theme(
+            &mut test_theme,
+            &::settings::ThemeStyleContent {
+                colors: ::settings::ThemeColorsContent {
+                    border: Some("#112233".into()),
+                    text_muted: Some("#445566".into()),
+                    ..Default::default()
+                },
+                players: vec![::settings::PlayerColorContent {
+                    cursor: Some("#ffd400".into()),
+                    background: None,
+                    selection: None,
+                }],
+                ..Default::default()
+            },
+        );
+
+        let colors = &test_theme.styles.colors;
+        assert_eq!(colors.border_strong, color("#112233"));
+        assert_eq!(colors.text_faint, color("#445566"));
+        assert_eq!(colors.accent_background, color("#ffd400"));
+        assert_eq!(colors.accent_foreground, gpui::black());
+    }
+
+    #[test]
+    fn derived_tokens_set_by_the_theme_survive_an_override_of_their_fallback() {
+        let mut test_theme = theme_with_colors(::settings::ThemeColorsContent {
+            border: Some("#262422".into()),
+            border_strong: Some("#3a3733".into()),
+            accent_background: Some("#e5322d".into()),
+            accent_foreground: Some("#ffffff".into()),
+            ..Default::default()
+        });
+
+        ThemeSettings::modify_theme(
+            &mut test_theme,
+            &::settings::ThemeStyleContent {
+                colors: ::settings::ThemeColorsContent {
+                    border: Some("#112233".into()),
+                    ..Default::default()
+                },
+                players: vec![::settings::PlayerColorContent {
+                    cursor: Some("#ffd400".into()),
+                    background: None,
+                    selection: None,
+                }],
+                ..Default::default()
+            },
+        );
+
+        let colors = &test_theme.styles.colors;
+        assert_eq!(colors.border_strong, color("#3a3733"));
+        assert_eq!(colors.accent_background, color("#e5322d"));
+        assert_eq!(colors.accent_foreground, color("#ffffff"));
+    }
+
+    #[test]
+    fn an_override_of_the_accent_recomputes_its_hover_and_text() {
+        let mut test_theme = theme_with_colors(::settings::ThemeColorsContent::default());
+
+        ThemeSettings::modify_theme(
+            &mut test_theme,
+            &style_with_colors(::settings::ThemeColorsContent {
+                accent_background: Some("#ffd400".into()),
+                ..Default::default()
+            }),
+        );
+
+        let colors = &test_theme.styles.colors;
+        assert_eq!(colors.accent_background, color("#ffd400"));
+        assert_eq!(
+            colors.accent_hover,
+            ThemeColors::accent_hover_for(color("#ffd400"), Appearance::Dark)
+        );
+        assert_eq!(colors.accent_foreground, gpui::black());
+    }
+
+    #[test]
+    fn corners_come_from_the_theme_then_overrides_then_the_setting() {
+        let round = theme_with_colors(::settings::ThemeColorsContent::default());
+        assert_eq!(round.corners(), CornerStyle::Round);
+        assert_eq!(CornerStyle::Round.scale(), 1.0);
+        assert_eq!(CornerStyle::Soft.scale(), 0.5);
+        assert_eq!(CornerStyle::Square.scale(), 0.0);
+
+        let square = crate::refine_theme(&crate::ThemeContent {
+            name: "Square".into(),
+            appearance: ::theme::AppearanceContent::Dark,
+            style: ::settings::ThemeStyleContent {
+                corners: Some(::settings::CornerStyleContent::Square),
+                ..Default::default()
+            },
+        });
+        assert_eq!(square.corners(), CornerStyle::Square);
+
+        let mut overridden = square.clone();
+        ThemeSettings::modify_theme(
+            &mut overridden,
+            &::settings::ThemeStyleContent {
+                corners: Some(::settings::CornerStyleContent::Soft),
+                ..Default::default()
+            },
+        );
+        assert_eq!(overridden.corners(), CornerStyle::Soft);
+
+        // "theme": nothing is forced, and the theme is not even cloned.
+        let square = Arc::new(square);
+        let untouched = ThemeSettings::apply_corners_and_accent(square.clone(), None, None);
+        assert!(Arc::ptr_eq(&square, &untouched));
+
+        let forced =
+            ThemeSettings::apply_corners_and_accent(square, Some(CornerStyle::Round), None);
+        assert_eq!(forced.corners(), CornerStyle::Round);
+    }
+
+    #[test]
+    fn corners_are_read_from_theme_json_and_from_settings_json() {
+        let style: ::settings::ThemeStyleContent =
+            serde_json::from_str(r##"{ "corners": "square", "border": "#112233" }"##).unwrap();
+        assert_eq!(style.corners, Some(::settings::CornerStyleContent::Square));
+        let style: ::settings::ThemeStyleContent =
+            serde_json::from_str(r##"{ "border": "#112233" }"##).unwrap();
+        assert_eq!(style.corners, None);
+
+        for (json, expected) in [
+            (
+                r#"{ "corners": "theme" }"#,
+                ::settings::CornersSetting::Theme,
+            ),
+            (
+                r#"{ "corners": "square" }"#,
+                ::settings::CornersSetting::Square,
+            ),
+            (r#"{ "corners": "soft" }"#, ::settings::CornersSetting::Soft),
+            (
+                r#"{ "corners": "round" }"#,
+                ::settings::CornersSetting::Round,
+            ),
+        ] {
+            let content: ::settings::ThemeSettingsContent = serde_json::from_str(json).unwrap();
+            assert_eq!(content.corners, Some(expected), "{json}");
+        }
+        let content: ::settings::ThemeSettingsContent = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            content.corners.unwrap_or_default(),
+            ::settings::CornersSetting::Theme
+        );
+    }
+
+    #[test]
+    fn accent_setting_reads_theme_or_a_color() {
+        let theme_accent = ::settings::AccentSetting::default();
+        assert_eq!(accent_from_settings(Some(&theme_accent)), None);
+        assert_eq!(accent_from_settings(None), None);
+        assert_eq!(
+            accent_from_settings(Some(&::settings::AccentSetting("#2f81f7".into()))),
+            Some(color("#2f81f7"))
+        );
+        // Not a colour: ignored, the theme's accent stays.
+        assert_eq!(
+            accent_from_settings(Some(&::settings::AccentSetting("blue".into()))),
+            None
+        );
+        // An accent is always opaque.
+        assert_eq!(
+            accent_from_settings(Some(&::settings::AccentSetting("#2f81f780".into())))
+                .map(|accent| accent.a),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn a_custom_accent_replaces_every_accent_role() {
+        let base = Arc::new(theme_with_colors(::settings::ThemeColorsContent {
+            accent_background: Some("#e5322d".into()),
+            accent_hover: Some("#f2453f".into()),
+            accent_foreground: Some("#ffffff".into()),
+            ..Default::default()
+        }));
+        let accent = color("#ffd400");
+        let themed = ThemeSettings::apply_corners_and_accent(base.clone(), None, Some(accent));
+        let colors = &themed.styles.colors;
+
+        assert_eq!(colors.accent_background, accent);
+        assert_eq!(
+            colors.accent_hover,
+            ThemeColors::accent_hover_for(accent, Appearance::Dark)
+        );
+        assert_eq!(colors.accent_foreground, gpui::black());
+        assert_eq!(colors.text_accent, accent);
+        assert_eq!(colors.icon_accent, accent);
+        assert_eq!(colors.link_text_hover, accent);
+
+        let local = themed.styles.player.local();
+        assert_eq!(local.cursor, accent);
+        assert_eq!(local.selection.alpha(1.0), accent);
+        assert!(local.selection.a < 1.0);
+        assert_eq!(colors.element_selection_background, local.selection);
+
+        // The other players and the theme it was made from are untouched.
+        assert_eq!(themed.styles.player.0[1], base.styles.player.0[1]);
+        assert_eq!(base.styles.colors.accent_background, color("#e5322d"));
     }
 
     #[test]

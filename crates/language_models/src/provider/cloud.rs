@@ -12,11 +12,11 @@ use futures::future::BoxFuture;
 
 use gpui::{AnyElement, App, AppContext, AsyncApp, Context, Entity, Subscription, Task, TaskExt};
 use language_model::{
-    AuthenticateError, CompactionResult, FastModeConfirmation, IconOrSvg, InlineDescription,
-    LanguageModel, LanguageModelClient, LanguageModelCompletionError,
-    LanguageModelCompletionStream, LanguageModelProvider, LanguageModelProviderId,
-    LanguageModelProviderName, LanguageModelProviderState, LanguageModelRequest,
-    ProviderSettingsView, ZED_CLOUD_PROVIDER_ID, ZED_CLOUD_PROVIDER_NAME,
+    AuthenticateError, CompactionResult, FastModeConfirmation, IDE_CLOUD_PROVIDER_ID,
+    IDE_CLOUD_PROVIDER_NAME, IconOrSvg, InlineDescription, LanguageModel, LanguageModelClient,
+    LanguageModelCompletionError, LanguageModelCompletionStream, LanguageModelProvider,
+    LanguageModelProviderId, LanguageModelProviderName, LanguageModelProviderState,
+    LanguageModelRequest, ProviderSettingsView,
 };
 use language_models_cloud::{CloudLlmTokenProvider, CloudModelProvider, language_model};
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng};
@@ -29,8 +29,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use ui::{TintColor, prelude::*};
 
-const PROVIDER_ID: LanguageModelProviderId = ZED_CLOUD_PROVIDER_ID;
-const PROVIDER_NAME: LanguageModelProviderName = ZED_CLOUD_PROVIDER_NAME;
+const PROVIDER_ID: LanguageModelProviderId = IDE_CLOUD_PROVIDER_ID;
+const PROVIDER_NAME: LanguageModelProviderName = IDE_CLOUD_PROVIDER_NAME;
 const MODELS_REFRESH_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
 
 struct ClientTokenProvider {
@@ -284,7 +284,7 @@ impl LanguageModelProvider for CloudLanguageModelProvider {
     }
 
     fn icon(&self) -> IconOrSvg {
-        IconOrSvg::Icon(IconName::AiZed)
+        IconOrSvg::Icon(IconName::AiApp)
     }
 
     fn default_model(&self, cx: &App) -> Option<LanguageModel> {

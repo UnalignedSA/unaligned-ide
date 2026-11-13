@@ -1,34 +1,32 @@
 use crate::multibuffer_hint::MultibufferHint;
-use client::{Client, UserStore, zed_urls};
-use cloud_api_types::Plan;
 use db::kvp::KeyValueStore;
 use fs::Fs;
 use gpui::{
-    Action, AnyElement, App, AppContext, AsyncWindowContext, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, Global, IntoElement, KeyContext, Render, ScrollHandle, SharedString,
-    Subscription, Task, WeakEntity, Window, actions,
+    Action, App, AppContext, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Global, IntoElement, KeyContext, Render, ScrollHandle, SharedString,
+    Subscription, Task, WeakEntity, Window, actions, relative,
 };
 use notifications::status_toast::StatusToast;
-use project::agent_server_store::AllAgentServersSettings;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{SettingsStore, VsCodeSettingsSource};
 use std::sync::Arc;
+use theme_settings::ThemeSettings;
 use ui::{
-    Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement, Vector, VectorName,
-    WithScrollbar as _, prelude::*, rems_from_px,
+    DISPLAY_FONT, KeyBinding, ParentElement as _, StatefulInteractiveElement, WithScrollbar as _,
+    prelude::*, rems_from_px,
 };
+use workspace::welcome::AiConnection;
 
+use app_actions::OpenOnboarding;
 pub use workspace::welcome::ShowWelcome;
 use workspace::welcome::WelcomePage;
 use workspace::{
     AppState, Workspace, WorkspaceId,
     dock::DockPosition,
     item::{Item, ItemEvent},
-    notifications::NotifyResultExt as _,
     open_new, register_serializable_item, with_active_or_new_workspace,
 };
-use zed_actions::OpenOnboarding;
 
 mod base_keymap_picker;
 mod basics_page;
@@ -37,7 +35,7 @@ mod theme_preview;
 
 /// Imports settings from Visual Studio Code.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = app)]
 #[serde(deny_unknown_fields)]
 pub struct ImportVsCodeSettings {
     #[serde(default)]
@@ -46,7 +44,7 @@ pub struct ImportVsCodeSettings {
 
 /// Imports settings from Cursor editor.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = app)]
 #[serde(deny_unknown_fields)]
 pub struct ImportCursorSettings {
     #[serde(default)]
@@ -61,8 +59,10 @@ actions!(
         /// Finish the onboarding process.
         Finish,
         /// Sign in while in the onboarding flow.
+        /// Kept so existing keymaps still load; nothing handles it any more.
         SignIn,
-        /// Open the user account in zed.dev while in the onboarding flow.
+        /// Opened the user account page upstream.
+        /// Kept so existing keymaps still load; nothing handles it any more.
         OpenAccount,
         /// Resets the welcome screen hints to their initial state.
         ResetHints
@@ -73,6 +73,28 @@ pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _cx| {
         workspace
             .register_action(|_workspace, _: &ResetHints, _, cx| MultibufferHint::set_count(0, cx));
+        // Handled by the workspace of the window the action was dispatched in, so
+        // it also works while the application is in the background.
+        workspace.register_action(|workspace, _: &Finish, window, cx| {
+            go_to_welcome_page(workspace, window, cx);
+            // With no model connected yet, the next thing to do is in the chat panel
+            // (the key field of the connection screen): put the focus there, so the
+            // newcomer can paste a key without a click.
+            if !matches!(
+                cx.try_global::<AiConnection>(),
+                Some(AiConnection::Connected { .. })
+            ) {
+                // The welcome page that just took the focus is not in the rendered tree
+                // yet, and an action dispatched now would start from the window's root
+                // and miss the workspace: wait until it has been drawn.
+                window.on_next_frame(|window, _| {
+                    window.on_next_frame(|window, cx| {
+                        window
+                            .dispatch_action(app_actions::assistant::FocusAgent.boxed_clone(), cx);
+                    });
+                });
+            }
+        });
     })
     .detach();
 
@@ -181,7 +203,6 @@ pub fn init(cx: &mut App) {
 }
 
 pub fn show_onboarding_view(app_state: Arc<AppState>, cx: &mut App) -> Task<anyhow::Result<()>> {
-    telemetry::event!("Onboarding Page Opened");
     open_new(
         Default::default(),
         app_state,
@@ -205,105 +226,155 @@ pub fn show_onboarding_view(app_state: Arc<AppState>, cx: &mut App) -> Task<anyh
     )
 }
 
+/// The first-launch page: three choices (look, AI, keys) on one screen.
 struct Onboarding {
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
-    user_store: Entity<UserStore>,
     scroll_handle: ScrollHandle,
-    _settings_subscription: Subscription,
+    /// One focus handle per theme tile, in the order of `basics_page::FAMILY_THEMES`.
+    theme_tile_focus_handles: Vec<FocusHandle>,
+    hovered_theme_tile: Option<usize>,
+    /// The theme settings as they were before a tile started showing its theme.
+    /// `Some` while a preview is on screen.
+    theme_before_preview: Option<ThemeSettings>,
+    /// Created at the first render: focus subscriptions need the window.
+    theme_tile_focus_subscriptions: Vec<Subscription>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Onboarding {
     fn new(workspace: &Workspace, cx: &mut App) -> Entity<Self> {
-        let font_family_cache = theme::FontFamilyCache::global(cx);
-
-        let installed_agents = cx
-            .global::<SettingsStore>()
-            .get::<AllAgentServersSettings>(None)
-            .clone();
-        let client = Client::global(cx);
-        let status = *client.status().borrow();
-        let plan = workspace.user_store().read(cx).plan();
-        let zed_agent_state = if status.is_signed_out()
-            || matches!(
-                status,
-                client::Status::AuthenticationError | client::Status::ConnectionError
-            ) {
-            "signed_out"
-        } else if status.is_signing_in() {
-            "signing_in"
-        } else {
-            match plan {
-                Some(Plan::ZedPro) => "pro",
-                Some(Plan::ZedProTrial) => "trial",
-                Some(Plan::ZedBusiness) => "business",
-                Some(Plan::ZedVip) => "vip",
-                Some(Plan::ZedStudent) => "student",
-                Some(Plan::ZedFree) | None => "free",
-            }
-        };
-        let agents_installed = basics_page::FEATURED_AGENT_IDS
-            .iter()
-            .filter(|id| installed_agents.contains_key(**id))
-            .copied()
-            .collect::<Vec<_>>();
-        telemetry::event!(
-            "Welcome Agent Setup Viewed",
-            zed_agent = zed_agent_state,
-            agents_installed = agents_installed,
-        );
-
-        cx.new(|cx| {
-            cx.spawn(async move |this, cx| {
-                font_family_cache.prefetch(cx).await;
-                this.update(cx, |_, cx| {
-                    cx.notify();
-                })
-            })
-            .detach();
-
-            Self {
-                workspace: workspace.weak_handle(),
-                focus_handle: cx.focus_handle(),
-                scroll_handle: ScrollHandle::new(),
-                user_store: workspace.user_store().clone(),
-                _settings_subscription: cx
-                    .observe_global::<SettingsStore>(move |_, cx| cx.notify()),
-            }
-        })
+        let workspace = workspace.weak_handle();
+        cx.new(|cx| Self::build(workspace, cx))
     }
 
-    fn on_finish(_: &Finish, _: &mut Window, cx: &mut App) {
-        telemetry::event!("Finish Setup");
-        go_to_welcome_page(cx);
+    fn build(workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) -> Self {
+        Self {
+            workspace,
+            focus_handle: cx.focus_handle(),
+            scroll_handle: ScrollHandle::new(),
+            theme_tile_focus_handles: basics_page::FAMILY_THEMES
+                .iter()
+                .map(|_| cx.focus_handle())
+                .collect(),
+            hovered_theme_tile: None,
+            theme_before_preview: None,
+            theme_tile_focus_subscriptions: Vec::new(),
+            _subscriptions: vec![
+                cx.observe_global::<SettingsStore>(|_, cx| cx.notify()),
+                cx.observe_global::<AiConnection>(|_, cx| cx.notify()),
+                // A page closed in the middle of a preview gives the theme back.
+                cx.on_release(|this, cx| this.end_theme_preview(cx)),
+            ],
+        }
     }
 
-    fn handle_sign_in(&mut self, _: &SignIn, window: &mut Window, cx: &mut Context<Self>) {
-        let client = Client::global(cx);
-        let workspace = self.workspace.clone();
-
-        window
-            .spawn(cx, async move |mut cx| {
-                client
-                    .sign_in_with_optional_connect(true, &cx)
-                    .await
-                    .notify_workspace_async_err(workspace, &mut cx);
-            })
-            .detach();
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .w_full()
+            .px_3()
+            .gap_2()
+            .child(
+                h_flex().w_full().gap_3().child(brand_mark(cx)).child(
+                    // The one display line of the page, as on the welcome page that
+                    // follows it. Unbounded is wide: in a narrow pane the name wraps.
+                    div()
+                        .min_w_0()
+                        .font_family(DISPLAY_FONT)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_size(rems_from_px(28_f32))
+                        .line_height(relative(1.15))
+                        .text_color(cx.theme().colors().text)
+                        .child(branding::PRODUCT_NAME),
+                ),
+            )
+            .child(
+                Label::new(
+                    "Three choices and you are ready. Everything can be changed later in Settings.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
     }
 
-    fn handle_open_account(_: &OpenAccount, _: &mut Window, cx: &mut App) {
-        cx.open_url(&zed_urls::account_url(cx))
-    }
+    /// The page's one filled button.
+    fn render_footer(&self, tab_index: isize, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus_handle = self.focus_handle.clone();
 
-    fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        crate::basics_page::render_basics_page(&self.user_store, cx).into_any_element()
+        h_flex()
+            .w_full()
+            .px_3()
+            .pt_4()
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
+            .child(
+                Button::primary("finish_setup", "Start Coding")
+                    .size(ButtonSize::Large)
+                    .tab_index(tab_index)
+                    .key_binding(
+                        KeyBinding::for_action_in(&Finish, &self.focus_handle, cx)
+                            .size(rems_from_px(12_f32)),
+                    )
+                    .on_click(move |_, window, cx| {
+                        focus_handle.dispatch_action(&Finish, window, cx)
+                    }),
+            )
     }
+}
+
+/// The brand mark: two overlapping squares, the neutral one behind, the red one in
+/// front, as on the welcome page (`workspace::welcome`).
+fn brand_mark(cx: &App) -> impl IntoElement {
+    // The logo's own red, in every theme: the one fixed colour allowed outside the theme tokens.
+    const BRAND_RED: u32 = 0xe5322d;
+    // In the logo each square is 41/68 of the mark's side: 19px of 32.
+    let square = rems_from_px(19_f32);
+
+    div()
+        .relative()
+        .flex_none()
+        .size(rems_from_px(32_f32))
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size(square)
+                // The text colour, so the square shows on light and dark grounds.
+                .bg(cx.theme().colors().text),
+        )
+        .child(
+            div()
+                .absolute()
+                .bottom_0()
+                .right_0()
+                .size(square)
+                .bg(gpui::rgb(BRAND_RED)),
+        )
 }
 
 impl Render for Onboarding {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        self.observe_theme_tile_focus(window, cx);
+
+        // The page is one tab group (see the root element below): its own focus
+        // handle sits at index 1 of the group and the controls follow it.
+        let mut tab_index = 1;
+        let header = self.render_header(cx).into_any_element();
+        let sections = self.render_sections(&mut tab_index, cx).into_any_element();
+        let footer = self.render_footer(tab_index, cx).into_any_element();
+
+        // In a window too short for the whole page, the button that ends it stays
+        // in view under the part that scrolls instead of waiting below the fold.
+        let footer_is_pinned =
+            window.viewport_size().height < rems_from_px(780_f32).to_pixels(window.rem_size());
+        let (inline_footer, pinned_footer) = if footer_is_pinned {
+            (None, Some(footer))
+        } else {
+            (Some(footer), None)
+        };
+
+        v_flex()
             .image_cache(gpui::retain_all("onboarding-page"))
             .key_context({
                 let mut ctx = KeyContext::new_with_defaults(cx.platform_info().os);
@@ -312,76 +383,58 @@ impl Render for Onboarding {
                 ctx
             })
             .track_focus(&self.focus_handle)
+            // A tab group of its own, after the frame's groups (title bar, status
+            // bar: group 0). Without it the page's stops are top-level ones and Tab
+            // walks the whole title bar between the first control and the second.
+            .tab_group()
+            .tab_index(1)
+            .tab_stop(false)
             .size_full()
             .bg(cx.theme().colors().editor_background)
-            .on_action(Self::on_finish)
-            .on_action(cx.listener(Self::handle_sign_in))
-            .on_action(Self::handle_open_account)
-            .on_action(cx.listener(|_, _: &menu::SelectNext, window, cx| {
+            // The preview follows the focus at once, without waiting for the frame
+            // that reports the focus change.
+            .on_action(cx.listener(|this, _: &menu::SelectNext, window, cx| {
                 window.focus_next(cx);
-                cx.notify();
+                this.sync_theme_preview(window, cx);
             }))
-            .on_action(cx.listener(|_, _: &menu::SelectPrevious, window, cx| {
+            .on_action(cx.listener(|this, _: &menu::SelectPrevious, window, cx| {
                 window.focus_prev(cx);
-                cx.notify();
+                this.sync_theme_preview(window, cx);
             }))
             .vertical_scrollbar_for(&self.scroll_handle, window, cx)
             .child(
                 div()
                     .id("page-content")
-                    .size_full()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .child(
-                        v_flex()
-                            .min_w_0()
-                            .max_w(rems_from_px(780_f32))
-                            .w_full()
-                            .mx_auto()
-                            .p_12()
-                            .gap_6()
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .gap_4()
-                                    .justify_between()
-                                    .child(
-                                        h_flex()
-                                            .gap_4()
-                                            .child(Vector::square(VectorName::ZedLogo, rems(2.5)))
-                                            .child(
-                                                v_flex()
-                                                    .child(
-                                                        Headline::new("Welcome to Zed")
-                                                            .size(HeadlineSize::Small),
-                                                    )
-                                                    .child(
-                                                        Label::new("The editor for what's next")
-                                                            .color(Color::Muted)
-                                                            .size(LabelSize::Small)
-                                                            .italic(),
-                                                    ),
-                                            ),
-                                    )
-                                    .child({
-                                        Button::new("finish_setup", "Finish Setup")
-                                            .style(ButtonStyle::Filled)
-                                            .size(ButtonSize::Medium)
-                                            .width(rems_from_px(200_f32))
-                                            .key_binding(KeyBinding::for_action_in(
-                                                &Finish,
-                                                &self.focus_handle,
-                                                cx,
-                                            ))
-                                            .on_click(|_, window, cx| {
-                                                window.dispatch_action(Finish.boxed_clone(), cx);
-                                            })
-                                    }),
-                            )
-                            .child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
-                            .child(self.render_page(cx)),
+                        div().w_full().px_4().py_8().child(
+                            // One centred column, 720 at most; everything in it starts
+                            // on the same 12px inset, as on the welcome page.
+                            v_flex()
+                                .w_full()
+                                .min_w_0()
+                                .max_w(rems_from_px(720_f32))
+                                .mx_auto()
+                                .gap_6()
+                                .child(header)
+                                .child(sections)
+                                .children(inline_footer),
+                        ),
                     )
                     .track_scroll(&self.scroll_handle),
             )
+            .children(pinned_footer.map(|footer| {
+                div().flex_none().w_full().px_4().pb_4().child(
+                    div()
+                        .w_full()
+                        .max_w(rems_from_px(720_f32))
+                        .mx_auto()
+                        .child(footer),
+                )
+            }))
     }
 }
 
@@ -397,11 +450,7 @@ impl Item for Onboarding {
     type Event = ItemEvent;
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        "Onboarding".into()
-    }
-
-    fn telemetry_event_text(&self) -> Option<&'static str> {
-        Some("Onboarding Page Opened")
+        "Get Started".into()
     }
 
     fn show_toolbar(&self) -> bool {
@@ -418,13 +467,8 @@ impl Item for Onboarding {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Option<Entity<Self>>> {
-        Task::ready(Some(cx.new(|cx| Onboarding {
-            workspace: self.workspace.clone(),
-            user_store: self.user_store.clone(),
-            scroll_handle: ScrollHandle::new(),
-            focus_handle: cx.focus_handle(),
-            _settings_subscription: cx.observe_global::<SettingsStore>(move |_, cx| cx.notify()),
-        })))
+        let workspace = self.workspace.clone();
+        Task::ready(Some(cx.new(|cx| Onboarding::build(workspace, cx))))
     }
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
@@ -432,39 +476,36 @@ impl Item for Onboarding {
     }
 }
 
-fn go_to_welcome_page(cx: &mut App) {
-    with_active_or_new_workspace(cx, |workspace, window, cx| {
-        let Some((onboarding_id, onboarding_idx)) = workspace
-            .active_pane()
-            .read(cx)
+/// Replaces the first-launch page by the welcome page, in the pane that holds it.
+fn go_to_welcome_page(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some((pane, onboarding, onboarding_idx)) = workspace.panes().iter().find_map(|pane| {
+        pane.read(cx)
             .items()
             .enumerate()
-            .find_map(|(idx, item)| {
-                let _ = item.downcast::<Onboarding>()?;
-                Some((item.item_id(), idx))
-            })
-        else {
-            return;
-        };
+            .find_map(|(idx, item)| Some((pane.clone(), item.downcast::<Onboarding>()?, idx)))
+    }) else {
+        return;
+    };
 
-        workspace.active_pane().update(cx, |pane, cx| {
-            // Get the index here to get around the borrow checker
-            let idx = pane.items().enumerate().find_map(|(idx, item)| {
-                let _ = item.downcast::<WelcomePage>()?;
-                Some(idx)
-            });
+    // A theme that was only being looked at is not kept.
+    onboarding.update(cx, |onboarding, cx| onboarding.end_theme_preview(cx));
 
-            if let Some(idx) = idx {
-                pane.activate_item(idx, true, true, window, cx);
-            } else {
-                let item = Box::new(
-                    cx.new(|cx| WelcomePage::new(workspace.weak_handle(), false, window, cx)),
-                );
-                pane.add_item(item, true, true, Some(onboarding_idx), window, cx);
-            }
-
-            pane.remove_item(onboarding_id, false, false, window, cx);
+    let weak_workspace = workspace.weak_handle();
+    pane.update(cx, |pane, cx| {
+        // Get the index here to get around the borrow checker
+        let idx = pane.items().enumerate().find_map(|(idx, item)| {
+            let _ = item.downcast::<WelcomePage>()?;
+            Some(idx)
         });
+
+        if let Some(idx) = idx {
+            pane.activate_item(idx, true, true, window, cx);
+        } else {
+            let item = Box::new(cx.new(|cx| WelcomePage::new(weak_workspace, false, window, cx)));
+            pane.add_item(item, true, true, Some(onboarding_idx), window, cx);
+        }
+
+        pane.remove_item(onboarding.entity_id(), false, false, window, cx);
     });
 }
 

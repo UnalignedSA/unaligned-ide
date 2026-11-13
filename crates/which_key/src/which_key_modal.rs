@@ -110,7 +110,8 @@ impl Render for WhichKeyModal {
             .right(px(16.))
             .min_w(px(220.))
             .max_w(max_panel_width)
-            .elevation_3(cx)
+            // A flat panel: raised ground and a 1px line.
+            .elevation_2(cx)
             .overflow_hidden()
             .child(PendingBindings::new(
                 "which-key-content",

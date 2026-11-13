@@ -1,20 +1,51 @@
+// Modified by the Unaligned IDE contributors, 2026: see NOTICE at the repository root.
 use std::{
     hash::{Hash, Hasher},
     iter, mem,
     ops::Range,
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use crate::{
     AbsoluteLength, App, Background, BackgroundTag, BorderStyle, Bounds, ContentMask, Corners,
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
     FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
-    PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Window, black, phi,
-    point, px, quad, rems, size,
+    PointRefinement, Rems, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Window,
+    black, phi, point, px, quad, rems, size,
 };
 use collections::HashSet;
 use refineable::Refineable;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+/// The process-wide factor applied to the named corner radii (`rounded_xs` to `rounded_3xl`),
+/// stored as the bits of an `f32`. It starts at `1.0`.
+static CORNER_RADIUS_SCALE: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
+
+/// Sets the factor applied to the named corner radii (`rounded_xs` to `rounded_3xl`).
+///
+/// `1.0` (the default) keeps the documented sizes, `0.0` makes every named radius square.
+/// `rounded_none`, `rounded_full` and radii given as explicit lengths are not affected.
+/// The value is per process, not per window; elements read it while they are built, so
+/// windows must be refreshed after a change. Negative and non-finite values are stored as `0.0`.
+pub fn set_corner_radius_scale(scale: f32) {
+    let scale = if scale.is_finite() {
+        scale.max(0.0)
+    } else {
+        0.0
+    };
+    CORNER_RADIUS_SCALE.store(scale.to_bits(), Ordering::Relaxed);
+}
+
+/// Returns the factor applied to the named corner radii. See [`set_corner_radius_scale`].
+pub fn corner_radius_scale() -> f32 {
+    f32::from_bits(CORNER_RADIUS_SCALE.load(Ordering::Relaxed))
+}
+
+/// Returns a corner radius of the given size in rems, multiplied by [`corner_radius_scale`].
+pub fn scaled_radius(rems: f32) -> Rems {
+    Rems(rems * corner_radius_scale())
+}
 
 /// Use this struct for interfacing with the 'debug_below' styling from your own elements.
 /// If a parent element has this style set on it, then this struct will be set as a global in

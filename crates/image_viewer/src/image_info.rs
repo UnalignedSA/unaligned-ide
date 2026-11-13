@@ -1,9 +1,12 @@
 use gpui::{App, Context, Entity, IntoElement, ParentElement, Render, Subscription, div};
 use project::image_store::{ImageFormat, ImageMetadata, RasterImageFormat};
 use settings::Settings;
-use ui::prelude::*;
+use ui::{Tooltip, prelude::*};
 use util::size::format_file_size;
-use workspace::{HideStatusItem, ItemHandle, StatusItemView, Workspace};
+use workspace::{
+    HideStatusItem, ItemHandle, StatusItemView, Workspace,
+    active_file_name::{status_bar_item_height_for, status_bar_value},
+};
 
 use crate::{ImageFileSizeUnit, ImageView, ImageViewerSettings};
 
@@ -47,7 +50,7 @@ impl Render for ImageInfo {
         let settings = ImageViewerSettings::get_global(cx);
 
         let Some(metadata) = self.metadata.as_ref() else {
-            return div().hidden();
+            return div().id("image-info").hidden();
         };
 
         let mut components = Vec::new();
@@ -80,7 +83,15 @@ impl Render for ImageInfo {
             .to_string(),
         );
 
-        div().child(Label::new(components.join(" • ")).size(LabelSize::Small))
+        // Not clickable, so no hover background: only the bar's metrics and a tooltip.
+        div()
+            .id("image-info")
+            .flex()
+            .items_center()
+            .h(status_bar_item_height_for(cx))
+            .px_2()
+            .tooltip(Tooltip::text("Image Dimensions, File Size and Format"))
+            .child(status_bar_value(components.join(" • "), cx))
     }
 }
 

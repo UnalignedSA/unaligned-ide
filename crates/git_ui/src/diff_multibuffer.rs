@@ -928,7 +928,7 @@ impl Render for DiffMultibuffer {
                 el.child(
                     Icon::new(IconName::LoadCircle)
                         .size(IconSize::Custom(rems))
-                        .color(Color::Accent)
+                        .color(Color::Muted)
                         .with_rotate_animation(3)
                         .into_any_element(),
                 )

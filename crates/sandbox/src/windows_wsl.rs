@@ -61,12 +61,12 @@ const BWRAP_UNUSABLE_EXIT_CODE: i32 = 42;
 
 /// Prefix of the probe script's single result line, so it can be picked out
 /// of any stdout noise printed by the login shell's profile scripts.
-const PROBE_RESULT_PREFIX: &str = "zed-wsl-probe:";
+const PROBE_RESULT_PREFIX: &str = "ide-wsl-probe:";
 
 /// Prefix of the helper-provisioning script's single result line (the absolute
 /// in-WSL path of the Linux `zed` to run as the sandbox helper), picked out of
 /// login-shell stdout noise just like [`PROBE_RESULT_PREFIX`].
-const HELPER_RESULT_PREFIX: &str = "zed-wsl-helper:";
+const HELPER_RESULT_PREFIX: &str = "ide-wsl-helper:";
 
 /// Ensures a Linux `zed` matching the running release is available inside WSL to
 /// act as the sandbox helper (`--wsl-sandbox-helper`), and prints its absolute
@@ -97,8 +97,8 @@ const HELPER_PROVISION_SCRIPT: &str = r#"
 set -eu
 channel="$1"
 version="$2"
-dest="$HOME/.local/libexec/zed/$channel"
-marker="$dest/.zed-wsl-helper-version"
+dest="$HOME/.local/libexec/ide-wsl-helper/$channel"
+marker="$dest/.ide-wsl-helper-version"
 want="$channel $version"
 
 # Reuse an exact, already-installed channel+version — but never for the floating
@@ -107,7 +107,7 @@ want="$channel $version"
 if [ "$version" != "latest" ] && [ "$(cat "$marker" 2>/dev/null || true)" = "$want" ]; then
     helper=$(find "$dest" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true)
     if [ -n "$helper" ] && [ -x "$helper" ]; then
-        printf 'zed-wsl-helper: %s\n' "$helper"
+        printf 'ide-wsl-helper: %s\n' "$helper"
         exit 0
     fi
 fi
@@ -116,19 +116,19 @@ arch=$(uname -m)
 case "$arch" in
     x86_64 | amd64) arch="x86_64" ;;
     aarch64 | arm64) arch="aarch64" ;;
-    *) echo "unsupported WSL architecture for the zed sandbox helper: $arch" >&2; exit 1 ;;
+    *) echo "unsupported WSL architecture for the sandbox helper: $arch" >&2; exit 1 ;;
 esac
 url="https://cloud.zed.dev/releases/$channel/$version/download?asset=zed&arch=$arch&os=linux&source=zed-wsl-sandbox"
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/zed-wsl-helper-XXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/ide-wsl-helper-XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
-tarball="$tmp/zed.tar.gz"
+tarball="$tmp/helper.tar.gz"
 if command -v curl >/dev/null 2>&1; then
     curl -fL "$url" -o "$tarball"
 elif command -v wget >/dev/null 2>&1; then
     wget -O "$tarball" "$url"
 else
-    echo 'neither curl nor wget is available in WSL to download zed' >&2
+    echo 'neither curl nor wget is available in WSL to download the sandbox helper' >&2
     exit 1
 fi
 
@@ -136,7 +136,7 @@ mkdir -p "$tmp/unpacked"
 tar -xzf "$tarball" -C "$tmp/unpacked"
 helper_src=$(find "$tmp/unpacked" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true)
 if [ -z "$helper_src" ]; then
-    echo 'the downloaded zed tarball did not contain a libexec/zed-editor binary' >&2
+    echo 'the downloaded tarball did not contain a libexec/zed-editor binary' >&2
     exit 1
 fi
 app=$(dirname "$(dirname "$helper_src")")
@@ -155,10 +155,10 @@ printf '%s' "$want" > "$marker"
 
 helper=$(find "$dest" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true)
 if [ -z "$helper" ] || [ ! -x "$helper" ]; then
-    echo "the installed zed sandbox helper is missing or not executable under $dest" >&2
+    echo "the installed sandbox helper is missing or not executable under $dest" >&2
     exit 1
 fi
-printf 'zed-wsl-helper: %s\n' "$helper"
+printf 'ide-wsl-helper: %s\n' "$helper"
 exit 0
 "#;
 
@@ -862,15 +862,33 @@ async fn ensure_wsl_zed_helper(
     version: &str,
 ) -> Result<String> {
     // TODO: Remove this development override once WSL canonical-path handling is released.
-    if let Some(helper) = std::env::var_os("ZED_WSL_SANDBOX_HELPER") {
+    if let Some(helper) = std::env::var_os("IDE_WSL_SANDBOX_HELPER") {
         let helper = helper
             .into_string()
-            .map_err(|_| anyhow::anyhow!("ZED_WSL_SANDBOX_HELPER is not valid UTF-8"))?;
+            .map_err(|_| anyhow::anyhow!("IDE_WSL_SANDBOX_HELPER is not valid UTF-8"))?;
         ensure!(
             helper.starts_with('/'),
-            "ZED_WSL_SANDBOX_HELPER must be an absolute path inside WSL"
+            "IDE_WSL_SANDBOX_HELPER must be an absolute path inside WSL"
         );
         return Ok(helper);
+    }
+
+    // Unaligned IDE: upstream downloads a Linux build of Zed from its own servers here and
+    // runs it inside WSL as the sandbox helper. This product publishes no Linux build at an
+    // address of its own yet, and it must not fetch or run upstream's binary on its own
+    // initiative, so without the override above the sandbox reports that it cannot start.
+    // Set this to `true` only together with a download address that belongs to the product
+    // (the URL in `HELPER_PROVISION_SCRIPT`).
+    const DOWNLOAD_HELPER: bool = false;
+    if !DOWNLOAD_HELPER {
+        // The same error type as a failed download: the agent then offers to run the
+        // command without the sandbox instead of returning the failure to the model.
+        return Err(unavailable(
+            "the sandbox helper is not available in this build: it would have to be \
+             downloaded from the upstream project's servers. Turn the terminal sandbox off in \
+             the agent settings, or set IDE_WSL_SANDBOX_HELPER to the path, inside WSL, of a \
+             Linux build of this editor",
+        ));
     }
 
     type HelperCache = HashMap<(Option<String>, String, String), String>;
@@ -901,18 +919,18 @@ async fn ensure_wsl_zed_helper(
             "sh",
             "-lc",
             HELPER_PROVISION_SCRIPT,
-            "zed-wsl-sandbox-helper",
+            "ide-wsl-sandbox-helper",
             channel,
             version,
         ],
-        "provision the Linux `zed` sandbox helper",
+        "provision the Linux sandbox helper",
     )
     .await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
         return Err(unavailable(format!(
-            "failed to provision a Linux `zed` sandbox helper in {}{}",
+            "failed to provision a Linux sandbox helper in {}{}",
             wsl_distro_label(distro),
             if stderr.is_empty() {
                 String::new()
@@ -936,7 +954,7 @@ async fn ensure_wsl_zed_helper(
         })?;
     ensure!(
         path.starts_with('/'),
-        "the WSL `zed` sandbox helper resolved to {path:?} rather than an absolute path"
+        "the WSL sandbox helper resolved to {path:?} rather than an absolute path"
     );
 
     cache
@@ -1057,7 +1075,7 @@ async fn resolve_uncached_paths(
         "-c".to_string(),
         PATH_RESOLUTION_SCRIPT.to_string(),
         // argv[0] for the script; the path triples follow as "$@".
-        "zed-resolve-paths".to_string(),
+        "ide-resolve-paths".to_string(),
     ];
     args.extend(path_resolution_args(
         mappings.iter().map(|mapping| &mapping.0),
@@ -1592,7 +1610,7 @@ mod tests {
 
     #[test]
     fn probe_output_reports_interop_and_bwrap_path() {
-        let probe = parse_probe_output("zed-wsl-probe: interop /usr/bin/bwrap\n").unwrap();
+        let probe = parse_probe_output("ide-wsl-probe: interop /usr/bin/bwrap\n").unwrap();
         assert_eq!(
             probe,
             EnvironmentProbe {
@@ -1602,7 +1620,7 @@ mod tests {
         );
 
         let probe =
-            parse_probe_output("zed-wsl-probe: no-interop /home/me/.nix-profile/bin/bwrap\n")
+            parse_probe_output("ide-wsl-probe: no-interop /home/me/.nix-profile/bin/bwrap\n")
                 .unwrap();
         assert_eq!(
             probe,
@@ -1618,7 +1636,7 @@ mod tests {
         // Login-shell profile scripts run before the probe body and may print
         // arbitrary text; only the marked result line counts.
         let probe = parse_probe_output(
-            "welcome to my shell, interop fans\nzed-wsl-probe: no-interop /usr/bin/bwrap\n",
+            "welcome to my shell, interop fans\nide-wsl-probe: no-interop /usr/bin/bwrap\n",
         )
         .unwrap();
         assert!(!probe.mask_interop_dir);
@@ -1628,15 +1646,15 @@ mod tests {
     fn probe_output_rejects_missing_or_malformed_result_line() {
         assert!(parse_probe_output("").is_err());
         assert!(parse_probe_output("profile noise only\n").is_err());
-        assert!(parse_probe_output("zed-wsl-probe: interop\n").is_err());
-        assert!(parse_probe_output("zed-wsl-probe: maybe /usr/bin/bwrap\n").is_err());
+        assert!(parse_probe_output("ide-wsl-probe: interop\n").is_err());
+        assert!(parse_probe_output("ide-wsl-probe: maybe /usr/bin/bwrap\n").is_err());
     }
 
     #[test]
     fn probe_output_rejects_non_absolute_bwrap_path() {
         // `command -v` reports a bare name for shell functions and aliases,
         // which `wsl --exec` could never run.
-        assert!(parse_probe_output("zed-wsl-probe: interop bwrap\n").is_err());
+        assert!(parse_probe_output("ide-wsl-probe: interop bwrap\n").is_err());
     }
 
     #[test]

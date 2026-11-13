@@ -1,10 +1,8 @@
 use editor::{Editor, EditorElement, EditorStyle, MultiBufferOffset, ToOffset};
-use gpui::{
-    Action, App, ClickEvent, Context, Entity, FocusHandle, Hsla, IntoElement, TextStyle, Window,
-};
+use gpui::{Action, App, ClickEvent, Context, Entity, FocusHandle, IntoElement, TextStyle, Window};
 use settings::Settings;
 use theme_settings::ThemeSettings;
-use ui::{IconButton, IconButtonShape};
+use ui::{IconButton, IconButtonShape, InputShell, InputShellGround, InputShellSize};
 use ui::{Tooltip, prelude::*};
 
 pub(super) enum HistoryNavigationDirection {
@@ -39,6 +37,31 @@ pub(super) enum ActionButtonState {
     Toggled,
 }
 
+/// Replace and Replace All: the same icon button as the others of the bar,
+/// outlined, since it is the one that changes the text.
+pub(super) fn render_replace_action_button<T: 'static, A: Action>(
+    id_prefix: &'static str,
+    icon: ui::IconName,
+    button_state: Option<ActionButtonState>,
+    tooltip: &'static str,
+    action: &'static A,
+    focus_handle: FocusHandle,
+    cx: &Context<T>,
+    handler: fn(&mut T, &A, &mut Window, &mut Context<T>),
+) -> IconButton {
+    render_local_action_button(
+        id_prefix,
+        icon,
+        button_state,
+        tooltip,
+        action,
+        focus_handle,
+        cx,
+        handler,
+    )
+    .style(ButtonStyle::Outlined)
+}
+
 pub(super) fn render_local_action_button<T: 'static, A: Action>(
     id_prefix: &'static str,
     icon: ui::IconName,
@@ -48,12 +71,14 @@ pub(super) fn render_local_action_button<T: 'static, A: Action>(
     focus_handle: FocusHandle,
     cx: &Context<T>,
     handler: fn(&mut T, &A, &mut Window, &mut Context<T>),
-) -> impl IntoElement {
+) -> IconButton {
     IconButton::new(
         SharedString::from(format!("{id_prefix}-{}", action.name())),
         icon,
     )
     .shape(IconButtonShape::Square)
+    .icon_size(IconSize::Small)
+    .aria_label(tooltip)
     .on_click(cx.listener({
         let focus_handle = focus_handle.clone();
         move |this, _: &ClickEvent, window, cx| {
@@ -70,31 +95,36 @@ pub(super) fn render_local_action_button<T: 'static, A: Action>(
     })
 }
 
-pub(crate) fn input_base_styles(border_color: Hsla, map: impl FnOnce(Div) -> Div) -> Div {
-    h_flex()
-        .map(map)
+/// The box of a search input: `ui::InputShell`, small, with its focus and
+/// error lines. `ground` follows the surface the input sits on: sunken inside
+/// the raised find widget, raised when it sits on the editor's own ground.
+pub(crate) fn input_base_styles(
+    focused: bool,
+    has_error: bool,
+    ground: InputShellGround,
+    map: impl FnOnce(InputShell) -> InputShell,
+) -> InputShell {
+    InputShell::new()
+        .size(InputShellSize::Small)
+        .ground(ground)
+        .focused(focused)
+        .invalid(has_error)
         .min_w_32()
-        .min_h_8()
-        .pl_2()
-        .pr_1()
-        .border_1()
-        .border_color(border_color)
-        .rounded_md()
+        .map(map)
 }
+
+/// The same box with a "Find in Results" caption before the text.
 pub(crate) fn filter_search_results_input(
-    border_color: Hsla,
-    map: impl FnOnce(Div) -> Div,
-    cx: &App,
-) -> Div {
-    input_base_styles(border_color, map).pl_0().child(
-        h_flex()
-            .mr_2()
-            .px_2()
-            .h_full()
-            .border_r_1()
-            .border_color(cx.theme().colors().border)
-            .bg(cx.theme().colors().text_accent.opacity(0.05))
-            .child(Label::new("Find in Results").color(Color::Muted)),
+    focused: bool,
+    has_error: bool,
+    ground: InputShellGround,
+    map: impl FnOnce(InputShell) -> InputShell,
+) -> InputShell {
+    input_base_styles(focused, has_error, ground, map).start_slot(
+        Label::new("Find in Results")
+            .size(LabelSize::Small)
+            .color(Color::Muted)
+            .mr_1(),
     )
 }
 
@@ -118,14 +148,15 @@ pub(crate) fn render_text_input(
         font_family: settings.buffer_font.family.clone(),
         font_features: settings.buffer_font.features.clone(),
         font_fallbacks: settings.buffer_font.fallbacks.clone(),
-        font_size: rems(0.875).into(),
+        font_size: rems(0.8125).into(),
         font_weight: settings.buffer_font.weight,
         line_height: relative(1.3),
         ..TextStyle::default()
     };
 
+    // No ground of its own: the editor shows the input shell under it, in
+    // every state of the shell (rest, hover).
     let mut editor_style = EditorStyle {
-        background: app.theme().colors().toolbar_background,
         local_player: app.theme().players().local(),
         text: text_style,
         ..EditorStyle::default()
@@ -139,5 +170,25 @@ pub(crate) fn render_text_input(
 
 /// This element makes all search inputs align as if they were in the same column
 pub(crate) fn alignment_element() -> Div {
-    div().size_5().flex_none().ml_0p5()
+    div().size(rems_from_px(22_f32)).flex_none()
+}
+
+/// The match counter: numbers that change, so in the code font (D3), small.
+pub(crate) fn match_count_label(text: String, color: Color, cx: &App) -> impl IntoElement {
+    div()
+        .font_buffer(cx)
+        .text_size(rems_from_px(12_f32))
+        .text_color(color.color(cx))
+        .whitespace_nowrap()
+        .child(text)
+}
+
+/// "3 of 12", or "No results" when there is nothing to step through.
+pub(crate) fn match_count_text(active_match: Option<usize>, total: usize, more: bool) -> String {
+    match active_match {
+        Some(index) if total > 0 => {
+            format!("{} of {}{}", index + 1, total, if more { "+" } else { "" })
+        }
+        _ => "No results".to_string(),
+    }
 }

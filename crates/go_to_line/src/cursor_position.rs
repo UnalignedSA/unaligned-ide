@@ -4,11 +4,14 @@ use settings::{RegisterSetting, Settings};
 use std::{fmt::Write, num::NonZeroU32, time::Duration};
 use text::{Point, Selection};
 use ui::{
-    Button, ButtonCommon, Clickable, Context, FluentBuilder, IntoElement, LabelSize, ParentElement,
-    Render, Tooltip, Window, div,
+    ButtonCommon, Clickable, Context, FluentBuilder, IntoElement, ParentElement, Render, Tooltip,
+    Window, div,
 };
-use util::paths::FILE_ROW_COLUMN_DELIMITER;
-use workspace::{HideStatusItem, StatusBarSettings, StatusItemView, Workspace, item::ItemHandle};
+use workspace::{
+    HideStatusItem, StatusBarSettings, StatusItemView, Workspace,
+    active_file_name::{status_bar_item, status_bar_item_content, status_bar_text},
+    item::ItemHandle,
+};
 
 #[derive(Copy, Clone, Debug, Default, PartialOrd, PartialEq)]
 pub(crate) struct SelectionStats {
@@ -214,17 +217,14 @@ impl Render for CursorPosition {
         }
 
         div().when_some(self.position, |el, position| {
-            let mut text = format!(
-                "{}{FILE_ROW_COLUMN_DELIMITER}{}",
-                position.line, position.character,
-            );
+            let mut text = format!("Ln {}, Col {}", position.line, position.character);
             self.write_position(&mut text, cx);
 
             let context = self.context.clone();
 
             el.child(
-                Button::new("go-to-line-column", text)
-                    .label_size(LabelSize::Small)
+                status_bar_item("go-to-line-column", cx)
+                    .child(status_bar_item_content().child(status_bar_text(text, cx)))
                     .tab_index(0isize)
                     .aria_label(format!(
                         "Line {}, column {}",

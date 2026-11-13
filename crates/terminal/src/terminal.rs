@@ -651,14 +651,14 @@ const DEBUG_TERMINAL_HEIGHT: Pixels = px(30.);
 const DEBUG_CELL_WIDTH: Pixels = px(5.);
 const DEBUG_LINE_HEIGHT: Pixels = px(5.);
 
-/// Inserts Zed-specific environment variables for terminal sessions.
+/// Inserts the app's own environment variables for terminal sessions.
 /// Used by both local terminals and remote terminals (via SSH).
 pub fn insert_zed_terminal_env(
     env: &mut HashMap<String, String>,
     version: &impl std::fmt::Display,
 ) {
-    env.insert("ZED_TERM".to_string(), "true".to_string());
-    env.insert("TERM_PROGRAM".to_string(), "zed".to_string());
+    env.insert("IDE_TERM".to_string(), "true".to_string());
+    env.insert("TERM_PROGRAM".to_string(), branding::APP_ID.to_string());
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("TERM_PROGRAM_VERSION".to_string(), version.to_string());
@@ -892,7 +892,7 @@ const DEFAULT_SCROLL_HISTORY_LINES: usize = 10_000;
 pub const MAX_SCROLL_HISTORY_LINES: usize = 100_000;
 static NEXT_INIT_COMMAND_STARTUP_MARKER_ID: AtomicU64 = AtomicU64::new(1);
 
-const INIT_COMMAND_STARTUP_MARKER_PREFIX: &str = "__zed_init_command_ready_";
+const INIT_COMMAND_STARTUP_MARKER_PREFIX: &str = "__ide_init_command_ready_";
 const INIT_COMMAND_STARTUP_MARKER_SUFFIX: &str = "__";
 const INIT_COMMAND_STARTUP_MARKER_SEARCH_LINES: usize = 64;
 
@@ -909,7 +909,7 @@ fn init_command_startup_marker_command(shell_kind: ShellKind, marker_id: u64) ->
         ),
         ShellKind::Cmd => {
             format!(
-                "<nul set /p zed_init_ready={INIT_COMMAND_STARTUP_MARKER_PREFIX}&echo {marker_id}{INIT_COMMAND_STARTUP_MARKER_SUFFIX}"
+                "<nul set /p ide_init_ready={INIT_COMMAND_STARTUP_MARKER_PREFIX}&echo {marker_id}{INIT_COMMAND_STARTUP_MARKER_SUFFIX}"
             )
         }
         ShellKind::Nushell => {
@@ -5836,7 +5836,7 @@ mod tests {
             let (terminal, cx) = init_terminal_test_with_window(cx, b"");
             let test_view = cx.new_window_entity(|window, cx| TestView::new(&terminal, window, cx));
             let test_entities = TestEntities::new(&terminal, &test_view);
-            let expected_hovered_word: HoveredWord = (ZED_DEV_STR, (0, 6)..=(0, 21), 0).into();
+            let expected_hovered_word: HoveredWord = (IDE_DEV_STR, (0, 6)..=(0, 21), 0).into();
             update_test_entities(&test_entities, cx, |cx: &mut HyperlinkVisualTestContext| {
                 // Set initial expected hovered word
                 cx.write_output_lines(OUTPUT_ZED_DEV, 1);
@@ -5846,7 +5846,7 @@ mod tests {
                 cx.assert_display_offset(0);
                 cx.assert_visible_lines_match(vec![OUTPUT_ZED_DEV]);
                 cx.set_window_secondary_key();
-                cx.ctrl_mouse_move_to(ZED_DEV_PT);
+                cx.ctrl_mouse_move_to(IDE_DEV_PT);
                 Some(Expected(Wakeups(0), Notifies(2)))
             });
             update_test_entities(&test_entities, cx, |cx: &mut HyperlinkVisualTestContext| {
@@ -5858,8 +5858,8 @@ mod tests {
 
         const OUTPUT_ZED_DEV: &str = "Visit https://zed.dev/ for more";
         const OUTPUT_NONE: &str = "None";
-        const ZED_DEV_STR: &str = "https://zed.dev/";
-        const ZED_DEV_PT: GpuiPoint<Pixels> = point(px(30.0), px(2.5));
+        const IDE_DEV_STR: &str = "https://zed.dev/";
+        const IDE_DEV_PT: GpuiPoint<Pixels> = point(px(30.0), px(2.5));
 
         #[gpui::test]
         async fn test_ctrl_hover_with_changing_content(cx: &mut TestAppContext) {
@@ -5938,7 +5938,7 @@ mod tests {
                 cx.scroll_up_by_and_sync(3);
                 // Existing hovered word IS NOT reused when scrolling
                 cx.assert_hovered_word(None);
-                cx.ctrl_mouse_move_to(ZED_DEV_PT);
+                cx.ctrl_mouse_move_to(IDE_DEV_PT);
                 Some(Expected(Wakeups(0), Notifies(2)))
             });
             update_test_entities(&test_entities, cx, |cx: &mut HyperlinkVisualTestContext| {

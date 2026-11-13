@@ -347,7 +347,7 @@ impl DebugAdapter for JsDebugAdapter {
                                     "items": {
                                         "type": "string"
                                     },
-                                    "default": ["${ZED_WORKTREE_ROOT}/**/*.js", "!**/node_modules/**"]
+                                    "default": ["${IDE_WORKTREE_ROOT}/**/*.js", "!**/node_modules/**"]
                                 },
                                 "sourceMaps": {
                                     "type": "boolean",
@@ -393,7 +393,7 @@ impl DebugAdapter for JsDebugAdapter {
                                 "webRoot": {
                                     "type": "string",
                                     "description": "Workspace absolute path to the webserver root",
-                                    "default": "${ZED_WORKTREE_ROOT}"
+                                    "default": "${IDE_WORKTREE_ROOT}"
                                 },
                                 "userDataDir": {
                                     "type": ["string", "boolean"],
@@ -481,7 +481,7 @@ impl DebugAdapter for JsDebugAdapter {
                                     "items": {
                                         "type": "string"
                                     },
-                                    "default": ["${ZED_WORKTREE_ROOT}/**/*.js", "!**/node_modules/**"]
+                                    "default": ["${IDE_WORKTREE_ROOT}/**/*.js", "!**/node_modules/**"]
                                 },
                                 "url": {
                                     "type": "string",
@@ -490,7 +490,7 @@ impl DebugAdapter for JsDebugAdapter {
                                 "webRoot": {
                                     "type": "string",
                                     "description": "Workspace absolute path to the webserver root",
-                                    "default": "${ZED_WORKTREE_ROOT}"
+                                    "default": "${IDE_WORKTREE_ROOT}"
                                 },
                                 "skipFiles": {
                                     "type": "array",

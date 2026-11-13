@@ -1249,7 +1249,7 @@ impl DisableAiSettings {
     /// Returns whether AI is disabled for the given file.
     ///
     /// This checks the project-level settings for the file's worktree,
-    /// allowing `disable_ai` to be configured per-project in `.zed/settings.json`.
+    /// allowing `disable_ai` to be configured per-project in `.unaligned/settings.json`.
     pub fn is_ai_disabled_for_buffer(buffer: Option<&Entity<Buffer>>, cx: &App) -> bool {
         Self::is_ai_disabled_for_file(buffer.and_then(|buffer| buffer.read(cx).file()), cx)
     }
@@ -4032,10 +4032,8 @@ impl Project {
                     let message = format!("Failed to set local tasks in {path:?}:\n{message}");
                     cx.emit(Event::Toast {
                         notification_id: format!("local-tasks-{path:?}").into(),
-                        link: Some(ToastLink {
-                            label: "Open Tasks Documentation",
-                            url: "https://zed.dev/docs/tasks",
-                        }),
+                        // Upstream links to its manual here; the product has none for tasks.
+                        link: None,
                         message,
                     });
                 }

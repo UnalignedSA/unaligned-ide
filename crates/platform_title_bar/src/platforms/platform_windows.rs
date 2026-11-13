@@ -2,6 +2,17 @@ use gpui::{Hsla, Rgba, WindowControlArea, prelude::*};
 
 use ui::prelude::*;
 
+/// Width of one caption button. Fixed pixels: Windows does not scale them with
+/// the UI font size.
+pub(crate) const CAPTION_BUTTON_WIDTH: Pixels = px(36.);
+/// Minimize, maximize or restore, close.
+pub(crate) const CAPTION_BUTTON_COUNT: usize = 3;
+
+/// Width of the caption buttons together.
+pub(crate) fn controls_width() -> Pixels {
+    CAPTION_BUTTON_WIDTH * CAPTION_BUTTON_COUNT as f32
+}
+
 #[derive(IntoElement)]
 pub struct WindowsWindowControls {
     button_height: Pixels,
@@ -38,6 +49,7 @@ impl RenderOnce for WindowsWindowControls {
             .id("windows-window-controls")
             .font_family(Self::get_font())
             .flex()
+            .flex_none()
             .flex_row()
             .justify_center()
             .content_stretch()
@@ -131,7 +143,8 @@ impl RenderOnce for WindowsCaptionButton {
             .justify_center()
             .content_center()
             .occlude()
-            .w(px(36.))
+            .flex_none()
+            .w(CAPTION_BUTTON_WIDTH)
             .h_full()
             .text_size(px(10.0))
             .when(!enabled, |style| {

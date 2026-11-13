@@ -8,6 +8,17 @@ use ui::{ListItem, ListItemSpacing, prelude::*};
 
 type IconThemePicker = Picker<IconThemePickerDelegate>;
 
+/// The name an icon theme is shown under. The built-in theme is "Default"; an
+/// older settings file may still name it "Zed (Default)", which resolves to the
+/// same theme and reads "Default" too.
+pub fn icon_theme_display_name(name: &str) -> SharedString {
+    if name == theme::LEGACY_DEFAULT_ICON_THEME_NAME {
+        SharedString::new_static("Default")
+    } else {
+        SharedString::from(name.to_string())
+    }
+}
+
 pub struct IconThemePickerDelegate {
     icon_themes: Vec<SharedString>,
     filtered_themes: Vec<StringMatch>,
@@ -115,7 +126,11 @@ impl PickerDelegate for IconThemePickerDelegate {
             icon_themes
                 .iter()
                 .enumerate()
-                .filter(|(_, theme)| theme.to_lowercase().contains(&query.to_lowercase()))
+                .filter(|(_, theme)| {
+                    icon_theme_display_name(theme)
+                        .to_lowercase()
+                        .contains(&query.to_lowercase())
+                })
                 .map(|(index, theme)| StringMatch {
                     candidate_id: index,
                     string: theme.to_string(),
@@ -177,7 +192,7 @@ impl PickerDelegate for IconThemePickerDelegate {
                 .inset(true)
                 .spacing(ListItemSpacing::Sparse)
                 .toggle_state(selected)
-                .child(Label::new(theme_match.string.clone()))
+                .child(Label::new(icon_theme_display_name(&theme_match.string)))
                 .into_any_element(),
         )
     }

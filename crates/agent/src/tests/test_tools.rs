@@ -42,6 +42,11 @@ impl AgentTool for StreamingEchoTool {
         true
     }
 
+    // Test tools touch no file: they stay available in a project without a folder.
+    fn works_without_folder() -> bool {
+        true
+    }
+
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
     }
@@ -86,6 +91,11 @@ impl AgentTool for StreamingJsonErrorContextTool {
     const NAME: &'static str = "streaming_json_error_context";
 
     fn supports_input_streaming() -> bool {
+        true
+    }
+
+    // Test tools touch no file: they stay available in a project without a folder.
+    fn works_without_folder() -> bool {
         true
     }
 
@@ -153,6 +163,11 @@ impl AgentTool for StreamingFailingEchoTool {
 
     const NAME: &'static str = "streaming_failing_echo";
 
+    // Test tools touch no file: they stay available in a project without a folder.
+    fn works_without_folder() -> bool {
+        true
+    }
+
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
     }
@@ -198,6 +213,11 @@ impl AgentTool for EchoTool {
     type Output = String;
 
     const NAME: &'static str = "echo";
+
+    // Test tools touch no file: they stay available in a project without a folder.
+    fn works_without_folder() -> bool {
+        true
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
@@ -251,6 +271,11 @@ impl AgentTool for DelayTool {
         }
     }
 
+    // Test tools touch no file: they stay available in a project without a folder.
+    fn works_without_folder() -> bool {
+        true
+    }
+
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
     }
@@ -283,6 +308,11 @@ impl AgentTool for ToolRequiringPermission {
     type Output = String;
 
     const NAME: &'static str = "tool_requiring_permission";
+
+    // Test tools touch no file: they stay available in a project without a folder.
+    fn works_without_folder() -> bool {
+        true
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
@@ -329,6 +359,11 @@ impl AgentTool for ToolRequiringPermission2 {
 
     const NAME: &'static str = "tool_requiring_permission_2";
 
+    // Test tools touch no file: they stay available in a project without a folder.
+    fn works_without_folder() -> bool {
+        true
+    }
+
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
     }
@@ -370,6 +405,11 @@ impl AgentTool for InfiniteTool {
     type Output = String;
 
     const NAME: &'static str = "infinite";
+
+    // Test tools touch no file: they stay available in a project without a folder.
+    fn works_without_folder() -> bool {
+        true
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
@@ -423,6 +463,11 @@ impl AgentTool for CancellationAwareTool {
     type Output = String;
 
     const NAME: &'static str = "cancellation_aware";
+
+    // Test tools touch no file: they stay available in a project without a folder.
+    fn works_without_folder() -> bool {
+        true
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other
@@ -479,6 +524,11 @@ impl AgentTool for WordListTool {
     type Output = String;
 
     const NAME: &'static str = "word_list";
+
+    // Test tools touch no file: they stay available in a project without a folder.
+    fn works_without_folder() -> bool {
+        true
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other

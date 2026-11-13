@@ -125,34 +125,39 @@ impl RenderOnce for Callout {
 
         let has_actions = self.actions_slot.is_some() || self.dismiss_action.is_some();
 
-        let (icon, icon_color, bg_color) = match self.severity {
+        let bg_color = cx.theme().colors().surface_background;
+        let (icon, icon_color, bar_color) = match self.severity {
             Severity::Info => (
                 IconName::Info,
                 Color::Muted,
-                cx.theme().status().info_background.opacity(0.1),
+                cx.theme().colors().border_focused,
             ),
-            Severity::Success => (
-                IconName::Check,
-                Color::Success,
-                cx.theme().status().success.opacity(0.1),
-            ),
+            Severity::Success => (IconName::Check, Color::Success, cx.theme().status().success),
             Severity::Warning => (
                 IconName::Warning,
                 Color::Warning,
-                cx.theme().status().warning_background.opacity(0.2),
+                cx.theme().status().warning,
             ),
-            Severity::Error => (
-                IconName::XCircle,
-                Color::Error,
-                cx.theme().status().error.opacity(0.08),
-            ),
+            Severity::Error => (IconName::XCircle, Color::Error, cx.theme().status().error),
         };
 
         h_flex()
+            .relative()
             .min_w_0()
             .w_full()
             .p_2()
+            .pl_3()
             .gap_2()
+            // The severity is a bar on the left edge, not a tinted box.
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(2.))
+                    .bg(bar_color),
+            )
             .items_start()
             .map(|this| match self.border_position {
                 CalloutBorderPosition::Top => this.border_t_1(),

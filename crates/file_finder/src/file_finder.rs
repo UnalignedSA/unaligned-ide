@@ -27,6 +27,7 @@ use project::{
     worktree_store::WorktreeStore,
 };
 
+use app_actions::search::ToggleIncludeIgnored;
 use settings::{ModalWidthContent, SeedQuerySetting, Settings, SettingsLocation, SettingsStore};
 use std::{
     borrow::Cow,
@@ -50,7 +51,6 @@ use workspace::{
     MAX_RECENT_SELECTIONS, ModalView, OpenChannelNotesById, SplitDirection, Workspace,
     item::PreviewTabsSettings, notifications::NotifyResultExt, pane,
 };
-use zed_actions::search::ToggleIncludeIgnored;
 
 actions!(
     file_finder,
@@ -2436,7 +2436,7 @@ impl PickerDelegate for FileFinderDelegate {
         _cx: &mut Context<Picker<Self>>,
     ) -> Vec<picker::PickerAction> {
         let open_label: SharedString = if self.selected_matches.len() > 1 {
-            "Open multiple".into()
+            "Open Multiple".into()
         } else {
             "Open File".into()
         };
@@ -2521,7 +2521,7 @@ impl FileFinderDelegate {
 
         Some(
             ListItem::new(ix)
-                .spacing(ListItemSpacing::Sparse)
+                .spacing(ListItemSpacing::Dense)
                 .inset(true)
                 .toggle_state(selected)
                 .start_slot::<AnyElement>(start_slot)

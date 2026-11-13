@@ -1,0 +1,423 @@
+#!/usr/bin/env bash
+#
+# Builds the Linux release archive of the product, under the product's own
+# names (crates/branding/brand.env), on the `stable` channel, with nothing
+# uploaded anywhere. Adapted from upstream's bundle script for Linux, which is
+# no longer in this repository. What it writes, into
+# ${CARGO_TARGET_DIR:-target}/release:
+#
+#   <APP_ID>-linux-<arch>.AppImage one file that runs where it is (chmod +x, then start it)
+#   <APP_ID>-linux-<arch>.tar.gz   the application directory <APP_ID>.app
+#   SHA256SUMS                     the checksums of both
+#   install.sh                     script/unaligned/install.sh with the brand values filled in
+#
+# Rules and what was never executed: docs/unaligned/PACKAGING.md.
+
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+brand_file="crates/branding/brand.env"
+channel_file="crates/ide/RELEASE_CHANNEL"
+desktop_template="crates/ide/resources/unaligned-ide.desktop.in"
+install_template="script/unaligned/install.sh"
+
+usage() {
+    cat <<EOF
+Usage: ${0##*/} [option]
+Build the Linux release archive (.tar.gz) of the product named in $brand_file.
+
+Options:
+  -h, --help        Show this help and exit.
+  --package-only    Do not run the licence generator or cargo: package the
+                    binaries and assets/licenses.md that are already there.
+  --no-appimage     Write the archive only. (The AppImage needs two downloads:
+                    appimagetool and its runtime, at fixed versions.)
+  --print-desktop   Print the desktop entry rendered with the brand values and exit.
+  --print-install   Print install.sh with the brand values filled in and exit.
+
+The two --print options build nothing and work on any system.
+EOF
+}
+
+fail() {
+    echo "${0##*/}: $*" >&2
+    exit 1
+}
+
+mode="build"
+make_appimage="yes"
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        --package-only) mode="package" ;;
+        --no-appimage) make_appimage="no" ;;
+        --print-desktop) mode="print-desktop" ;;
+        --print-install) mode="print-install" ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+# --- Brand -------------------------------------------------------------------
+
+# The brand file is plain KEY="value" lines. Anything else is refused before it
+# is sourced, as the branding crate's build script does.
+load_brand() {
+    local line number=0
+    # KEY="value", the value without a quote, a backslash, a dollar or a backtick.
+    local pattern='^[A-Z][A-Z0-9_]*="[^"\\$`]*"$'
+    [[ -f "$brand_file" ]] || fail "$brand_file not found"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        number=$((number + 1))
+        if [[ -z "$line" || "$line" == \#* ]]; then
+            continue
+        fi
+        if ! [[ "$line" =~ $pattern ]]; then
+            fail "$brand_file:$number is not a KEY=\"value\" line"
+        fi
+    done <"$brand_file"
+    # shellcheck source=/dev/null
+    source "$brand_file"
+
+    local key
+    for key in PRODUCT_NAME PRODUCT_SHORT_NAME APP_ID REVERSE_DNS_ID URL_SCHEME; do
+        [[ -n "${!key:-}" ]] || fail "$key is empty or missing in $brand_file"
+    done
+    if [[ "$APP_ID" == "zed" || "$URL_SCHEME" == "zed" ]]; then
+        fail "APP_ID and URL_SCHEME must not be \"zed\": the bundle would collide with an installed Zed"
+    fi
+    if ! [[ "$APP_ID" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+        fail "APP_ID must be lowercase letters, digits and dashes (it names files and commands)"
+    fi
+    RELEASES_REPOSITORY="${RELEASES_REPOSITORY:-}"
+}
+
+load_brand
+
+app_dir_name="${APP_ID}.app"
+cli_name="${APP_ID}"
+editor_name="${APP_ID}-editor"
+icon_name="${APP_ID}"
+desktop_id="${REVERSE_DNS_ID}"
+
+# Replaces every `@KEY@` of a template read on stdin. Arguments: KEY VALUE pairs.
+render() {
+    local line key value out i
+    local -a pairs=("$@")
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        for ((i = 0; i + 1 < ${#pairs[@]}; i += 2)); do
+            key="@${pairs[i]}@"
+            value="${pairs[i + 1]}"
+            # Rebuilt left to right, so a value is never scanned again.
+            out=""
+            while [[ "$line" == *"$key"* ]]; do
+                out="${out}${line%%"$key"*}${value}"
+                line="${line#*"$key"}"
+            done
+            line="${out}${line}"
+        done
+        printf '%s\n' "$line"
+    done
+}
+
+render_desktop() {
+    local short_lower
+    short_lower="$(printf '%s' "$PRODUCT_SHORT_NAME" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9\n' '-')"
+    render \
+        APP_NAME "$PRODUCT_NAME" \
+        APP_CLI "$cli_name" \
+        APP_ICON "$icon_name" \
+        APP_WM_CLASS "$desktop_id" \
+        APP_URL_SCHEME "$URL_SCHEME" \
+        APP_KEYWORDS "${short_lower};ide;editor;ai;" \
+        <"$desktop_template"
+}
+
+# Prints the entry, or fails when a placeholder is left or upstream's name is in it.
+checked_desktop() {
+    local entry
+    entry="$(render_desktop)"
+    if grep -q '@[A-Z_]*@' <<<"$entry"; then
+        fail "$desktop_template has a placeholder this script does not fill"
+    fi
+    if grep -q -i -w 'zed' <<<"$entry"; then
+        fail "the rendered desktop entry still names Zed"
+    fi
+    printf '%s\n' "$entry"
+}
+
+# Prints install.sh with its four empty brand lines filled in.
+render_install() {
+    local line filled=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            'PRODUCT_NAME=""') printf 'PRODUCT_NAME="%s"\n' "$PRODUCT_NAME" && filled=$((filled + 1)) ;;
+            'APP_ID=""') printf 'APP_ID="%s"\n' "$APP_ID" && filled=$((filled + 1)) ;;
+            'REVERSE_DNS_ID=""') printf 'REVERSE_DNS_ID="%s"\n' "$REVERSE_DNS_ID" && filled=$((filled + 1)) ;;
+            'RELEASES_REPOSITORY=""') printf 'RELEASES_REPOSITORY="%s"\n' "$RELEASES_REPOSITORY" && filled=$((filled + 1)) ;;
+            *) printf '%s\n' "$line" ;;
+        esac
+    done <"$install_template"
+    if [[ $filled -ne 4 ]]; then
+        fail "$install_template must have exactly four empty brand lines, found $filled"
+    fi
+}
+
+case $mode in
+    print-desktop)
+        checked_desktop
+        exit 0
+        ;;
+    print-install)
+        render_install
+        exit 0
+        ;;
+esac
+
+# --- Preconditions -----------------------------------------------------------
+
+[[ "$(uname -s)" == "Linux" ]] || fail "the Linux archive is built on Linux; this system is $(uname -s)"
+
+if [[ -n "${RUSTFLAGS+x}" || -n "${CARGO_ENCODED_RUSTFLAGS+x}" ]]; then
+    fail "unset RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS: they replace the flags of .cargo/config.toml and .cargo/bundle-config.toml (the bundle's library path among them)"
+fi
+# A build that sees the first variable sends crash reports to that address; the
+# second one signs telemetry requests. Neither belongs in this product.
+for forbidden in IDE_MINIDUMP_ENDPOINT IDE_CLIENT_CHECKSUM_SEED; do
+    if [[ -n "${!forbidden+x}" ]]; then
+        fail "$forbidden is set in the environment: unset it, a bundle must never be built with it"
+    fi
+done
+
+for tool in cargo rustc jq ldd tar gzip sha256sum; do
+    command -v "$tool" >/dev/null 2>&1 || fail "$tool not found (script/linux installs the build dependencies)"
+done
+if command -v llvm-objcopy >/dev/null 2>&1; then
+    objcopy="llvm-objcopy"
+elif command -v objcopy >/dev/null 2>&1; then
+    # GNU objcopy of old distributions does not understand every section a
+    # recent LLVM writes; llvm-objcopy (package `llvm`) is preferred.
+    objcopy="objcopy"
+else
+    fail "neither llvm-objcopy nor objcopy found (script/linux installs llvm)"
+fi
+
+target_dir="${CARGO_TARGET_DIR:-target}"
+target_triple="$(rustc --version --verbose | sed -n 's/^host: //p')"
+[[ -n "$target_triple" ]] || fail "could not read the host triple from rustc"
+arch="$(uname -m)"
+build_dir="${target_dir}/${target_triple}/release"
+out_dir="${target_dir}/release"
+archive="${APP_ID}-linux-${arch}.tar.gz"
+
+# --- Cleanup (temporary files, and the release channel file) -----------------
+
+temp_dir="$(mktemp -d)"
+channel_backup=""
+
+cleanup() {
+    local status=$?
+    if [[ -n "$channel_backup" && -f "$channel_backup" ]]; then
+        # -p keeps the modification time, so development builds are not invalidated.
+        cp -p "$channel_backup" "$channel_file"
+        echo "Restored $channel_file to '$(tr -d '\n' <"$channel_file")'."
+    fi
+    rm -rf "$temp_dir"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+# --- Build -------------------------------------------------------------------
+
+if [[ $mode == "build" ]]; then
+    # Read by the app and by GPUI at compile time.
+    export IDE_BUNDLE=true
+    version="$(script/get-crate-version ide)"
+    [[ -n "$version" ]] || fail "could not read the version of the ide package"
+    export RELEASE_VERSION="$version"
+
+    # The updater is already inert without a releases repository. This text is
+    # what "Check for Updates" shows in that case; a packager's own text wins.
+    if [[ -z "$RELEASES_REPOSITORY" && -z "${IDE_UPDATE_EXPLANATION+x}" ]]; then
+        export IDE_UPDATE_EXPLANATION="This build of ${PRODUCT_NAME} has no releases page to check. Get a newer build from where you got this one."
+    fi
+
+    # Dependency licences first: the app's licences page embeds assets/licenses.md.
+    script/generate-licenses
+    [[ -s assets/licenses.md ]] || fail "script/generate-licenses did not write assets/licenses.md"
+
+    # Names and update behaviour follow the channel compiled in: build as
+    # `stable`, then put the file back (see cleanup).
+    if [[ "$(tr -d '[:space:]' <"$channel_file")" != "stable" ]]; then
+        cp -p "$channel_file" "$temp_dir/RELEASE_CHANNEL.backup"
+        channel_backup="$temp_dir/RELEASE_CHANNEL.backup"
+        echo "stable" >"$channel_file"
+    fi
+
+    # Two invocations, as upstream: one feature set per binary. --target keeps
+    # the bundle flags away from build scripts and proc macros. No --features:
+    # in particular never call/webrtc.
+    cargo_config=(--config .cargo/bundle-config.toml --config 'profile.release.debug=false')
+    cargo "${cargo_config[@]}" build --release --locked --target "$target_triple" --package ide --bin unaligned-ide
+    cargo "${cargo_config[@]}" build --release --locked --target "$target_triple" --package cli
+fi
+
+[[ -x "$build_dir/unaligned-ide" ]] || fail "$build_dir/unaligned-ide not found: build first (run without --package-only)"
+[[ -x "$build_dir/cli" ]] || fail "$build_dir/cli not found: build first (run without --package-only)"
+[[ -s assets/licenses.md ]] || fail "assets/licenses.md not found: run script/generate-licenses (or this script without --package-only)"
+
+# --- Application directory ---------------------------------------------------
+
+app_dir="${temp_dir}/${app_dir_name}"
+mkdir -p "$app_dir/bin" "$app_dir/libexec" "$app_dir/lib"
+
+"$objcopy" --strip-unneeded "$build_dir/unaligned-ide" "$app_dir/libexec/$editor_name"
+"$objcopy" --strip-debug --discard-all "$build_dir/cli" "$app_dir/bin/$cli_name"
+chmod 755 "$app_dir/libexec/$editor_name" "$app_dir/bin/$cli_name"
+
+# The command and the editor find each other by file name, under the product's
+# names: ../libexec/<APP_ID>-editor and ../bin/<APP_ID>
+# (crates/cli/src/main.rs `possible_locations`, crates/util/src/util.rs).
+
+# Libraries. As upstream: libstdc++ and friends are bundled so that older
+# systems can run the build; the C library, ALSA and the GLib family (with its
+# private dependencies) never are, because host libraries opened at run time
+# are built against the system's own.
+ldd_output="$(ldd "$build_dir/unaligned-ide")"
+if grep -q 'not found' <<<"$ldd_output"; then
+    grep 'not found' <<<"$ldd_output" >&2
+    fail "the editor links to libraries this machine does not have"
+fi
+needed_libs() {
+    awk '$2 == "=>" && $3 ~ /^\// { print $3 }' <<<"$ldd_output" |
+        grep -v '\<\(libc.so\|libgcc_s.so\|libm.so\|libpthread.so\|libdl.so\|libasound.so\)' |
+        grep -v '\<\(libglib-2.0.so\|libgobject-2.0.so\|libgio-2.0.so\|libgmodule-2.0.so\|libpcre.so\|libpcre2-8.so\|libmount.so\|libblkid.so\|libselinux.so\|libffi.so\|libresolv.so\|libz.so\)' ||
+        true
+}
+libs=()
+while IFS= read -r lib; do
+    [[ -n "$lib" ]] && libs+=("$lib")
+done < <(needed_libs)
+if [[ ${#libs[@]} -gt 0 ]]; then
+    cp "${libs[@]}" "$app_dir/lib/"
+fi
+
+# Icons, under the product's name (upstream installs them as zed.png).
+mkdir -p "$app_dir/share/icons/hicolor/512x512/apps" "$app_dir/share/icons/hicolor/1024x1024/apps"
+cp "crates/ide/resources/app-icon.png" "$app_dir/share/icons/hicolor/512x512/apps/${icon_name}.png"
+cp "crates/ide/resources/app-icon@2x.png" "$app_dir/share/icons/hicolor/1024x1024/apps/${icon_name}.png"
+
+# Desktop entry. Its file name and StartupWMClass are the stable channel's
+# `ReleaseChannel::app_id()`, which is how the desktop ties windows to the entry.
+mkdir -p "$app_dir/share/applications"
+desktop_file="$app_dir/share/applications/${desktop_id}.desktop"
+checked_desktop >"$desktop_file"
+chmod 755 "$desktop_file"
+if command -v desktop-file-validate >/dev/null 2>&1; then
+    desktop-file-validate "$desktop_file"
+fi
+
+# Licences: GPL-3 for the app, Apache-2 for the parts under it, and every dependency's.
+cp "assets/licenses.md" "$app_dir/licenses.md"
+cp "LICENSE-GPL" "LICENSE-APACHE" "$app_dir/"
+
+# The staged command must find the staged editor: `--version` goes through the
+# same lookup as a normal start and opens no window. (The command refuses to
+# run as root, which a container build is, unless this variable says so.)
+staged_version="$(IDE_ALLOW_ROOT=true "$app_dir/bin/$cli_name" --version)" ||
+    fail "the staged command could not find the staged editor (file names in bin/ and libexec/ no longer match the lookups)"
+echo "Staged command reports: $staged_version"
+
+# --- Archive, checksum, installer --------------------------------------------
+
+mkdir -p "$out_dir"
+rm -f "$out_dir/$archive"
+tar -czf "$out_dir/$archive" --owner=0 --group=0 --numeric-owner -C "$temp_dir" "$app_dir_name"
+
+# --- AppImage ------------------------------------------------------------------
+
+# One file that runs where it is: the application directory with an entry
+# point, packed by appimagetool with the static runtime (it needs no libfuse2
+# on the user's machine). Both are downloaded at fixed versions and checked
+# against the checksums GitHub publishes for these release files.
+appimage="${APP_ID}-linux-${arch}.AppImage"
+appimagetool_version="1.9.1"
+appimage_runtime_version="20251108"
+case "$arch" in
+    x86_64)
+        appimagetool_sha256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+        appimage_runtime_sha256="2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
+        ;;
+    aarch64)
+        appimagetool_sha256="f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158"
+        appimage_runtime_sha256="00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444"
+        ;;
+    *) make_appimage="no" ;;
+esac
+
+fetch_checked() {
+    local url="$1" sha256="$2" destination="$3"
+    curl -fsSL --retry 3 -o "$destination" "$url" || fail "could not download $url"
+    echo "$sha256  $destination" | sha256sum --check --status ||
+        fail "$url does not have the expected checksum: nothing was packed with it"
+}
+
+rm -f "$out_dir/$appimage"
+if [[ "$make_appimage" == "yes" ]]; then
+    command -v file >/dev/null 2>&1 ||
+        fail "appimagetool needs the 'file' command (package 'file'); install it, or pass --no-appimage"
+    tools_dir="$temp_dir/appimage-tools"
+    mkdir -p "$tools_dir"
+    fetch_checked "https://github.com/AppImage/appimagetool/releases/download/${appimagetool_version}/appimagetool-${arch}.AppImage" \
+        "$appimagetool_sha256" "$tools_dir/appimagetool"
+    fetch_checked "https://github.com/AppImage/type2-runtime/releases/download/${appimage_runtime_version}/runtime-${arch}" \
+        "$appimage_runtime_sha256" "$tools_dir/runtime"
+    chmod 755 "$tools_dir/appimagetool"
+
+    appimage_dir="$temp_dir/AppDir"
+    cp -a "$app_dir" "$appimage_dir"
+    # The entry point starts the editor itself, not the command: the command
+    # returns at once, and the image is unmounted when what it started returns.
+    {
+        echo '#!/bin/sh'
+        echo 'here="$(dirname "$(readlink -f "$0")")"'
+        echo "exec \"\$here/libexec/${editor_name}\" \"\$@\""
+    } >"$appimage_dir/AppRun"
+    chmod 755 "$appimage_dir/AppRun"
+    cp "$desktop_file" "$appimage_dir/${desktop_id}.desktop"
+    cp "crates/ide/resources/app-icon.png" "$appimage_dir/${icon_name}.png"
+    ln -s "${icon_name}.png" "$appimage_dir/.DirIcon"
+
+    # appimagetool is an AppImage itself: unpacked and run, so that the build
+    # machine needs no FUSE either.
+    ARCH="$arch" APPIMAGE_EXTRACT_AND_RUN=1 "$tools_dir/appimagetool" --no-appstream \
+        --runtime-file "$tools_dir/runtime" "$appimage_dir" "$out_dir/$appimage"
+    chmod 755 "$out_dir/$appimage"
+    (cd "$out_dir" && sha256sum "$archive" "$appimage" >SHA256SUMS)
+else
+    (cd "$out_dir" && sha256sum "$archive" >SHA256SUMS)
+fi
+
+render_install >"$temp_dir/install.sh"
+sh -n "$temp_dir/install.sh"
+cp "$temp_dir/install.sh" "$out_dir/install.sh"
+chmod 755 "$out_dir/install.sh"
+
+echo "Wrote:"
+if [[ "$make_appimage" == "yes" ]]; then
+    echo "  $out_dir/$appimage"
+fi
+echo "  $out_dir/$archive"
+echo "  $out_dir/SHA256SUMS"
+echo "  $out_dir/install.sh"

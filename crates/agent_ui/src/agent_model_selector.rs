@@ -1,15 +1,16 @@
 use crate::{
     ModelUsageContext,
+    connections::{self, Backing},
     language_model_selector::{LanguageModelSelector, language_model_selector},
     ui::ModelSelectorTooltip,
 };
 use fs::Fs;
 use gpui::{Entity, FocusHandle, SharedString};
-use language_model::{IconOrSvg, LanguageModelRegistry};
+use language_model::LanguageModelRegistry;
 use picker::popover_menu::PickerPopoverMenu;
 use settings::update_settings_file;
 use std::sync::Arc;
-use ui::{PopoverMenuHandle, Tooltip, prelude::*};
+use ui::{ButtonLike, PopoverMenuHandle, Tooltip, prelude::*};
 
 pub struct AgentModelSelector {
     selector: Entity<LanguageModelSelector>,
@@ -93,13 +94,28 @@ impl Render for AgentModelSelector {
             .map(|model| model.name().0)
             .unwrap_or_else(|| SharedString::from("Select a Model"));
 
-        let provider_icon = model.as_ref().and_then(|model| {
-            LanguageModelRegistry::read_global(cx)
-                .provider(&model.provider_id)
-                .map(|provider| provider.icon())
+        // Who answers and at which price is said by the tooltip; the button
+        // itself carries the model's name only. The provider is found by id
+        // and named as its connection is in the catalog.
+        let provider_name = model.as_ref().and_then(|model| {
+            let catalog_title = connections::catalog(cx).into_iter().find_map(|spec| {
+                matches!(&spec.backing, Backing::Provider(id) if id == &model.provider_id)
+                    .then_some(spec.title)
+            });
+            catalog_title.or_else(|| {
+                LanguageModelRegistry::read_global(cx)
+                    .provider(&model.provider_id)
+                    .map(|provider| provider.name().0)
+            })
         });
+        let cost = model
+            .as_ref()
+            .and_then(|model| model.cost_info.as_ref())
+            .map(|cost| cost.to_shared_string());
+        // An open menu lifts the trigger to the text colour; the accent stays
+        // with the send button.
         let color = if self.menu_handle.is_deployed() {
-            Color::Accent
+            Color::Default
         } else {
             Color::Muted
         };
@@ -109,6 +125,8 @@ impl Render for AgentModelSelector {
         let tooltip = Tooltip::element({
             move |_, _cx| {
                 ModelSelectorTooltip::new()
+                    .provider(provider_name.clone())
+                    .cost(cost.clone())
                     .show_cycle_row(show_cycle_row)
                     .into_any_element()
             }
@@ -116,24 +134,21 @@ impl Render for AgentModelSelector {
 
         PickerPopoverMenu::new(
             self.selector.clone(),
-            Button::new("active-model", model_name)
-                .label_size(LabelSize::Small)
-                .color(color)
-                .when_some(provider_icon, |this, icon| {
-                    this.start_icon(
-                        match icon {
-                            IconOrSvg::Svg(path) => Icon::from_external_svg(path),
-                            IconOrSvg::Icon(name) => Icon::new(name),
-                        }
-                        .color(color)
-                        .size(IconSize::XSmall),
+            ButtonLike::new("active-model").child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Label::new(model_name)
+                            .size(LabelSize::Small)
+                            .color(color)
+                            .truncate(),
                     )
-                })
-                .end_icon(
-                    Icon::new(IconName::ChevronDown)
-                        .color(color)
-                        .size(IconSize::XSmall),
-                ),
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .color(Color::Muted)
+                            .size(IconSize::XSmall),
+                    ),
+            ),
             tooltip,
             gpui::Anchor::TopRight,
             cx,

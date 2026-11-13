@@ -7,9 +7,10 @@ use gpui::{
     Window, div,
 };
 use project::Project;
-use ui::{Button, ButtonCommon, Clickable, LabelSize, Tooltip};
+use ui::{ButtonCommon, Clickable, Tooltip};
 use workspace::{
     EncodingDisplayOptions, HideStatusItem, StatusBarSettings, StatusItemView, Workspace,
+    active_file_name::{status_bar_item, status_bar_item_content, status_bar_text},
     item::{ItemHandle, Settings},
 };
 
@@ -86,8 +87,9 @@ impl Render for ActiveBufferEncoding {
         };
 
         div().child(
-            Button::new("change-encoding", text)
-                .label_size(LabelSize::Small)
+            status_bar_item("change-encoding", cx)
+                .aria_label(format!("Encoding: {text}"))
+                .child(status_bar_item_content().child(status_bar_text(text, cx)))
                 .tab_index(0isize)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if disabled {

@@ -1,21 +1,28 @@
 [
   // VS Code for Linux (and Windows). See: https://code.visualstudio.com/docs/reference/default-keybindings
   //
-  // Zed's default keymap is close to VS Code's, so this overlay only contains
+  // The default keymap is close to VS Code's, so this overlay only contains
   // the bindings where the two diverge.
+  //
+  // The AI shortcuts follow Cursor: `ctrl-l` opens the chat (with the
+  // selection), `ctrl-k` edits inline and `ctrl-i` starts a new chat. A bare
+  // `ctrl-k` has to fire at once, so, as in Cursor, every `ctrl-k` chord moves
+  // to the `ctrl-m` prefix (`ctrl-m ctrl-s`, …). `ctrl-r` is not used as the
+  // prefix here: it opens recent projects and searches the shell history.
   {
     "context": "Editor",
     "use_key_equivalents": true,
     "bindings": {
-      "shift-alt-f": "editor::Format", // Format Document (Windows-style; Linux `ctrl-shift-i` is a Zed default already)
-      "ctrl-k ctrl-f": "editor::FormatSelections", // Format Selection
+      "shift-alt-f": "editor::Format", // Format Document (Windows-style; Linux `ctrl-shift-i` is a default already)
+      "ctrl-m ctrl-f": "editor::FormatSelections", // Format Selection
       "shift-alt-i": "editor::SplitSelectionIntoLines", // Insert cursor at end of each line selected
       "alt-z": "editor::ToggleSoftWrap", // Toggle Word Wrap
       "ctrl-shift-space": "editor::ShowSignatureHelp", // Trigger Parameter Hints
       "ctrl-shift-a": "editor::ToggleBlockComments", // Toggle Block Comment
-      "ctrl-k ctrl-c": ["editor::ToggleComments", { "advance_downwards": false, "comment_empty_lines": false }], // Add Line Comment
+      "ctrl-m ctrl-c": ["editor::ToggleComments", { "advance_downwards": false, "comment_empty_lines": false }], // Add Line Comment
       "ctrl-/": ["editor::ToggleComments", { "advance_downwards": false, "comment_empty_lines": false }],
-      "ctrl-k f12": "editor::GoToDefinitionSplit", // Open Definition to the Side
+      "ctrl-m f12": "editor::GoToDefinitionSplit", // Open Definition to the Side
+      "ctrl-m": null, // Chord prefix now (was "move to enclosing bracket" on Linux; `ctrl-|` still does it)
     },
   },
   {
@@ -23,8 +30,10 @@
     "use_key_equivalents": true,
     "bindings": {
       // In VS Code `ctrl-k z` is Zen Mode; the word wrap toggle moves to `alt-z`.
-      "ctrl-k z": "workspace::ToggleCenteredLayout",
-      "ctrl-i": "assistant::InlineAssist", // Inline Chat
+      "ctrl-m z": "workspace::ToggleZenMode",
+      "ctrl-k": "assistant::InlineAssist", // Edit inline
+      "ctrl-l": "agent::AddSelectionToThread", // Open the chat with the selection
+      "ctrl-i": "agent::NewThread", // New chat
       "shift-alt-h": "call_hierarchy::ShowIncomingCalls",
     },
   },
@@ -32,14 +41,7 @@
     "context": "!AcpThread > Editor && mode == full",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-enter": "editor::NewlineBelow", // Insert Line Below (Inline Chat lives on `ctrl-i`)
-    },
-  },
-  {
-    "context": "Terminal",
-    "use_key_equivalents": true,
-    "bindings": {
-      "ctrl-enter": null,
+      "ctrl-enter": "editor::NewlineBelow", // Insert Line Below (inline edit lives on `ctrl-k`)
     },
   },
   {
@@ -48,6 +50,27 @@
     "bindings": {
       "f5": "debugger::Start", // Start Debugging
       "ctrl-alt-i": "agent::ToggleFocus", // Open Chat
+      "ctrl-l": "agent::ToggleFocus", // Open and focus the chat
+      "ctrl-i": "agent::NewThread", // New chat
+    },
+  },
+  {
+    // Inside the chat: `ctrl-l` goes back to the editor, `ctrl-i` starts over
+    // and the Agent/Ask selector takes Cursor's `ctrl-.`.
+    "context": "AcpThread",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-i": "agent::NewThread",
+      "ctrl-.": "agent::ToggleProfileSelector",
+    },
+  },
+  {
+    "context": "AcpThread > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-l": "agent::ToggleFocus",
+      "ctrl-i": "agent::NewThread",
+      "ctrl-.": "agent::ToggleProfileSelector",
     },
   },
   {
@@ -77,6 +100,264 @@
     "use_key_equivalents": true,
     "bindings": {
       "shift-alt-h": "call_hierarchy::ToggleDirection",
+    },
+  },
+  // Every `ctrl-k` chord of the default keymaps (Linux and Windows), moved to
+  // `ctrl-m`. Each entry disables the default chord and binds the same action
+  // in the same context.
+  {
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k ctrl-o": null,
+      "ctrl-m ctrl-o": "workspace::Open",
+    },
+  },
+  {
+    "context": "Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k ctrl-q": null,
+      "ctrl-m ctrl-q": "editor::Rewrap",
+      "ctrl-k q": null,
+      "ctrl-m q": "editor::Rewrap",
+      "ctrl-k ctrl-d": null,
+      "ctrl-m ctrl-d": ["editor::SelectNext", { "replace_newest": true }],
+      "ctrl-k ctrl-i": null,
+      "ctrl-m ctrl-i": "editor::Hover",
+      "ctrl-k ctrl-b": null,
+      "ctrl-m ctrl-b": "editor::BlameHover",
+      "ctrl-k ctrl-f": null,
+      "ctrl-k ctrl-c": null,
+      "ctrl-k ctrl-/": null,
+      "ctrl-m ctrl-/": "editor::ToggleBlockComments",
+      "ctrl-k ctrl-h": null,
+      "ctrl-m ctrl-h": "call_hierarchy::ShowIncomingCalls",
+      "ctrl-k ctrl-l": null,
+      "ctrl-m ctrl-l": "editor::ToggleFold",
+      "ctrl-k ctrl-[": null,
+      "ctrl-m ctrl-[": "editor::FoldRecursive",
+      "ctrl-k ctrl-]": null,
+      "ctrl-m ctrl-]": "editor::UnfoldRecursive",
+      "ctrl-k ctrl-1": null,
+      "ctrl-m ctrl-1": "editor::FoldAtLevel_1",
+      "ctrl-k ctrl-2": null,
+      "ctrl-m ctrl-2": "editor::FoldAtLevel_2",
+      "ctrl-k ctrl-3": null,
+      "ctrl-m ctrl-3": "editor::FoldAtLevel_3",
+      "ctrl-k ctrl-4": null,
+      "ctrl-m ctrl-4": "editor::FoldAtLevel_4",
+      "ctrl-k ctrl-5": null,
+      "ctrl-m ctrl-5": "editor::FoldAtLevel_5",
+      "ctrl-k ctrl-6": null,
+      "ctrl-m ctrl-6": "editor::FoldAtLevel_6",
+      "ctrl-k ctrl-7": null,
+      "ctrl-m ctrl-7": "editor::FoldAtLevel_7",
+      "ctrl-k ctrl-8": null,
+      "ctrl-m ctrl-8": "editor::FoldAtLevel_8",
+      "ctrl-k ctrl-9": null,
+      "ctrl-m ctrl-9": "editor::FoldAtLevel_9",
+      "ctrl-k ctrl-0": null,
+      "ctrl-m ctrl-0": "editor::FoldAll",
+      "ctrl-k ctrl-j": null,
+      "ctrl-m ctrl-j": "editor::UnfoldAll",
+      "ctrl-k r": null,
+      "ctrl-m r": "editor::RevealInFileManager",
+      "ctrl-k p": null,
+      "ctrl-m p": "editor::CopyPath",
+      "ctrl-k ctrl-shift-d": null,
+      "ctrl-m ctrl-shift-d": ["editor::SelectPrevious", { "replace_newest": true }],
+    },
+  },
+  {
+    "context": "Editor && mode == full",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k ctrl-z": null,
+      "ctrl-m ctrl-z": "editor::ToggleSoftWrap",
+      "ctrl-k z": null,
+    },
+  },
+  {
+    "context": "Editor && !agent_diff",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k ctrl-r": null,
+      "ctrl-m ctrl-r": "git::Restore",
+    },
+  },
+  {
+    "context": "Pane",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k e": null,
+      "ctrl-m e": ["pane::CloseItemsToTheLeft", { "close_pinned": false }],
+      "ctrl-k t": null,
+      "ctrl-m t": ["pane::CloseItemsToTheRight", { "close_pinned": false }],
+      "ctrl-k u": null,
+      "ctrl-m u": ["pane::CloseCleanItems", { "close_pinned": false }],
+      "ctrl-k w": null,
+      "ctrl-m w": ["pane::CloseAllItems", { "close_pinned": false }],
+      "ctrl-k ctrl-w": null,
+      "ctrl-m ctrl-w": "workspace::CloseAllItemsAndPanes",
+      "ctrl-k shift-enter": null,
+      "ctrl-m shift-enter": "pane::TogglePinTab",
+      "ctrl-k up": null,
+      "ctrl-m up": "pane::SplitUp",
+      "ctrl-k down": null,
+      "ctrl-m down": "pane::SplitDown",
+      "ctrl-k left": null,
+      "ctrl-m left": "pane::SplitLeft",
+      "ctrl-k right": null,
+      "ctrl-m right": "pane::SplitRight",
+    },
+  },
+  {
+    "context": "Editor && extension == md",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k v": null,
+      "ctrl-m v": "markdown::OpenPreviewToTheSide",
+    },
+  },
+  {
+    "context": "Editor && extension == svg",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k v": null,
+      "ctrl-m v": "svg::OpenPreviewToTheSide",
+    },
+  },
+  {
+    "context": "Editor && (extension == csv || extension == tsv || extension == ssv || extension == psv || extension == jsonl || extension == ndjson)",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k v": null,
+      "ctrl-m v": "tabular_data::OpenPreviewToTheSide",
+    },
+  },
+  {
+    "context": "Workspace",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k ctrl-shift-s": null,
+      "ctrl-m ctrl-shift-s": "workspace::SaveWithoutFormat",
+      "ctrl-k ctrl-p": null,
+      "ctrl-m ctrl-p": "workspace::ReopenLastPicker",
+      "ctrl-k ctrl-s": null,
+      "ctrl-m ctrl-s": "app::OpenKeymap",
+      "ctrl-k ctrl-t": null,
+      "ctrl-m ctrl-t": "theme_selector::Toggle",
+      "ctrl-k ctrl-shift-t": null,
+      "ctrl-m ctrl-shift-t": "theme::ToggleMode",
+      "ctrl-k s": null,
+      "ctrl-m s": "workspace::SaveAll",
+      "ctrl-k n": null,
+      "ctrl-m n": "encoding_selector::Toggle",
+      "ctrl-k m": null,
+      "ctrl-m m": "language_selector::Toggle",
+      "ctrl-k ctrl-left": null,
+      "ctrl-m ctrl-left": "workspace::ActivatePaneLeft",
+      "ctrl-k ctrl-right": null,
+      "ctrl-m ctrl-right": "workspace::ActivatePaneRight",
+      "ctrl-k ctrl-up": null,
+      "ctrl-m ctrl-up": "workspace::ActivatePaneUp",
+      "ctrl-k ctrl-down": null,
+      "ctrl-m ctrl-down": "workspace::ActivatePaneDown",
+      "ctrl-k shift-left": null,
+      "ctrl-m shift-left": "workspace::SwapPaneLeft",
+      "ctrl-k shift-right": null,
+      "ctrl-m shift-right": "workspace::SwapPaneRight",
+      "ctrl-k shift-up": null,
+      "ctrl-m shift-up": "workspace::SwapPaneUp",
+      "ctrl-k shift-down": null,
+      "ctrl-m shift-down": "workspace::SwapPaneDown",
+      "ctrl-k ctrl-m": null,
+      "ctrl-m ctrl-m": "toolchain::AddToolchain",
+    },
+  },
+  {
+    "context": "ProjectPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k ctrl-shift-c": null,
+      "ctrl-m ctrl-shift-c": "workspace::CopyRelativePath",
+      "ctrl-k ctrl-shift-f": null,
+      "ctrl-m ctrl-shift-f": "project_panel::NewSearchInDirectory",
+    },
+  },
+  {
+    "context": "GitPanel && ChangesList && !GitBranchSelector && !GitRepositorySelector",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k ctrl-shift-c": null,
+      "ctrl-m ctrl-shift-c": "workspace::CopyRelativePath",
+    },
+  },
+  {
+    "context": "GitDiff > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k ctrl-r": null,
+      "ctrl-m ctrl-r": "git::RestoreAndNext",
+    },
+  },
+  {
+    "context": "CallHierarchyPicker > Picker > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k ctrl-h": null,
+      "ctrl-m ctrl-h": "call_hierarchy::ToggleDirection",
+      "ctrl-k right": null,
+      "ctrl-m right": "menu::SelectChild",
+      "ctrl-k left": null,
+      "ctrl-m left": "menu::SelectParent",
+    },
+  },
+  {
+    "context": "RecentProjects || (RecentProjects > Picker > Editor)",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k ctrl-o": null,
+      "ctrl-m ctrl-o": "workspace::Open",
+    },
+  },
+  {
+    "context": "ImageViewer",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-k r": null,
+      "ctrl-m r": "editor::RevealInFileManager",
+    },
+  },
+  // Keep these sections last: a single-key binding only fires at once when it
+  // is declared after the chords that start with the same key.
+  {
+    // The terminal keeps the shell's own keys: `ctrl-k` (kill line) is simply
+    // not bound, `ctrl-l` clears, `ctrl-m` is Enter. Inline edit is on
+    // `ctrl-shift-k` here.
+    "context": "Terminal",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-enter": null,
+      "ctrl-shift-k": "assistant::InlineAssist",
+      // In a shell `ctrl-i` is Tab: it goes to the terminal, like `ctrl-l`.
+      "ctrl-i": ["terminal::SendKeystroke", "ctrl-i"],
+      "ctrl-l": ["terminal::SendKeystroke", "ctrl-l"],
+      "ctrl-m": ["terminal::SendKeystroke", "ctrl-m"],
+    },
+  },
+  {
+    "context": "NotebookEditor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-m": "notebook::AddCodeBlock",
+    },
+  },
+  {
+    "context": "NotebookEditor > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-m": "notebook::AddCodeBlock",
     },
   },
 ]

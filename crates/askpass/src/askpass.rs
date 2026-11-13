@@ -32,7 +32,7 @@ use util::{paths::PathExt, shell::ShellKind};
 /// On Unix and remote servers, this defaults to the current executable.
 /// On Windows, this must be set to the CLI variant of zed via set_askpass_program(),
 /// because SSH_ASKPASS must point to a directly executable binary. The CLI binary
-/// handles the ZED_ASKPASS_SOCKET env var to communicate with Zed over a Unix socket
+/// handles the IDE_ASKPASS_SOCKET env var to communicate with Zed over a Unix socket
 /// without needing a wrapper script.
 static ASKPASS_PROGRAM: OnceLock<std::path::PathBuf> = OnceLock::new();
 
@@ -238,12 +238,12 @@ impl AskPassSession {
         return None;
     }
 
-    /// Returns the socket path to set as ZED_ASKPASS_SOCKET.
+    /// Returns the socket path to set as IDE_ASKPASS_SOCKET.
     ///
     /// On Windows, SSH_ASKPASS points directly to cli.exe. SSH passes only
     /// the prompt string as argv[1] with no mechanism for extra arguments,
     /// so the socket path is communicated via this environment variable instead.
-    /// cli.exe must check ZED_ASKPASS_SOCKET before clap parses args.
+    /// cli.exe must check IDE_ASKPASS_SOCKET before clap parses args.
     #[cfg(target_os = "windows")]
     pub fn socket_path(&self) -> impl AsRef<OsStr> {
         self.askpass_task.socket_path()
@@ -257,7 +257,7 @@ pub struct PasswordProxy {
     askpass_script_path: std::path::PathBuf,
     #[cfg(not(target_os = "windows"))]
     gpg_wrapper_script_path: Option<std::path::PathBuf>,
-    /// On Windows only: path to the Unix socket, passed as ZED_ASKPASS_SOCKET
+    /// On Windows only: path to the Unix socket, passed as IDE_ASKPASS_SOCKET
     /// so cli.exe can find it without --askpass argument parsing.
     #[cfg(target_os = "windows")]
     askpass_socket_path: std::path::PathBuf,
@@ -273,10 +273,12 @@ impl PasswordProxy {
         >,
         executor: BackgroundExecutor,
     ) -> Result<Self> {
-        let temp_dir = tempfile::Builder::new().prefix("zed-askpass").tempdir()?;
+        // Short on purpose: the directory holds a socket, and the length of a
+        // socket path is limited.
+        let temp_dir = tempfile::Builder::new().prefix("ide-askpass").tempdir()?;
         let askpass_socket = temp_dir.path().join("askpass.sock");
         let current_exec =
-            std::env::current_exe().context("Failed to determine current zed executable path.")?;
+            std::env::current_exe().context("Failed to determine the current executable path.")?;
 
         let askpass_program = ASKPASS_PROGRAM.get_or_init(|| current_exec);
 
@@ -599,7 +601,7 @@ if {gpg_program} "$@" < "$payload" > "$signature" 2> "$status"; then
     exit 0
 fi
 
-# Stage 3: gpg cannot obtain the passphrase on its own. Ask Zed for it, then
+# Stage 3: gpg cannot obtain the passphrase on its own. Ask the editor for it, then
 # hand it to gpg on fd 3 using loopback mode so no pinentry/terminal is
 # required.
 passphrase=$(printf '%s\0' {prompt} | {askpass_program} --askpass={askpass_socket} 2>/dev/null)

@@ -18,6 +18,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+branding.workspace = true
 collections.workspace = true
 editor.workspace = true
 file_icons.workspace = true
@@ -44,7 +45,7 @@ workspace.workspace = true
 language.workspace = true
 markdown.workspace = true
 markdown_preview.workspace = true
-zed_actions.workspace = true
+app_actions.workspace = true
 telemetry.workspace = true
 notifications.workspace = true
 fs.workspace = true

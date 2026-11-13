@@ -3,6 +3,7 @@ use acp_thread::ClientUserMessageId;
 use agent_client_protocol::v2::schema as acp_v2;
 use agent_settings::AgentProfileId;
 use anyhow::Result;
+use app_env_vars::IDE_STATELESS;
 use chrono::{DateTime, Utc};
 use collections::{HashMap, IndexMap};
 use futures::{FutureExt, future::Shared};
@@ -19,7 +20,6 @@ use sqlez::{
 use std::{io::ErrorKind, path::PathBuf, sync::Arc};
 use ui::{App, SharedString};
 use util::{ResultExt, path_list::PathList};
-use zed_env_vars::ZED_STATELESS;
 
 pub type DbMessage = crate::Message;
 pub type DbSummary = crate::legacy_thread::DetailedSummaryState;
@@ -89,7 +89,7 @@ pub struct DbThread {
 }
 
 /// Serialized form of the sandbox permissions the user granted "for the rest of
-/// this thread" (the "Allow for this thread" prompt option). Stored inside the
+/// this thread" (the "Allow for this chat" prompt option). Stored inside the
 /// thread blob; round-trips with [`crate::sandboxing::ThreadSandboxGrants`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DbSandboxGrants {
@@ -431,7 +431,7 @@ impl ThreadsDatabase {
     }
 
     pub fn new(executor: BackgroundExecutor) -> Result<Self> {
-        let connection = if *ZED_STATELESS {
+        let connection = if *IDE_STATELESS {
             Connection::open_memory(Some("THREAD_FALLBACK_DB"))
         } else if cfg!(any(feature = "test-support", test)) {
             // rust stores the name of the test on the current thread.

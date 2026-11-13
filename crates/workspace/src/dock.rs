@@ -1,25 +1,23 @@
+use crate::Workspace;
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
+use crate::panel_drag::panel_drag_source;
 use crate::persistence::model::DockData;
 use crate::status_bar::HideStatusItem;
 use crate::{DraggedDock, Event, ModalLayer, Pane, WorkspaceSettings};
-use crate::{Workspace, status_bar::StatusItemView};
 use anyhow::Context as _;
 use client::proto;
 use db::kvp::KeyValueStore;
 
 use gpui::{
-    Action, Anchor, AnyView, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, IntoElement, KeyContext, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window, deferred, div,
-    px,
+    Action, Anchor, AnyElement, AnyView, App, Axis, Context, Entity, EntityId, EventEmitter,
+    FocusHandle, Focusable, IntoElement, KeyContext, MouseButton, MouseDownEvent, MouseUpEvent,
+    ParentElement, Render, SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window,
+    deferred, div, px,
 };
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore, TerminalDockPosition};
 use std::sync::Arc;
-use ui::{
-    ContextMenu, CountBadge, Divider, DividerColor, IconButton, Tooltip, prelude::*,
-    right_click_menu,
-};
+use ui::{ContextMenu, IconButton, TextTab, TextTabStrip, Tooltip, prelude::*, right_click_menu};
 use util::ResultExt as _;
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
@@ -70,6 +68,16 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     }
     fn icon(&self, window: &Window, cx: &App) -> Option<ui::IconName>;
     fn icon_tooltip(&self, window: &Window, cx: &App) -> Option<&'static str>;
+    /// The panel's name as shown on its tab, in its header and on its drag
+    /// preview. The default is the button tooltip without its "Panel" suffix
+    /// ("Terminal Panel" gives "Terminal"), or the persistent name when the
+    /// panel has no tooltip ("DebugPanel" gives "Debug").
+    fn title(&self, window: &Window, cx: &App) -> SharedString {
+        default_panel_title(
+            self.icon_tooltip(window, cx)
+                .unwrap_or_else(|| Self::persistent_name()),
+        )
+    }
     fn toggle_action(&self) -> Box<dyn Action>;
     fn icon_label(&self, _window: &Window, _: &App) -> Option<String> {
         None
@@ -81,6 +89,26 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
         false
     }
     fn set_zoomed(&mut self, _zoomed: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
+    /// Whether `set_zoomed` does something. The header of the bottom dock
+    /// offers Maximize only for such a panel, so the button is never dead.
+    /// The default covers the chat, which handles zoom without saying so yet.
+    fn supports_zoom(&self, _window: &Window, _cx: &App) -> bool {
+        self.is_agent_panel()
+    }
+    /// The panel's own buttons for the header of the bottom dock, drawn at the
+    /// right of the tabs, before Maximize and Hide. A panel that returns them
+    /// does not draw the same buttons in a row of its own.
+    ///
+    /// Only the bottom dock asks, and only for the panel it shows. It also
+    /// asks while the workspace is being rendered (a maximized panel), so an
+    /// implementation must not read the workspace entity.
+    fn header_actions(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        None
+    }
     fn set_active(&mut self, _active: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
     fn pane(&self) -> Option<Entity<Pane>> {
         None
@@ -103,6 +131,18 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     }
 }
 
+/// A display name from a tooltip or a persistent name: "Project Panel" and
+/// "DebugPanel" lose their suffix.
+pub(crate) fn default_panel_title(name: &str) -> SharedString {
+    let name = name.trim();
+    let name = name
+        .strip_suffix("Panel")
+        .map(str::trim_end)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(name);
+    SharedString::from(name.to_string())
+}
+
 pub trait PanelHandle: Send + Sync {
     fn panel_id(&self) -> EntityId;
     fn persistent_name(&self) -> &'static str;
@@ -112,6 +152,10 @@ pub trait PanelHandle: Send + Sync {
     fn set_position(&self, position: DockPosition, window: &mut Window, cx: &mut App);
     fn is_zoomed(&self, window: &Window, cx: &App) -> bool;
     fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App);
+    /// See `Panel::supports_zoom`.
+    fn supports_zoom(&self, window: &Window, cx: &App) -> bool;
+    /// See `Panel::header_actions`.
+    fn header_actions(&self, window: &mut Window, cx: &mut App) -> Option<AnyElement>;
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
     fn remote_id(&self) -> Option<proto::PanelId>;
     fn pane(&self, cx: &App) -> Option<Entity<Pane>>;
@@ -124,6 +168,8 @@ pub trait PanelHandle: Send + Sync {
     fn set_flexible_size(&self, flexible: bool, window: &mut Window, cx: &mut App);
     fn icon(&self, window: &Window, cx: &App) -> Option<ui::IconName>;
     fn icon_tooltip(&self, window: &Window, cx: &App) -> Option<&'static str>;
+    /// See `Panel::title`.
+    fn title(&self, window: &Window, cx: &App) -> SharedString;
     fn toggle_action(&self, window: &Window, cx: &App) -> Box<dyn Action>;
     fn icon_label(&self, window: &Window, cx: &App) -> Option<String>;
     fn panel_focus_handle(&self, cx: &App) -> FocusHandle;
@@ -187,6 +233,14 @@ where
         self.update(cx, |this, cx| this.set_zoomed(zoomed, window, cx))
     }
 
+    fn supports_zoom(&self, window: &Window, cx: &App) -> bool {
+        self.read(cx).supports_zoom(window, cx)
+    }
+
+    fn header_actions(&self, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+        self.update(cx, |this, cx| this.header_actions(window, cx))
+    }
+
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App) {
         self.update(cx, |this, cx| this.set_active(active, window, cx))
     }
@@ -233,6 +287,10 @@ where
 
     fn icon_tooltip(&self, window: &Window, cx: &App) -> Option<&'static str> {
         self.read(cx).icon_tooltip(window, cx)
+    }
+
+    fn title(&self, window: &Window, cx: &App) -> SharedString {
+        self.read(cx).title(window, cx)
     }
 
     fn toggle_action(&self, _: &Window, cx: &App) -> Box<dyn Action> {
@@ -290,6 +348,15 @@ pub struct Dock {
     restoration: DockRestoreState,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
+    /// Set while the resize handle is dragged, so the sash stays highlighted
+    /// even though hover styles are suspended during a drag.
+    resizing: bool,
+    /// Set while a panel is dragged to another dock: the sash is not drawn,
+    /// because it would sit above the drop zones and swallow the drop.
+    panel_drag_active: bool,
+    /// Panels resized by a sash drag whose size is not stored yet: it is
+    /// written once when the drag ends, not on every mouse move.
+    unpersisted_panel_keys: Vec<&'static str>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -386,11 +453,6 @@ struct PanelEntry {
     _subscriptions: [Subscription; 4],
 }
 
-pub struct PanelButtons {
-    dock: Entity<Dock>,
-    _settings_subscription: Subscription,
-}
-
 pub(crate) const PANEL_SIZE_STATE_KEY: &str = "dock_panel_size";
 
 fn panel_uses_flexible_width(
@@ -457,6 +519,9 @@ impl Dock {
                 restoration: DockRestoreState::Restoring { pending: None },
                 zoom_layer_open: false,
                 modal_layer,
+                resizing: false,
+                panel_drag_active: false,
+                unpersisted_panel_keys: Vec::new(),
             }
         });
 
@@ -538,6 +603,26 @@ impl Dock {
         self.panel_entries
             .iter()
             .position(|entry| entry.panel.remote_id() == Some(panel_id))
+    }
+
+    pub fn panel_index_for_id(&self, panel_id: EntityId) -> Option<usize> {
+        self.panel_entries
+            .iter()
+            .position(|entry| entry.panel.panel_id() == panel_id)
+    }
+
+    /// Called by the workspace when a panel drag starts; the dock clears the
+    /// flag itself once no drag is active.
+    pub(crate) fn set_panel_drag_active(&mut self, cx: &mut Context<Self>) {
+        if !self.panel_drag_active {
+            self.panel_drag_active = true;
+            cx.notify();
+        }
+    }
+
+    /// The panels of this dock, in the order of their buttons and tabs.
+    pub fn panels(&self) -> impl Iterator<Item = &Arc<dyn PanelHandle>> {
+        self.panel_entries.iter().map(|entry| &entry.panel)
     }
 
     pub fn panel_for_id(&self, panel_id: EntityId) -> Option<&Arc<dyn PanelHandle>> {
@@ -643,21 +728,26 @@ impl Dock {
                         return;
                     }
 
-                    let Ok(new_dock) = workspace.update(cx, |workspace, cx| {
+                    let panel_id = Entity::entity_id(&panel);
+                    let Ok((new_dock, reveal)) = workspace.update(cx, |workspace, cx| {
                         if panel.is_zoomed(window, cx) {
                             workspace.zoomed_position = Some(new_position);
                         }
-                        match new_position {
+                        // Set by `Workspace::move_panel_to_dock`: the user asked
+                        // for this move, so the panel arrives open and focused
+                        // even if it was hidden in the dock it leaves.
+                        let reveal = workspace.take_panel_reveal(panel_id, new_position);
+                        let new_dock = match new_position {
                             DockPosition::Left => &workspace.left_dock,
                             DockPosition::Bottom => &workspace.bottom_dock,
                             DockPosition::Right => &workspace.right_dock,
                         }
-                        .clone()
+                        .clone();
+                        (new_dock, reveal)
                     }) else {
                         return;
                     };
 
-                    let panel_id = Entity::entity_id(&panel);
                     let was_visible = this.is_open()
                         && this
                             .visible_panel()
@@ -671,15 +761,27 @@ impl Dock {
 
                     let previous_axis = this.position.axis();
                     let next_axis = new_position.axis();
+                    let axis_changed = previous_axis != next_axis;
                     let size_state = if previous_axis == next_axis {
                         size_state
                     } else {
                         PanelSizeState::default()
                     };
 
+                    let previous_index = this.panel_index_for_id(panel_id);
                     if !this.remove_panel(&panel, window, cx) {
                         // Panel was already moved from this dock
                         return;
+                    }
+                    if was_visible && let Some(previous_index) = previous_index {
+                        // The dock keeps showing something: the panel that
+                        // followed the one that left. Decided once every panel
+                        // has reacted to this settings change, so that a change
+                        // that moves several panels at once (a layout preset)
+                        // does not carry each neighbour along as "was shown".
+                        cx.defer_in(window, move |this, window, cx| {
+                            this.show_neighbor_of_moved_panel(previous_index, window, cx);
+                        });
                     }
 
                     new_dock.update(cx, |new_dock, cx| {
@@ -688,14 +790,23 @@ impl Dock {
                         if let Some(added_panel) = new_dock.panel_for_id(panel_id).cloned() {
                             new_dock.set_panel_size_state(added_panel.as_ref(), size_state, cx);
                         }
-                        if was_visible {
+                        if was_visible || reveal {
                             new_dock.set_open(true, window, cx);
                             new_dock.activate_panel(index, window, cx);
+                        }
+                        if reveal {
+                            window.focus(&panel.read(cx).activation_focus_handle(cx), cx);
                         }
                     });
 
                     workspace
                         .update(cx, |workspace, cx| {
+                            if axis_changed {
+                                // The stored record is one size for both axes:
+                                // without this an old height would be read back
+                                // as a width after a restart.
+                                workspace.persist_panel_size_state(T::panel_key(), size_state, cx);
+                            }
                             workspace.serialize_workspace(window, cx);
                         })
                         .ok();
@@ -923,6 +1034,39 @@ impl Dock {
         }
     }
 
+    /// Called after the panel shown in this dock moved to another dock, which
+    /// closed this one: if the dock still has a panel with a button, it opens
+    /// again on the one that followed the moved panel, or else on the one
+    /// before it. A dock closes only when nothing is left to show.
+    fn show_neighbor_of_moved_panel(
+        &mut self,
+        previous_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Something else was opened here in the meantime (a panel arrived).
+        if self.is_open || self.active_panel_index.is_some() {
+            return;
+        }
+        let split = previous_index.min(self.panel_entries.len());
+        let (before, after) = self.panel_entries.split_at(split);
+        let neighbor = after
+            .iter()
+            .chain(before.iter().rev())
+            .find(|entry| entry.panel.enabled(cx) && entry.panel.icon(window, cx).is_some())
+            .map(|entry| entry.panel.panel_id());
+        let Some(index) = neighbor.and_then(|panel_id| self.panel_index_for_id(panel_id)) else {
+            return;
+        };
+        self.set_open(true, window, cx);
+        self.activate_panel(index, window, cx);
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.serialize_workspace(window, cx);
+            })
+            .ok();
+    }
+
     pub fn panels_len(&self) -> usize {
         self.panel_entries.len()
     }
@@ -1101,24 +1245,44 @@ impl Dock {
         &mut self,
         size: Option<Pixels>,
         flex: Option<f32>,
+        persist: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let position = self.position;
         if let Some(entry) = self.active_panel_entry_mut() {
-            let (panel_key, size_state) =
-                resize_panel_entry(position, entry, size, flex, window, cx);
+            let resized = resize_panel_entry(position, entry, size, flex, window, cx);
+            self.panel_sizes_changed(vec![resized], persist, cx);
+        }
+    }
 
+    /// Stores the new sizes right away, or remembers which panels to store
+    /// when the sash drag that is resizing them ends.
+    fn panel_sizes_changed(
+        &mut self,
+        resized: Vec<(&'static str, PanelSizeState)>,
+        persist: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if persist {
             let workspace = self.workspace.clone();
             cx.defer(move |cx| {
                 if let Some(workspace) = workspace.upgrade() {
                     workspace.update(cx, |workspace, cx| {
-                        workspace.persist_panel_size_state(panel_key, size_state, cx);
+                        for (panel_key, size_state) in resized {
+                            workspace.persist_panel_size_state(panel_key, size_state, cx);
+                        }
                     });
                 }
             });
-            cx.notify();
+        } else {
+            for (panel_key, _) in resized {
+                if !self.unpersisted_panel_keys.contains(&panel_key) {
+                    self.unpersisted_panel_keys.push(panel_key);
+                }
+            }
         }
+        cx.notify();
     }
 
     /// Resizes the active panel and, when this dock is included in
@@ -1130,11 +1294,55 @@ impl Dock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.resize_panel_sizes_internal(size, flex, true, window, cx);
+    }
+
+    /// As `resize_panel_sizes`, for each mouse move of a sash drag: nothing is
+    /// written to the database until `persist_resized_panels` is called.
+    pub(crate) fn resize_panel_sizes_while_dragging(
+        &mut self,
+        size: Option<Pixels>,
+        flex: Option<f32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resize_panel_sizes_internal(size, flex, false, window, cx);
+    }
+
+    fn resize_panel_sizes_internal(
+        &mut self,
+        size: Option<Pixels>,
+        flex: Option<f32>,
+        persist: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.should_resize_all_panels(cx) {
-            self.resize_all_panels(size, flex, window, cx);
+            self.resize_all_panels(size, flex, persist, window, cx);
         } else {
-            self.resize_active_panel(size, flex, window, cx);
+            self.resize_active_panel(size, flex, persist, window, cx);
         }
+    }
+
+    /// Stores the sizes left by `resize_panel_sizes_while_dragging`. Called by
+    /// the workspace once, when the sash drag ends.
+    pub(crate) fn persist_resized_panels(&mut self, cx: &mut Context<Self>) {
+        let panel_keys = std::mem::take(&mut self.unpersisted_panel_keys);
+        let resized = self
+            .panel_entries
+            .iter()
+            .filter(|entry| panel_keys.contains(&entry.panel.panel_key()))
+            .map(|entry| (entry.panel.panel_key(), entry.size_state))
+            .collect::<Vec<_>>();
+        if !resized.is_empty() {
+            self.panel_sizes_changed(resized, true, cx);
+        }
+    }
+
+    /// Whether a sash drag left sizes that are not stored yet.
+    #[cfg(test)]
+    pub(crate) fn has_unpersisted_panel_sizes(&self) -> bool {
+        !self.unpersisted_panel_keys.is_empty()
     }
 
     /// Resets the active panel and, when this dock is included in
@@ -1149,7 +1357,7 @@ impl Dock {
 
     fn reset_active_panel_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = PanelSizeState::default();
-        self.resize_active_panel(state.size, state.flex, window, cx);
+        self.resize_active_panel(state.size, state.flex, true, window, cx);
     }
 
     fn reset_all_panel_sizes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1159,7 +1367,7 @@ impl Dock {
         let size =
             (!panel_uses_flexible_width(self.position, active_entry.panel.as_ref(), window, cx))
                 .then(|| active_entry.panel.default_size(window, cx));
-        self.resize_all_panels(size, None, window, cx);
+        self.resize_all_panels(size, None, true, window, cx);
     }
 
     fn should_resize_all_panels(&self, cx: &App) -> bool {
@@ -1172,6 +1380,7 @@ impl Dock {
         &mut self,
         size: Option<Pixels>,
         flex: Option<f32>,
+        persist: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1185,12 +1394,12 @@ impl Dock {
             };
             panel_uses_flexible_width(self.position, active_entry.panel.as_ref(), window, cx)
         };
-        let mut size_states_to_persist = Vec::new();
+        let mut resized = Vec::new();
         for entry in &mut self.panel_entries {
             if panel_uses_flexible_width(self.position, entry.panel.as_ref(), window, cx)
                 == active_panel_uses_flexible_width
             {
-                size_states_to_persist.push(resize_panel_entry(
+                resized.push(resize_panel_entry(
                     self.position,
                     entry,
                     size,
@@ -1200,19 +1409,7 @@ impl Dock {
                 ));
             }
         }
-
-        let workspace = self.workspace.clone();
-        cx.defer(move |cx| {
-            if let Some(workspace) = workspace.upgrade() {
-                workspace.update(cx, |workspace, cx| {
-                    for (panel_key, size_state) in size_states_to_persist {
-                        workspace.persist_panel_size_state(panel_key, size_state, cx);
-                    }
-                });
-            }
-        });
-
-        cx.notify();
+        self.panel_sizes_changed(resized, persist, cx);
     }
 
     pub fn toggle_action(&self) -> Box<dyn Action> {
@@ -1230,6 +1427,9 @@ impl Dock {
         dispatch_context
     }
 
+    /// Brings the fixed sizes of this dock's panels under `max_size` (the room
+    /// the workspace has for the dock, sash included), never under a panel's
+    /// own minimum. Called when the workspace changes size.
     pub fn clamp_panel_size(&mut self, max_size: Pixels, window: &Window, cx: &mut Context<Self>) {
         let max_size = (max_size - RESIZE_HANDLE_SIZE).abs();
         let mut clamped = false;
@@ -1244,8 +1444,14 @@ impl Dock {
                 .size_state
                 .size
                 .unwrap_or_else(|| entry.panel.default_size(window, cx));
+            let min_size = entry
+                .panel
+                .min_size(window, cx)
+                .unwrap_or(RESIZE_HANDLE_SIZE)
+                .max(RESIZE_HANDLE_SIZE);
+            let max_size = max_size.max(min_size);
             if size > max_size {
-                entry.size_state.size = Some(max_size.max(RESIZE_HANDLE_SIZE));
+                entry.size_state.size = Some(max_size);
                 clamped = true;
             }
         }
@@ -1273,16 +1479,305 @@ impl Dock {
     }
 }
 
+/// Thickness of the line drawn over a dock's edge while its sash is hovered or dragged.
+const SASH_LINE_SIZE: Pixels = px(2.);
+
+/// The menu opened by a right click on a panel's button or tab: where to dock
+/// it, how it is sized, and whether its button is shown.
+pub(crate) fn panel_context_menu(
+    panel: Arc<dyn PanelHandle>,
+    dock: Entity<Dock>,
+    workspace: WeakEntity<Workspace>,
+    dock_position: DockPosition,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<ContextMenu> {
+    const POSITIONS: [DockPosition; 3] = [
+        DockPosition::Left,
+        DockPosition::Right,
+        DockPosition::Bottom,
+    ];
+
+    let supports_flexible = panel.supports_flexible_size(cx);
+    let currently_flexible = panel.has_flexible_size(window, cx);
+    let panel_hide = panel.hide_button_setting(cx);
+    ContextMenu::build(window, cx, |mut menu, _, cx| {
+        let mut has_position_entries = false;
+        for position in POSITIONS {
+            if panel.position_is_valid(position, cx) {
+                let is_current = position == dock_position;
+                let panel = panel.clone();
+                let workspace = workspace.clone();
+                menu = menu.toggleable_entry(
+                    format!("Dock {}", position.label()),
+                    is_current,
+                    IconPosition::Start,
+                    None,
+                    move |window, cx| {
+                        if is_current {
+                            return;
+                        }
+                        // Through the workspace, so the panel arrives open and
+                        // focused and a failed move is reported.
+                        let moved = workspace.update(cx, |workspace, cx| {
+                            workspace.move_panel_to_dock(&panel, position, window, cx);
+                        });
+                        if moved.is_err() {
+                            panel.set_position(position, window, cx);
+                        }
+                    },
+                );
+                has_position_entries = true;
+            }
+        }
+        if supports_flexible {
+            if has_position_entries {
+                menu = menu.separator();
+            }
+            let panel_for_flex = panel.clone();
+            let dock_for_flex = dock.clone();
+            let workspace_for_flex = workspace.clone();
+            menu = menu.toggleable_entry(
+                "Flex Width",
+                currently_flexible,
+                IconPosition::Start,
+                None,
+                move |window, cx| {
+                    if !currently_flexible {
+                        if let Some(ws) = workspace_for_flex.upgrade() {
+                            ws.update(cx, |workspace, cx| {
+                                workspace.toggle_dock_panel_flexible_size(
+                                    &dock_for_flex,
+                                    panel_for_flex.as_ref(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                },
+            );
+            let panel_for_fixed = panel.clone();
+            let dock_for_fixed = dock.clone();
+            let workspace_for_fixed = workspace.clone();
+            menu = menu.toggleable_entry(
+                "Fixed Width",
+                !currently_flexible,
+                IconPosition::Start,
+                None,
+                move |window, cx| {
+                    if currently_flexible {
+                        if let Some(ws) = workspace_for_fixed.upgrade() {
+                            ws.update(cx, |workspace, cx| {
+                                workspace.toggle_dock_panel_flexible_size(
+                                    &dock_for_fixed,
+                                    panel_for_fixed.as_ref(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                },
+            );
+        }
+        if let Some(hide) = panel_hide {
+            menu = crate::status_bar::add_hide_button_entry(menu.separator(), hide);
+        }
+        menu
+    })
+}
+
+impl Dock {
+    /// The header of the bottom dock, the only row above its panel: one text
+    /// tab per panel, then the shown panel's own buttons, Maximize and Hide.
+    /// `None` for the side docks, whose panels draw their own header.
+    ///
+    /// The workspace draws the same header above a maximized bottom panel,
+    /// which is rendered outside of its dock.
+    pub fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.position != DockPosition::Bottom {
+            return None;
+        }
+        let active_panel = self.active_panel()?.clone();
+
+        let active_index = self.active_panel_index;
+        let position = self.position;
+        let dock_entity = cx.entity();
+        let workspace = self.workspace.clone();
+        let dock_focus_handle = self.panel_button_focus_handle(window, cx);
+        let is_zoomed = active_panel.is_zoomed(window, cx);
+        // A maximized panel can always be restored, whatever it declares.
+        let can_zoom = is_zoomed || active_panel.supports_zoom(window, cx);
+
+        let mut strip = TextTabStrip::new("panel-tabs");
+        for (ix, entry) in self.panel_entries.iter().enumerate() {
+            let is_active = Some(ix) == active_index;
+            // A panel without an icon is disabled or has its button hidden
+            // in the settings: it only gets a tab while it is the one shown.
+            if !is_active && entry.panel.icon(window, cx).is_none() {
+                continue;
+            }
+            let panel = entry.panel.clone();
+            let title = panel.title(window, cx);
+            let count = panel
+                .icon_label(window, cx)
+                .and_then(|count| count.parse::<usize>().ok());
+            let action = panel.toggle_action(window, cx);
+            let activation_focus_handle = panel.activation_focus_handle(cx);
+            let dock_focus_handle = dock_focus_handle.clone();
+            let dragged_panel = panel.clone();
+            let drag_workspace = workspace.clone();
+
+            // The menu wraps the tab in an element of its own, which takes the
+            // tab's natural height: stretched to the strip here, so the tab
+            // fills it and its marker sits on the header's line.
+            strip = strip.child(
+                div().h_full().flex().child(
+                    right_click_menu(("panel-tab-menu", ix))
+                        .menu({
+                            let dock_entity = dock_entity.clone();
+                            let workspace = workspace.clone();
+                            move |window, cx| {
+                                panel_context_menu(
+                                    panel.clone(),
+                                    dock_entity.clone(),
+                                    workspace.clone(),
+                                    position,
+                                    window,
+                                    cx,
+                                )
+                            }
+                        })
+                        .anchor(Anchor::BottomLeft)
+                        .attach(Anchor::TopLeft)
+                        .trigger(move |_, _window, _cx| {
+                            let tooltip_title = title.clone();
+                            let tooltip_action = action.boxed_clone();
+                            let tab = TextTab::new(("panel-tab", ix), title)
+                                .selected(is_active)
+                                .count(count)
+                                .debug_selector(move || format!("PANEL-TAB-{ix}"))
+                                .tooltip(move |_window, cx| {
+                                    Tooltip::for_action(tooltip_title.clone(), &*tooltip_action, cx)
+                                })
+                                .on_click(move |_, window, cx| {
+                                    if is_active {
+                                        // The panel's action toggles: on the shown
+                                        // panel it would close the dock.
+                                        window.focus(&activation_focus_handle, cx);
+                                    } else {
+                                        window.focus(&dock_focus_handle, cx);
+                                        window.dispatch_action(action.boxed_clone(), cx);
+                                    }
+                                });
+                            // Press and drag moves the panel to another dock;
+                            // a plain click still switches to it.
+                            panel_drag_source(tab, dragged_panel, position, drag_workspace)
+                        }),
+                ),
+            );
+        }
+
+        if let Some(actions) = active_panel.header_actions(window, cx) {
+            strip = strip.end_slot(actions);
+        }
+
+        if can_zoom {
+            let label = if is_zoomed {
+                "Restore Panel Size"
+            } else {
+                "Maximize Panel"
+            };
+            strip = strip.end_slot(
+                IconButton::new(
+                    ("panel-zoom", is_zoomed as u64),
+                    if is_zoomed {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    },
+                )
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .hover_color(Color::Default)
+                .aria_label(label)
+                .tooltip(move |_window, cx| Tooltip::for_action(label, &crate::ToggleZoom, cx))
+                .on_click(cx.listener(|dock, _, window, cx| {
+                    // Zoom is each panel's own business: ask the shown
+                    // one, as the key binding would.
+                    if let Some(panel) = dock.active_panel() {
+                        window.focus(&panel.activation_focus_handle(cx), cx);
+                        window.dispatch_action(crate::ToggleZoom.boxed_clone(), cx);
+                    }
+                })),
+            );
+        }
+
+        let toggle_dock_action = self.toggle_action();
+        strip = strip.end_slot(
+            IconButton::new("panel-hide", IconName::Close)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .hover_color(Color::Default)
+                .aria_label("Hide Panel")
+                .tooltip({
+                    let action = toggle_dock_action.boxed_clone();
+                    move |_window, cx| Tooltip::for_action("Hide Panel", &*action, cx)
+                })
+                .on_click(move |_, window, cx| {
+                    window.focus(&dock_focus_handle, cx);
+                    window.dispatch_action(toggle_dock_action.boxed_clone(), cx);
+                }),
+        );
+
+        Some(
+            // The strip has no ground of its own: the same one as the headers
+            // of the side panels, also over a maximized panel.
+            div()
+                .flex_none()
+                .w_full()
+                .bg(cx.theme().colors().panel_background)
+                .child(strip)
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for Dock {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context(cx);
-        if let Some(entry) = self.visible_entry() {
+        if !cx.has_active_drag() {
+            self.resizing = false;
+            self.panel_drag_active = false;
+        }
+        if self.visible_entry().is_some() {
             let position = self.position;
+            let resizing = self.resizing;
+            let accent_color = cx.theme().colors().text_accent;
+            let header = self.render_header(window, cx);
+            let Some(entry) = self.visible_entry() else {
+                unreachable!("checked above");
+            };
             let create_resize_handle = || {
+                let this = cx.weak_entity();
+                // The line that lights up over the dock's edge, as a sash does.
+                let sash_line = div()
+                    .absolute()
+                    .when(resizing, |this| this.bg(accent_color))
+                    .group_hover("dock-sash", |style| style.bg(accent_color));
+                let sash_inset = (RESIZE_HANDLE_SIZE - SASH_LINE_SIZE) / 2.;
                 let handle = div()
                     .id("resize-handle")
-                    .on_drag(DraggedDock(position), |dock, _, _, cx| {
+                    .debug_selector(|| format!("DOCK-SASH-{}", position.label().to_uppercase()))
+                    .group("dock-sash")
+                    .on_drag(DraggedDock(position), move |dock, _, _, cx| {
                         cx.stop_propagation();
+                        this.update(cx, |this, cx| {
+                            this.resizing = true;
+                            cx.notify();
+                        })
+                        .ok();
                         cx.new(|_| dock.clone())
                     })
                     .on_mouse_down(
@@ -1306,7 +1801,7 @@ impl Render for Dock {
                         }),
                     )
                     .occlude();
-                match self.position() {
+                match position {
                     DockPosition::Left => deferred(
                         handle
                             .absolute()
@@ -1314,7 +1809,14 @@ impl Render for Dock {
                             .top(px(0.))
                             .h_full()
                             .w(RESIZE_HANDLE_SIZE)
-                            .cursor_col_resize(),
+                            .cursor_col_resize()
+                            .child(
+                                sash_line
+                                    .top_0()
+                                    .bottom_0()
+                                    .left(sash_inset)
+                                    .w(SASH_LINE_SIZE),
+                            ),
                     ),
                     DockPosition::Bottom => deferred(
                         handle
@@ -1323,7 +1825,14 @@ impl Render for Dock {
                             .left(px(0.))
                             .w_full()
                             .h(RESIZE_HANDLE_SIZE)
-                            .cursor_row_resize(),
+                            .cursor_row_resize()
+                            .child(
+                                sash_line
+                                    .left_0()
+                                    .right_0()
+                                    .top(sash_inset)
+                                    .h(SASH_LINE_SIZE),
+                            ),
                     ),
                     DockPosition::Right => deferred(
                         handle
@@ -1332,7 +1841,14 @@ impl Render for Dock {
                             .left(-RESIZE_HANDLE_SIZE / 2.)
                             .h_full()
                             .w(RESIZE_HANDLE_SIZE)
-                            .cursor_col_resize(),
+                            .cursor_col_resize()
+                            .child(
+                                sash_line
+                                    .top_0()
+                                    .bottom_0()
+                                    .left(sash_inset)
+                                    .w(SASH_LINE_SIZE),
+                            ),
                     ),
                 }
             };
@@ -1357,11 +1873,13 @@ impl Render for Dock {
                     DockPosition::Right => this.border_l_1(),
                     DockPosition::Bottom => this.border_t_1(),
                 })
+                .children(header)
                 .child(
                     div()
                         .map(|this| match self.position().axis() {
                             Axis::Horizontal => this.w_full().h_full(),
-                            Axis::Vertical => this.h_full().w_full(),
+                            // Below the tab strip, the panel takes what is left.
+                            Axis::Vertical => this.w_full().flex_1().min_h_0(),
                         })
                         .child(
                             entry
@@ -1370,7 +1888,7 @@ impl Render for Dock {
                                 .cached(StyleRefinement::default().v_flex().size_full()),
                         ),
                 )
-                .when(self.resizable(cx), |this| {
+                .when(self.resizable(cx) && !self.panel_drag_active, |this| {
                     this.child(create_resize_handle())
                 })
         } else {
@@ -1379,231 +1897,6 @@ impl Render for Dock {
                 .key_context(dispatch_context)
                 .track_focus(&self.focus_handle(cx))
         }
-    }
-}
-
-impl PanelButtons {
-    pub fn new(dock: Entity<Dock>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&dock, |_, _, cx| cx.notify()).detach();
-        let settings_subscription = cx.observe_global::<SettingsStore>(|_, cx| cx.notify());
-        Self {
-            dock,
-            _settings_subscription: settings_subscription,
-        }
-    }
-}
-
-impl Render for PanelButtons {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dock = self.dock.read(cx);
-        let active_index = dock.active_panel_index;
-        let is_open = dock.is_open;
-        let dock_position = dock.position;
-
-        let (menu_anchor, menu_attach) = match dock.position {
-            DockPosition::Left => (Anchor::BottomLeft, Anchor::TopLeft),
-            DockPosition::Bottom | DockPosition::Right => (Anchor::BottomRight, Anchor::TopRight),
-        };
-
-        let dock_entity = self.dock.clone();
-        let workspace = dock.workspace.clone();
-        let mut buttons: Vec<_> = dock
-            .panel_entries
-            .iter()
-            .enumerate()
-            .filter_map(|(i, entry)| {
-                let icon = entry.panel.icon(window, cx)?;
-                let icon_tooltip = entry
-                    .panel
-                    .icon_tooltip(window, cx)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("can't render a panel button without an icon tooltip")
-                    })
-                    .log_err()?;
-                let name = entry.panel.persistent_name();
-                let panel = entry.panel.clone();
-                let supports_flexible = panel.supports_flexible_size(cx);
-                let currently_flexible = panel.has_flexible_size(window, cx);
-                let dock_for_menu = dock_entity.clone();
-                let workspace_for_menu = workspace.clone();
-
-                let is_active_button = Some(i) == active_index && is_open;
-                let (action, tooltip) = if is_active_button {
-                    let action = dock.toggle_action();
-
-                    let tooltip: SharedString =
-                        format!("Close {} Dock", dock.position.label()).into();
-
-                    (action, tooltip)
-                } else {
-                    let action = entry.panel.toggle_action(window, cx);
-
-                    (action, icon_tooltip.into())
-                };
-
-                let focus_handle = dock.panel_button_focus_handle(window, cx);
-                let icon_label = entry.panel.icon_label(window, cx);
-
-                Some(
-                    right_click_menu(name)
-                        .menu(move |window, cx| {
-                            const POSITIONS: [DockPosition; 3] = [
-                                DockPosition::Left,
-                                DockPosition::Right,
-                                DockPosition::Bottom,
-                            ];
-
-                            let panel_hide = panel.hide_button_setting(cx);
-                            ContextMenu::build(window, cx, |mut menu, _, cx| {
-                                let mut has_position_entries = false;
-                                for position in POSITIONS {
-                                    if panel.position_is_valid(position, cx) {
-                                        let is_current = position == dock_position;
-                                        let panel = panel.clone();
-                                        menu = menu.toggleable_entry(
-                                            format!("Dock {}", position.label()),
-                                            is_current,
-                                            IconPosition::Start,
-                                            None,
-                                            move |window, cx| {
-                                                if !is_current {
-                                                    panel.set_position(position, window, cx);
-                                                }
-                                            },
-                                        );
-                                        has_position_entries = true;
-                                    }
-                                }
-                                if supports_flexible {
-                                    if has_position_entries {
-                                        menu = menu.separator();
-                                    }
-                                    let panel_for_flex = panel.clone();
-                                    let dock_for_flex = dock_for_menu.clone();
-                                    let workspace_for_flex = workspace_for_menu.clone();
-                                    menu = menu.toggleable_entry(
-                                        "Flex Width",
-                                        currently_flexible,
-                                        IconPosition::Start,
-                                        None,
-                                        move |window, cx| {
-                                            if !currently_flexible {
-                                                if let Some(ws) = workspace_for_flex.upgrade() {
-                                                    ws.update(cx, |workspace, cx| {
-                                                        workspace.toggle_dock_panel_flexible_size(
-                                                            &dock_for_flex,
-                                                            panel_for_flex.as_ref(),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                            }
-                                        },
-                                    );
-                                    let panel_for_fixed = panel.clone();
-                                    let dock_for_fixed = dock_for_menu.clone();
-                                    let workspace_for_fixed = workspace_for_menu.clone();
-                                    menu = menu.toggleable_entry(
-                                        "Fixed Width",
-                                        !currently_flexible,
-                                        IconPosition::Start,
-                                        None,
-                                        move |window, cx| {
-                                            if currently_flexible {
-                                                if let Some(ws) = workspace_for_fixed.upgrade() {
-                                                    ws.update(cx, |workspace, cx| {
-                                                        workspace.toggle_dock_panel_flexible_size(
-                                                            &dock_for_fixed,
-                                                            panel_for_fixed.as_ref(),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                            }
-                                        },
-                                    );
-                                }
-                                if let Some(hide) = panel_hide {
-                                    menu = crate::status_bar::add_hide_button_entry(
-                                        menu.separator(),
-                                        hide,
-                                    );
-                                }
-                                menu
-                            })
-                        })
-                        .anchor(menu_anchor)
-                        .attach(menu_attach)
-                        .trigger(move |is_active, _window, _cx| {
-                            // Include active state in element ID to invalidate the cached
-                            // tooltip when panel state changes (e.g., via keyboard shortcut)
-                            let button = IconButton::new((name, is_active_button as u64), icon)
-                                .icon_size(IconSize::Small)
-                                .toggle_state(is_active_button)
-                                .tab_index(0isize)
-                                .aria_label(icon_tooltip)
-                                .on_click({
-                                    let action = action.boxed_clone();
-                                    move |_, window, cx| {
-                                        window.focus(&focus_handle, cx);
-                                        window.dispatch_action(action.boxed_clone(), cx)
-                                    }
-                                })
-                                .when(!is_active, |this| {
-                                    this.tooltip(move |_window, cx| {
-                                        Tooltip::for_action(tooltip.clone(), &*action, cx)
-                                    })
-                                });
-
-                            div().relative().child(button).when_some(
-                                icon_label
-                                    .clone()
-                                    .filter(|_| !is_active_button)
-                                    .and_then(|label| label.parse::<usize>().ok()),
-                                |this, count| this.child(CountBadge::new(count)),
-                            )
-                        }),
-                )
-            })
-            .collect();
-
-        if dock_position == DockPosition::Right {
-            buttons.reverse();
-        }
-
-        let has_buttons = !buttons.is_empty();
-
-        h_flex()
-            .gap_1()
-            .when(
-                has_buttons
-                    && (dock.position == DockPosition::Bottom
-                        || dock.position == DockPosition::Right),
-                |this| this.child(Divider::vertical().color(DividerColor::Border)),
-            )
-            .children(buttons)
-            .when(has_buttons && dock.position == DockPosition::Left, |this| {
-                this.child(Divider::vertical().color(DividerColor::Border))
-            })
-    }
-}
-
-impl StatusItemView for PanelButtons {
-    fn set_active_pane_item(
-        &mut self,
-        _active_pane_item: Option<&dyn crate::ItemHandle>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-        // Nothing to do, panel buttons don't depend on the active center item
-    }
-
-    fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
-        // Panel buttons are hidden on a per-panel basis through each panel
-        // button's own context menu.
-        None
     }
 }
 
@@ -1622,8 +1915,18 @@ pub mod test {
         pub focus_handle: FocusHandle,
         pub activation_focus_handle: Option<FocusHandle>,
         pub default_size: Pixels,
+        /// The width or height the panel cannot go under, if it has one.
+        pub min_size: Option<Pixels>,
         pub flexible: bool,
         pub activation_priority: u32,
+        /// The docks this panel accepts; every dock when `None`.
+        pub valid_positions: Option<Vec<DockPosition>>,
+        /// When set, `set_position` leaves the panel where it is, as a real
+        /// panel does when its setting cannot be written or is overridden.
+        pub ignores_set_position: bool,
+        /// The button icon. Without one the panel has no button and only gets
+        /// a tab while it is the one shown.
+        pub icon: Option<ui::IconName>,
     }
     actions!(test_only, [ToggleTestPanel]);
 
@@ -1639,8 +1942,12 @@ pub mod test {
                 focus_handle: cx.focus_handle(),
                 activation_focus_handle: None,
                 default_size: px(300.),
+                min_size: None,
                 flexible: false,
                 activation_priority,
+                valid_positions: None,
+                ignores_set_position: false,
+                icon: None,
             }
         }
 
@@ -1697,17 +2004,26 @@ pub mod test {
             self.position
         }
 
-        fn position_is_valid(&self, _: super::DockPosition) -> bool {
-            true
+        fn position_is_valid(&self, position: super::DockPosition) -> bool {
+            self.valid_positions
+                .as_ref()
+                .is_none_or(|valid| valid.contains(&position))
         }
 
         fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
+            if self.ignores_set_position {
+                return;
+            }
             self.position = position;
             cx.update_global::<SettingsStore, _>(|_, _| {});
         }
 
         fn default_size(&self, _window: &Window, _: &App) -> Pixels {
             self.default_size
+        }
+
+        fn min_size(&self, _window: &Window, _: &App) -> Option<Pixels> {
+            self.min_size
         }
 
         fn initial_size_state(&self, _window: &Window, _: &App) -> PanelSizeState {
@@ -1735,11 +2051,11 @@ pub mod test {
         }
 
         fn icon(&self, _window: &Window, _: &App) -> Option<ui::IconName> {
-            None
+            self.icon
         }
 
         fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-            None
+            self.icon.map(|_| "Test Panel")
         }
 
         fn toggle_action(&self) -> Box<dyn Action> {
@@ -1752,6 +2068,10 @@ pub mod test {
 
         fn set_zoomed(&mut self, zoomed: bool, _window: &mut Window, _cx: &mut Context<Self>) {
             self.zoomed = zoomed;
+        }
+
+        fn supports_zoom(&self, _window: &Window, _: &App) -> bool {
+            true
         }
 
         fn set_active(&mut self, active: bool, _window: &mut Window, _cx: &mut Context<Self>) {

@@ -12,12 +12,21 @@ use util::ResultExt;
 use workspace::{ModalView, Workspace, ui::HighlightedLabel};
 
 actions!(
-    zed,
+    app,
     [
         /// Toggles the base keymap selector modal.
         ToggleBaseKeymapSelector
     ]
 );
+
+/// The name a keymap is listed under. `BaseKeymap::OPTIONS` still calls the upstream
+/// editor's keymap the default; here the default is VS Code's.
+pub(crate) fn display_name(name: &'static str, keymap: BaseKeymap) -> &'static str {
+    match keymap {
+        BaseKeymap::Zed => "Native",
+        _ => name,
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
@@ -107,7 +116,7 @@ impl PickerDelegate for BaseKeymapSelectorDelegate {
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
-        "Select a base keymap...".into()
+        "Select a base keymap…".into()
     }
 
     fn match_count(&self) -> usize {
@@ -134,9 +143,10 @@ impl PickerDelegate for BaseKeymapSelectorDelegate {
         cx: &mut Context<Picker<BaseKeymapSelectorDelegate>>,
     ) -> Task<()> {
         let background = cx.background_executor().clone();
-        let candidates = BaseKeymap::names()
+        let candidates = BaseKeymap::OPTIONS
+            .iter()
             .enumerate()
-            .map(|(id, name)| StringMatchCandidate::new(id, name))
+            .map(|(id, (name, keymap))| StringMatchCandidate::new(id, display_name(name, *keymap)))
             .collect::<Vec<_>>();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -181,15 +191,13 @@ impl PickerDelegate for BaseKeymapSelectorDelegate {
         _: &mut Window,
         cx: &mut Context<Picker<BaseKeymapSelectorDelegate>>,
     ) {
-        if let Some(selection) = self.matches.get(self.selected_index) {
-            let base_keymap = BaseKeymap::from_names(&selection.string);
-
-            telemetry::event!(
-                "Settings Changed",
-                setting = "keymap",
-                value = base_keymap.to_string()
-            );
-
+        // A match's candidate id is the keymap's place in `BaseKeymap::OPTIONS`.
+        if let Some((_, base_keymap)) = self
+            .matches
+            .get(self.selected_index)
+            .and_then(|selection| BaseKeymap::OPTIONS.get(selection.candidate_id))
+            .copied()
+        {
             update_settings_file(self.fs.clone(), cx, move |setting, _| {
                 setting.base_keymap = Some(base_keymap.into())
             });

@@ -91,6 +91,8 @@ impl ParentElement for TabBar {
 
 impl RenderOnce for TabBar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let border_color = cx.theme().colors().border;
+
         div()
             .id(self.id)
             .group("tab_bar")
@@ -103,11 +105,11 @@ impl RenderOnce for TabBar {
                 this.child(
                     h_flex()
                         .flex_none()
-                        .gap(DynamicSpacing::Base04.rems(cx))
+                        .gap(DynamicSpacing::Base02.rems(cx))
                         .px(DynamicSpacing::Base06.rems(cx))
                         .border_b_1()
                         .border_r_1()
-                        .border_color(cx.theme().colors().border)
+                        .border_color(border_color)
                         .children(self.start_children),
                 )
             })
@@ -117,6 +119,8 @@ impl RenderOnce for TabBar {
                     .flex_1()
                     .h_full()
                     .overflow_x_hidden()
+                    // The bar's bottom line runs behind the tabs; the active tab
+                    // paints over it so it reads as one surface with the editor.
                     .child(
                         div()
                             .absolute()
@@ -124,7 +128,7 @@ impl RenderOnce for TabBar {
                             .left_0()
                             .size_full()
                             .border_b_1()
-                            .border_color(cx.theme().colors().border),
+                            .border_color(border_color),
                     )
                     .child(
                         h_flex()
@@ -138,14 +142,15 @@ impl RenderOnce for TabBar {
                     ),
             )
             .when(!self.end_children.is_empty(), |this| {
+                // Actions at the end sit directly on the bar: no separator, only
+                // the shared bottom line.
                 this.child(
                     h_flex()
                         .flex_none()
-                        .gap(DynamicSpacing::Base04.rems(cx))
+                        .gap(DynamicSpacing::Base02.rems(cx))
                         .px(DynamicSpacing::Base06.rems(cx))
-                        .border_color(cx.theme().colors().border)
                         .border_b_1()
-                        .border_l_1()
+                        .border_color(border_color)
                         .children(self.end_children),
                 )
             })

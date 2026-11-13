@@ -7,6 +7,16 @@ use theme::ActiveTheme;
 
 use crate::{Color, rems_from_px};
 
+/// The display font, for the one very large heading a screen may have
+/// (onboarding, welcome, empty chat, About). Bundled in `assets/fonts`.
+pub const DISPLAY_FONT: &str = "Unbounded";
+
+/// The size of a micro label (section labels, panel titles, table headers,
+/// status-bar text): 11px, the smallest text in the interface.
+pub fn micro_label_size() -> Rems {
+    rems_from_px(11_f32)
+}
+
 /// Extends [`gpui::Styled`] with typography-related styling methods.
 pub trait StyledTypography: Styled + Sized {
     /// Sets the font family to the buffer font.

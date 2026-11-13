@@ -186,10 +186,11 @@ impl Checkbox {
 impl RenderOnce for Checkbox {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let group_id = format!("checkbox_group_{:?}", self.id);
+        // The check is plain text colour: red stays with the primary action.
         let color = if self.disabled {
             Color::Disabled
         } else {
-            Color::Selected
+            Color::Default
         };
 
         let icon = match self.toggle_state {
@@ -212,7 +213,7 @@ impl RenderOnce for Checkbox {
 
         let bg_color = self.bg_color(cx);
         let border_color = self.border_color(cx);
-        let hover_border_color = border_color.alpha(0.7);
+        let hover_border_color = cx.theme().colors().border_focused;
 
         let size = Self::container_size();
 
@@ -244,7 +245,7 @@ impl RenderOnce for Checkbox {
                         this.child(
                             div()
                                 .flex_none()
-                                .rounded_full()
+                                .rounded_pill()
                                 .bg(color.color(cx).alpha(0.5))
                                 .size(px(4.)),
                         )
@@ -297,17 +298,16 @@ pub enum SwitchColor {
 impl SwitchColor {
     fn get_colors(&self, is_on: bool, cx: &App) -> (Hsla, Hsla) {
         if !is_on {
-            return (
-                cx.theme().colors().element_disabled,
-                cx.theme().colors().border,
-            );
+            // "Off" is a full outline one step stronger than the lines around it, so it
+            // reads as a control that is off, not as one that is unavailable.
+            return (gpui::transparent_black(), cx.theme().colors().border_strong);
         }
 
         match self {
+            // Monochrome: an "on" track is the text colour, the thumb is cut out of it.
             SwitchColor::Accent => {
-                let status = cx.theme().status();
                 let colors = cx.theme().colors();
-                (status.info.opacity(0.4), colors.text_accent.opacity(0.2))
+                (colors.text, colors.text)
             }
             SwitchColor::Custom(color) => (*color, color.opacity(0.6)),
         }
@@ -455,20 +455,31 @@ impl RenderOnce for Switch {
         let adjust_ratio = if is_light(cx) { 1.5 } else { 1.0 };
 
         let base_color = cx.theme().colors().text;
-        let thumb_color = base_color;
+        let thumb_color = if is_on && self.color == SwitchColor::Accent {
+            cx.theme().colors().background
+        } else if is_on {
+            base_color
+        } else {
+            cx.theme().colors().text_muted
+        };
         let (bg_color, border_color) = self.color.get_colors(is_on, cx);
+        // A disabled switch is fainter than both states: the plain line, a ghost of a knob.
+        let border_color = if self.disabled && !is_on {
+            cx.theme().colors().border
+        } else {
+            border_color
+        };
 
-        let bg_hover_color = if is_on {
+        let bg_hover_color = if is_on && self.color == SwitchColor::Accent {
+            cx.theme().colors().text_muted
+        } else if is_on {
             bg_color.blend(base_color.opacity(0.16 * adjust_ratio))
         } else {
             bg_color.blend(base_color.opacity(0.05 * adjust_ratio))
         };
 
-        let thumb_opacity = match (is_on, self.disabled) {
-            (_, true) => 0.2,
-            (true, false) => 1.0,
-            (false, false) => 0.5,
-        };
+        // The "off" knob takes its weight from `text_muted`, not from an opacity.
+        let thumb_opacity = if self.disabled { 0.2 } else { 1.0 };
 
         let group_id = format!("switch_group_{:?}", self.id);
         let label = self.label;
@@ -497,7 +508,7 @@ impl RenderOnce for Switch {
             .p(px(1.0))
             .border_2()
             .border_color(cx.theme().colors().border_transparent)
-            .rounded_full()
+            .rounded_pill()
             .when_some(
                 self.tab_index.filter(|_| !self.disabled),
                 |this, tab_index| {
@@ -523,7 +534,7 @@ impl RenderOnce for Switch {
                             .when(is_on, |on| on.justify_end())
                             .when(!is_on, |off| off.justify_start())
                             .size_full()
-                            .rounded_full()
+                            .rounded_pill()
                             .px(DynamicSpacing::Base02.px(cx))
                             .bg(bg_color)
                             .when(!self.disabled, |this| {
@@ -534,7 +545,7 @@ impl RenderOnce for Switch {
                             .child(
                                 div()
                                     .size(DynamicSpacing::Base12.rems(cx))
-                                    .rounded_full()
+                                    .rounded_pill()
                                     .bg(thumb_color)
                                     .opacity(thumb_opacity),
                             ),

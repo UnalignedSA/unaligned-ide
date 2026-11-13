@@ -17,6 +17,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+branding.workspace = true
 client.workspace = true
 command_palette_hooks.workspace = true
 db.workspace = true
@@ -34,7 +35,7 @@ ui.workspace = true
 util.workspace = true
 telemetry.workspace = true
 workspace.workspace = true
-zed_actions.workspace = true
+app_actions.workspace = true
 
 [dev-dependencies]
 

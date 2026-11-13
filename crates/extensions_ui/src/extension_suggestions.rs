@@ -98,11 +98,55 @@ fn notification_id(extension_id: &str) -> NotificationId {
     NotificationId::composite::<ExtensionSuggestionNotification>(SharedString::from(extension_id))
 }
 
+/// Installs the `auto_install_extensions` entry that provides the language of
+/// a file the user just opened, if it is switched on and missing.
+///
+/// Upstream installed those entries (`html` by default) at every first
+/// startup. Here the registry is contacted for them when a file needs one,
+/// which is a reason the user can see.
+fn auto_install_for_buffer(
+    workspace: &Workspace,
+    buffer: &Entity<Buffer>,
+    cx: &mut Context<Workspace>,
+) {
+    let extension_id = {
+        let buffer = buffer.read(cx);
+        let Some(file) = buffer.file() else {
+            return;
+        };
+        if buffer
+            .language()
+            .is_some_and(|language| *language != *PLAIN_TEXT)
+        {
+            return;
+        }
+        let language_exists = workspace
+            .project()
+            .read(cx)
+            .languages()
+            .language_for_file(file, Some(buffer.as_rope()), cx)
+            .is_some();
+        if language_exists {
+            return;
+        }
+        let Some(suggestion) = extension_suggest::suggest_extension(file.path()) else {
+            return;
+        };
+        suggestion.extension_id
+    };
+
+    ExtensionStore::global(cx).update(cx, |store, cx| {
+        store.auto_install_extension(&extension_id, cx);
+    });
+}
+
 fn suggest_for_buffer(
     workspace: &mut Workspace,
     buffer: Entity<Buffer>,
     cx: &mut Context<Workspace>,
 ) {
+    auto_install_for_buffer(workspace, &buffer, cx);
+
     if !is_active_in_some_pane(workspace, &buffer, cx) {
         return;
     }
@@ -561,6 +605,86 @@ mod tests {
         open_file(&workspace, "index.html", cx).await;
 
         assert_eq!(notification_ids(&workspace, cx), Vec::new());
+    }
+
+    #[gpui::test]
+    async fn test_auto_install_entry_is_installed_when_its_file_is_opened(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        app_state.client.http_client().as_fake().replace_handler({
+            let requests = requests.clone();
+            move |_, request| {
+                requests.lock().unwrap().push(request.uri().to_string());
+                std::future::pending()
+            }
+        });
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content
+                        .extension
+                        .auto_install_extensions
+                        .insert(Arc::from("gleam"), true);
+                });
+            });
+        });
+        let (workspace, cx) = open_test_workspace(&app_state, cx).await;
+
+        // Nothing is asked of the registry until a file needs the extension.
+        open_file(&workspace, "main.rs", cx).await;
+        assert_eq!(*requests.lock().unwrap(), Vec::<String>::new());
+
+        open_file(&workspace, "main.gleam", cx).await;
+        cx.update(|_, cx| {
+            assert_eq!(
+                ExtensionStore::global(cx)
+                    .read(cx)
+                    .outstanding_operations()
+                    .keys()
+                    .collect::<Vec<_>>(),
+                vec![&Arc::from("gleam")]
+            );
+        });
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(
+            requests[0].contains("/extensions/gleam/download?"),
+            "{requests:?}"
+        );
+        // The entry is being installed, so the user is not asked about it.
+        assert_eq!(notification_ids(&workspace, cx), Vec::new());
+    }
+
+    #[gpui::test]
+    async fn test_switched_off_auto_install_entry_is_only_suggested(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        app_state.client.http_client().as_fake().replace_handler({
+            let requests = requests.clone();
+            move |_, request| {
+                requests.lock().unwrap().push(request.uri().to_string());
+                std::future::pending()
+            }
+        });
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content
+                        .extension
+                        .auto_install_extensions
+                        .insert(Arc::from("gleam"), false);
+                });
+            });
+        });
+        let (workspace, cx) = open_test_workspace(&app_state, cx).await;
+
+        open_file(&workspace, "main.gleam", cx).await;
+
+        assert_eq!(*requests.lock().unwrap(), Vec::<String>::new());
+        assert_eq!(
+            notification_ids(&workspace, cx),
+            vec![notification_id("gleam")]
+        );
     }
 
     #[gpui::test]

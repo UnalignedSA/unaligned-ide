@@ -7,9 +7,6 @@ extend-exclude = [
     # Typewriter model names used for agent branch names aren't typos.
     "crates/agent_ui/src/branch_names.rs",
 
-    # Contributor names aren't typos.
-    ".mailmap",
-
     # File suffixes aren't typos.
     "crates/extension_suggest/src/extension_suggest.rs",
     "crates/theme/src/icon_theme.rs",
@@ -18,7 +15,6 @@ extend-exclude = [
     "crates/assistant_tools/src/web_search_tool.rs",
 
     # Suppress false positives in database schema.
-    "crates/collab/migrations/20251208000000_test_schema.sql",
 
     # Vendored JSON schemas from SchemaStore.
     "crates/json_schema_store/src/schemas/",
@@ -38,21 +34,12 @@ extend-exclude = [
     # We have some base64-encoded data that is incorrectly being flagged.
     "crates/rpc/src/auth.rs",
     # glsl isn't recognized by this tool.
-    "extensions/glsl/languages/glsl/",
     # Protols is the name of the language server.
-    "extensions/proto/extension.toml",
-    "extensions/proto/src/language_servers/protols.rs",
     # Windows likes its abbreviations.
     "crates/gpui_windows/src/directx_renderer.rs",
     "crates/gpui_windows/src/events.rs",
     "crates/gpui_windows/src/direct_write.rs",
     "crates/gpui_windows/src/window.rs",
-    # Some typos in the base mdBook CSS.
-    "docs/theme/css/",
-    # Spellcheck triggers on `|Fixe[sd]|` regex part.
-    "script/danger/dangerfile.ts",
-    # File type extensions are not typos
-    "crates/zed/resources/windows/zed.iss",
     # typos-cli doesn't understand our `vˇariable` markup
     "crates/editor/src/hover_links.rs",
     # typos-cli doesn't understand `setis` is intentional test case
@@ -64,10 +51,8 @@ extend-exclude = [
     # Macos apis
     "crates/gpui_macos/src/dispatcher.rs",
     # Tests contain partially incomplete words (by design)
-    "crates/edit_prediction_cli/src/split_commit.rs",
     "crates/edit_prediction_metrics/src/kept_rate.rs",
     # Eval examples contain intentionally partial words (e.g. "secur" for "secure")
-    "crates/edit_prediction_cli/evals/",
     # Tests contain `baˇr` that cause `"ba" should be "by" or "be".`-like false-positives
     "crates/editor/src/document_symbols.rs",
 ]
@@ -110,8 +95,6 @@ extend-ignore-re = [
     "GHIzJ",
     # Intentionally non-matching query in project search tests
     "NOTHINGmATCHEStHIS",
-    # Ordinal suffix for spelled-out dates in script/github-pr-cleanup.py
-    '2: "nd"',
 ]
 check-filename = true
 

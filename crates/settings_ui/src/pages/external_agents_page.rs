@@ -48,11 +48,23 @@ pub(crate) fn render_external_agents_page(
         .pb_16()
         .track_scroll(scroll_handle)
         .overflow_y_scroll()
-        .child(Label::new("External Agents"))
         .child(
-            Label::new("Agents connected through the Agent Client Protocol.")
-                .size(LabelSize::Small)
-                .color(Color::Muted),
+            v_flex()
+                .pb_3()
+                .gap_1()
+                .child(
+                    Label::new(
+                        "Claude Code, Codex and Gemini CLI run inside the chat with your own \
+                        account. Start one from the chat's New chat menu.",
+                    )
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+                )
+                .child(
+                    Label::new("Uses the open Agent Client Protocol.")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
         )
         .child(agent_list)
         .into_any_element()
@@ -76,6 +88,18 @@ type AgentRow = (
     ExternalAgentSource,
 );
 
+/// The three agents the product names itself, whatever the registry calls
+/// them ("Claude Agent" there). Same names as `agent_ui::agent_display_name`,
+/// which this crate cannot reach.
+fn product_agent_name(id: &AgentId) -> Option<&'static str> {
+    match id.0.as_ref() {
+        "claude-acp" => Some("Claude Code"),
+        "codex-acp" => Some("Codex"),
+        "gemini" => Some("Gemini CLI"),
+        _ => None,
+    }
+}
+
 fn collect_agents(store: &Entity<AgentServerStore>, cx: &App) -> Vec<AgentRow> {
     let store = store.read(cx);
     store
@@ -85,8 +109,9 @@ fn collect_agents(store: &Entity<AgentServerStore>, cx: &App) -> Vec<AgentRow> {
         .into_iter()
         .map(|name| {
             let icon = store.agent_icon(&name);
-            let display_name = store
-                .agent_display_name(&name)
+            let display_name = product_agent_name(&name)
+                .map(SharedString::new_static)
+                .or_else(|| store.agent_display_name(&name))
                 .unwrap_or_else(|| name.0.clone());
             let source = store.agent_source(&name).unwrap_or_default();
             (name, icon, display_name, source)
@@ -117,7 +142,7 @@ fn render_empty_state(cx: &App) -> AnyElement {
         .border_color(cx.theme().colors().border.opacity(0.6))
         .rounded_sm()
         .child(
-            Label::new("No external agents added yet. Click \"Add Agent\" to get started.")
+            Label::new("No agents added yet. Click \"Add Agent\" to get started.")
                 .color(Color::Muted)
                 .size(LabelSize::Small),
         )
@@ -133,7 +158,7 @@ fn render_no_project_state(cx: &App) -> AnyElement {
         .border_color(cx.theme().colors().border.opacity(0.6))
         .rounded_sm()
         .child(
-            Label::new("No active project found. Open a workspace to manage external agents.")
+            Label::new("No folder is open. Open one to manage agents.")
                 .color(Color::Muted)
                 .size(LabelSize::Small),
         )
@@ -287,12 +312,12 @@ pub(crate) fn render_add_agent_popover(
                         original_window
                             .update(cx, |_, window, cx| {
                                 window.activate_window();
-                                window.dispatch_action(Box::new(zed_actions::AcpRegistry), cx);
+                                window.dispatch_action(Box::new(app_actions::AcpRegistry), cx);
                             })
                             .log_err();
                     }
                 })
-                .entry("Add Custom Agent", None, move |window, cx| {
+                .entry("Add Custom Agent…", None, move |window, cx| {
                     settings_window
                         .update(cx, |this, cx| {
                             open_custom_agent_form(this, None, window, cx);
@@ -302,7 +327,7 @@ pub(crate) fn render_add_agent_popover(
                 .separator()
                 .header("Learn More")
                 .item(
-                    ContextMenuEntry::new("ACP Docs")
+                    ContextMenuEntry::new("Protocol Documentation")
                         .icon(IconName::ArrowUpRight)
                         .icon_color(Color::Muted)
                         .icon_position(IconPosition::End)
@@ -467,14 +492,14 @@ pub(crate) fn open_custom_agent_form(
     settings_window.custom_agent_form = Some(CustomAgentForm::new(existing, window, cx));
 
     let title = if is_edit {
-        "Configure External Agent"
+        "Configure Agent"
     } else {
         "Add Custom Agent"
     };
 
     settings_window.push_dynamic_sub_page(
         title,
-        "Agent Configuration",
+        "Connections",
         Some("agent_servers"),
         false,
         render_custom_agent_form_page,

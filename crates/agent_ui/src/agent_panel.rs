@@ -14,15 +14,13 @@ use acp_thread::{AcpThread, AcpThreadEvent, MentionUri, line_range_suffix};
 use agent::{ContextServerRegistry, SharedThread, ThreadStore};
 use agent_client_protocol::v2::schema as acp_v2;
 use agent_servers::AgentServer;
-use agent_settings::UserAgentsMd;
 use collections::HashSet;
 use db::kvp::{Dismissable, KeyValueStore};
-use itertools::Itertools;
 use project::agent_server_store::AllAgentServersSettings;
 use project::{AgentId, ProjectItem};
 use serde::{Deserialize, Serialize};
 
-use zed_actions::{
+use app_actions::{
     DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize,
     agent::{
         AddSelectionToThread, ConflictContent, LogoutAgent, OpenSettings, ReauthenticateAgent,
@@ -36,14 +34,15 @@ use zed_actions::{
 };
 
 use crate::ExpandMessageEditor;
-use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
 use crate::completion_provider::{AgentContextSelection, AgentContextSource};
 use crate::terminal_thread_metadata_store::{
     TerminalThreadMetadata, TerminalThreadMetadataStore, compose_terminal_thread_title,
     normalize_terminal_custom_title, terminal_title_without_prefix,
 };
-use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent};
+use crate::thread_metadata_store::{
+    ThreadId, ThreadMetadata, ThreadMetadataStore, ThreadMetadataStoreEvent,
+};
 use crate::{
     Agent, AgentInitialContent, AgentThreadSource, ExternalSourcePrompt, NewExternalAgentThread,
     NewNativeAgentThreadFromSummary,
@@ -52,12 +51,16 @@ use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
     NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, RenameSelectedThread,
     ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata,
-    ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
+    ShowThreadMetadata, ToggleHistory, ToggleNewThreadMenu, ToggleOptionsMenu,
     conversation_view::{
         AcpThreadViewEvent, RootThreadUpdated, ThreadView, reset_fast_mode_warnings,
     },
     ui::{AgentNotification, AgentNotificationEvent, EndTrialUpsell},
 };
+// The agents that bring their own subscription and that the "New chat with"
+// chooser can set up in one step, and the one name each of them is shown
+// under.
+use crate::{SUBSCRIPTION_AGENTS, agent_display_name};
 use agent_settings::AgentSettings;
 use ai_onboarding::AgentPanelOnboarding;
 use anyhow::{Context as _, Result, anyhow};
@@ -74,10 +77,9 @@ use feature_flags::{CreateThreadToolFeatureFlag, FeatureFlagAppExt as _};
 use fs::Fs;
 use futures::FutureExt as _;
 use gpui::{
-    Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
-    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
-    PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
-    pulsating_between,
+    Action, Anchor, AnyElement, App, AsyncWindowContext, ClipboardItem, Entity, EventEmitter,
+    ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels, PlatformDisplay, Subscription, Task,
+    TaskExt, WeakEntity, WindowHandle, prelude::*,
 };
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
@@ -93,8 +95,8 @@ use terminal_view::TerminalView;
 use text::OffsetRangeExt;
 use theme_settings::ThemeSettings;
 use ui::{
-    ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, PopoverMenu,
-    PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*, utils::WithRemSize,
+    ContextMenu, ContextMenuEntry, IconButton, PanelHeader, PopoverMenu, PopoverMenuHandle,
+    SectionLabel, Tooltip, prelude::*, utils::WithRemSize,
 };
 use util::ResultExt as _;
 use workspace::{
@@ -129,6 +131,55 @@ const KNOWN_TERMINAL_AGENT_COMMANDS: &[&str] = &[
     "pi",
     "qwen",
 ];
+
+/// How long "Set up <agent>" waits for the agent to be listed (the settings
+/// write, then the fetch of the public agent registry) before it starts the
+/// chat anyway and lets the chat report what is wrong.
+const AGENT_SET_UP_TIMEOUT: Duration = Duration::from_secs(30);
+
+const BUILT_IN_AGENT_NOTE: &str = "Built in · uses the models you connected";
+const EXTERNAL_AGENT_NOTE: &str = "Your own subscription · separate tools and modes";
+
+/// The icon of a row of the "New chat with" chooser.
+#[derive(Clone, Debug, PartialEq)]
+enum NewChatIcon {
+    Named(IconName),
+    /// An icon file an agent ships with.
+    Svg(SharedString),
+}
+
+/// An agent a new chat can start with right away.
+#[derive(Clone, Debug, PartialEq)]
+struct NewChatChoice {
+    agent: Agent,
+    title: SharedString,
+    note: &'static str,
+    icon: NewChatIcon,
+    /// Whether the New chat button starts a chat with this agent.
+    is_default: bool,
+}
+
+/// A subscription agent that is not in the `agent_servers` setting yet.
+#[derive(Clone, Debug, PartialEq)]
+struct AgentToSetUp {
+    id: AgentId,
+    name: &'static str,
+    icon: IconName,
+}
+
+/// What the "New chat with" chooser offers.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct NewChatChoices {
+    agents: Vec<NewChatChoice>,
+    to_set_up: Vec<AgentToSetUp>,
+}
+
+/// "Set up <agent>" in progress: the agent was written to the settings and
+/// the chat starts once it is listed.
+struct PendingAgentSetUp {
+    agent_id: AgentId,
+    _task: Task<()>,
+}
 
 fn is_known_terminal_agent_command(command: &str) -> bool {
     KNOWN_TERMINAL_AGENT_COMMANDS.contains(&command)
@@ -468,6 +519,14 @@ pub fn init(cx: &mut App) {
                         });
                     }
                 })
+                .register_action(|workspace, _: &ToggleHistory, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        panel.update(cx, |panel, cx| {
+                            panel.toggle_history(&ToggleHistory, window, cx);
+                        });
+                    }
+                })
                 .register_action(|_workspace, _: &ResetOnboarding, window, cx| {
                     window.dispatch_action(workspace::RestoreBanner.boxed_clone(), cx);
                     window.refresh();
@@ -648,13 +707,17 @@ pub fn init(cx: &mut App) {
                             return;
                         };
 
-                        let Some(selection) = source.read_selection(workspace, true, cx) else {
-                            return;
-                        };
+                        // Bound to Cmd/Ctrl+L: with nothing selected it only
+                        // opens the chat, instead of attaching the current line.
+                        let selection = source.read_selection(workspace, false, cx);
 
                         if !agent_panel.focus_handle(cx).contains_focused(window, cx) {
                             workspace.toggle_panel_focus::<AgentPanel>(window, cx);
                         }
+
+                        let Some(selection) = selection else {
+                            return;
+                        };
 
                         agent_panel.update(cx, |panel, cx| {
                             panel.last_context_source = Some(source);
@@ -1135,6 +1198,12 @@ pub struct AgentPanel {
     test_terminal_spawn_gate: Option<futures::channel::oneshot::Receiver<()>>,
     new_thread_menu_handle: PopoverMenuHandle<ContextMenu>,
     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
+    history_menu_handle: PopoverMenuHandle<crate::chat_history::ChatHistory>,
+    pending_agent_set_up: Option<PendingAgentSetUp>,
+    /// Set when a menu of the header was asked for by a command, while its
+    /// button may not be on screen yet (the command opens the panel first):
+    /// the header opens the menu once it has been laid out.
+    header_menu_to_open: Cell<Option<HeaderMenu>>,
     _extension_subscription: Option<Subscription>,
     _project_subscription: Subscription,
     zoomed: bool,
@@ -1555,7 +1624,10 @@ impl AgentPanel {
             #[cfg(test)]
             test_terminal_spawn_gate: None,
             new_thread_menu_handle: PopoverMenuHandle::default(),
+            history_menu_handle: PopoverMenuHandle::default(),
             agent_panel_menu_handle: PopoverMenuHandle::default(),
+            pending_agent_set_up: None,
+            header_menu_to_open: Cell::new(None),
 
             _extension_subscription: extension_subscription,
             _project_subscription,
@@ -1751,10 +1823,6 @@ impl AgentPanel {
     }
 
     pub fn new_thread(&mut self, _action: &NewThread, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.has_open_project(cx) {
-            return;
-        }
-
         self.new_thread_with_workspace(None, window, cx);
     }
 
@@ -1778,10 +1846,6 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_open_project(cx) {
-            return;
-        }
-
         self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Thread, cx);
 
         // If the user is viewing a *parked* draft and the ephemeral
@@ -1921,18 +1985,344 @@ impl AgentPanel {
         self.draft_thread = Some(thread.conversation_view);
     }
 
+    /// Starts a chat with the agent the action names. Without an agent, opens
+    /// the "New chat with" chooser.
     pub fn new_external_agent_thread(
         &mut self,
         action: &NewExternalAgentThread,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_open_project(cx) {
+        let Some(agent_id) = action.agent() else {
+            self.open_new_chat_chooser(window, cx);
+            return;
+        };
+        self.start_chat_with(agent_id.clone().into(), window, cx);
+    }
+
+    /// Starts a new chat answered by `agent_id` and makes that agent the one
+    /// the New chat button uses: what the "New chat with" chooser does.
+    ///
+    /// With `set_up_if_missing`, an agent that is not in the `agent_servers`
+    /// setting is first added to it as an agent of the public registry. The
+    /// chat then starts once the agent is listed; its download and its
+    /// sign-in prompt appear in the chat. Without it, a chat with an agent
+    /// that is not set up shows the chat's own error.
+    pub(crate) fn start_chat_with_agent(
+        &mut self,
+        agent_id: AgentId,
+        set_up_if_missing: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let agent = Agent::from(agent_id.clone());
+        if !agent.is_native() && self.project.read(cx).is_via_collab() {
+            return;
+        }
+        // Said before anything is downloaded or written to the settings.
+        if self.needs_folder(&agent, cx) {
+            self.say_folder_needed(&agent, cx);
             return;
         }
 
-        self.selected_agent = action.agent.clone().into();
+        // A newer choice replaces a set-up that is still waiting.
+        self.pending_agent_set_up = None;
+        if set_up_if_missing && !self.agent_is_set_up(&agent, cx) {
+            self.set_up_agent_then_start_chat(agent_id, window, cx);
+        } else {
+            self.start_chat_with(agent, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn start_chat_with(&mut self, agent: Agent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.needs_folder(&agent, cx) {
+            self.say_folder_needed(&agent, cx);
+            return;
+        }
+        self.selected_agent = agent;
         self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
+    }
+
+    fn open_new_chat_chooser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle, cx);
+        self.header_menu_to_open.set(Some(HeaderMenu::NewChatWith));
+        cx.notify();
+    }
+
+    /// Opens History, or closes it when it is open.
+    pub fn toggle_history(
+        &mut self,
+        _: &ToggleHistory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.history_menu_handle.is_deployed() {
+            self.history_menu_handle.hide(cx);
+        } else {
+            window.focus(&self.focus_handle, cx);
+            self.header_menu_to_open.set(Some(HeaderMenu::History));
+            cx.notify();
+        }
+    }
+
+    /// Whether a chat with this agent can start without touching the
+    /// settings: the built-in agent, an agent of the `agent_servers` setting,
+    /// or one the project already lists (a remote project, an extension).
+    fn agent_is_set_up(&self, agent: &Agent, cx: &App) -> bool {
+        let Agent::Custom { id } = agent else {
+            return true;
+        };
+        AllAgentServersSettings::get_global(cx).contains_key(id.0.as_ref())
+            || self.agent_is_listed(id, cx)
+    }
+
+    fn agent_is_listed(&self, id: &AgentId, cx: &App) -> bool {
+        self.project
+            .read(cx)
+            .agent_server_store()
+            .read(cx)
+            .external_agents()
+            .any(|listed| listed == id)
+    }
+
+    /// Whether waiting longer cannot help "Set up <agent>": the agent is
+    /// listed, or the registry has answered (or failed) without it.
+    fn agent_set_up_settled(&self, id: &AgentId, cx: &App) -> bool {
+        self.agent_is_listed(id, cx)
+            || project::AgentRegistryStore::try_global(cx)
+                .is_none_or(|registry| !registry.read(cx).is_fetching())
+    }
+
+    fn set_up_agent_then_start_chat(
+        &mut self,
+        agent_id: AgentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let written = crate::agent_registry_ui::add_registry_agent_to_settings(
+            agent_id.0.to_string(),
+            self.fs.clone(),
+            cx,
+        );
+
+        // The agent is listed after the settings are applied and, the first
+        // time, after the public registry has been fetched: both arrive as
+        // notifications of these two entities.
+        let (changed_tx, mut changed_rx) = futures::channel::mpsc::unbounded::<()>();
+        let agent_server_store = self.project.read(cx).agent_server_store().clone();
+        let store_subscription = cx.subscribe(&agent_server_store, {
+            let changed_tx = changed_tx.clone();
+            move |_, _, _: &project::AgentServersUpdated, _| {
+                changed_tx.unbounded_send(()).ok();
+            }
+        });
+        let registry = project::AgentRegistryStore::try_global(cx);
+        let registry_subscription = registry.as_ref().map(|registry| {
+            cx.observe(registry, move |_, _, _| {
+                changed_tx.unbounded_send(()).ok();
+            })
+        });
+
+        let task = cx.spawn_in(window, {
+            let agent_id = agent_id.clone();
+            async move |this, cx| {
+                use futures::{FutureExt as _, StreamExt as _};
+
+                let _subscriptions = (store_subscription, registry_subscription);
+
+                let written = match written.await {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow!("the settings were not written")),
+                };
+                if let Err(error) = written {
+                    log::error!("could not set up agent {agent_id}: {error:#}");
+                    this.update(cx, |this, cx| {
+                        this.pending_agent_set_up = None;
+                        this.show_agent_set_up_failed(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+
+                // This is the one place where choosing an agent contacts the
+                // public registry: ask for it now when it does not know the
+                // agent, whatever an earlier attempt left behind.
+                this.update(cx, |this, cx| {
+                    if !this.agent_is_listed(&agent_id, cx)
+                        && let Some(registry) = registry
+                        && registry.read(cx).agent(&agent_id).is_none()
+                    {
+                        registry.update(cx, |registry, cx| registry.refresh(cx));
+                    }
+                })
+                .ok();
+
+                let mut timeout = cx.background_executor().timer(AGENT_SET_UP_TIMEOUT).fuse();
+                loop {
+                    let Ok(settled) =
+                        this.read_with(cx, |this, cx| this.agent_set_up_settled(&agent_id, cx))
+                    else {
+                        return;
+                    };
+                    if settled {
+                        break;
+                    }
+                    futures::select_biased! {
+                        changed = changed_rx.next() => {
+                            if changed.is_none() {
+                                break;
+                            }
+                        }
+                        _ = timeout => break,
+                    }
+                }
+
+                // Listed or not, the chat starts: it shows the download, the
+                // sign-in prompt, or what went wrong and how to retry.
+                this.update_in(cx, |this, window, cx| {
+                    this.pending_agent_set_up = None;
+                    this.start_chat_with(Agent::from(agent_id), window, cx);
+                    cx.notify();
+                })
+                .ok();
+            }
+        });
+        self.pending_agent_set_up = Some(PendingAgentSetUp {
+            agent_id,
+            _task: task,
+        });
+    }
+
+    fn show_agent_set_up_failed(&self, cx: &mut Context<Self>) {
+        struct AgentSetUpFailed;
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.show_toast(
+                    workspace::Toast::new(
+                        workspace::notifications::NotificationId::unique::<AgentSetUpFailed>(),
+                        "Could not add the agent to settings.json: check the file for errors.",
+                    )
+                    .autohide(),
+                    cx,
+                );
+            })
+            .ok();
+    }
+
+    /// The name an external agent goes by: its own, the registry's, the one
+    /// of the three subscription agents, else its id.
+    /// The name an external agent is printed with: the header chip, the
+    /// chooser, "Setting up …" and the messages of this panel. The three
+    /// subscription agents have one name in this product, whatever the agent
+    /// or the public registry call them ("Claude Agent" is "Claude Code").
+    fn external_agent_name(&self, id: &AgentId, cx: &App) -> SharedString {
+        let reported = self
+            .project
+            .read(cx)
+            .agent_server_store()
+            .read(cx)
+            .agent_display_name(id)
+            .or_else(|| {
+                project::AgentRegistryStore::try_global(cx)
+                    .and_then(|registry| registry.read(cx).agent(id).map(|a| a.name().clone()))
+            });
+        agent_display_name(id, reported)
+    }
+
+    fn external_agent_icon(&self, id: &AgentId, cx: &App) -> NewChatIcon {
+        self.project
+            .read(cx)
+            .agent_server_store()
+            .read(cx)
+            .agent_icon(id)
+            .or_else(|| {
+                project::AgentRegistryStore::try_global(cx).and_then(|registry| {
+                    registry
+                        .read(cx)
+                        .agent(id)
+                        .and_then(|agent| agent.icon_path().cloned())
+                })
+            })
+            .map(NewChatIcon::Svg)
+            .or_else(|| {
+                SUBSCRIPTION_AGENTS
+                    .iter()
+                    .find(|(known_id, _, _)| *known_id == id.0.as_ref())
+                    .map(|(_, _, icon)| NewChatIcon::Named(*icon))
+            })
+            .unwrap_or(NewChatIcon::Named(IconName::Sparkle))
+    }
+
+    /// The rows of the "New chat with" chooser: the built-in agent, every
+    /// external agent that is set up (by name), then the subscription agents
+    /// that are not.
+    fn new_chat_choices(&self, cx: &App) -> NewChatChoices {
+        // A new chat that opens a terminal has no agent to tick.
+        let default_agent =
+            (!self.should_create_terminal_for_new_entry(cx)).then(|| self.new_chat_agent(cx));
+        let mut choices = NewChatChoices {
+            agents: vec![NewChatChoice {
+                agent: Agent::NativeAgent,
+                title: Agent::NativeAgent.label(),
+                note: BUILT_IN_AGENT_NOTE,
+                icon: NewChatIcon::Named(IconName::AppAssistant),
+                is_default: default_agent == Some(Agent::NativeAgent),
+            }],
+            to_set_up: Vec::new(),
+        };
+
+        let project = self.project.read(cx);
+        // External agents cannot answer in a project shared over a call.
+        if project.is_via_collab() {
+            return choices;
+        }
+
+        let mut ids = AllAgentServersSettings::get_global(cx)
+            .keys()
+            .map(|id| AgentId::new(id.clone()))
+            .chain(
+                project
+                    .agent_server_store()
+                    .read(cx)
+                    .external_agents()
+                    .cloned(),
+            )
+            .collect::<Vec<_>>();
+        ids.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        ids.dedup();
+
+        let mut external = ids
+            .iter()
+            .map(|id| {
+                let agent = Agent::Custom { id: id.clone() };
+                NewChatChoice {
+                    is_default: default_agent.as_ref() == Some(&agent),
+                    agent,
+                    title: self.external_agent_name(id, cx),
+                    note: EXTERNAL_AGENT_NOTE,
+                    icon: self.external_agent_icon(id, cx),
+                }
+            })
+            .collect::<Vec<_>>();
+        external.sort_by_cached_key(|choice| choice.title.to_lowercase());
+        choices.agents.extend(external);
+
+        // A remote project lists the agents of its own machine: writing the
+        // local settings would not set anything up there.
+        if !project.is_via_remote_server() {
+            choices.to_set_up = SUBSCRIPTION_AGENTS
+                .iter()
+                .filter(|(id, _, _)| !ids.iter().any(|listed| listed.0.as_ref() == *id))
+                .map(|(id, name, icon)| AgentToSetUp {
+                    id: AgentId::new(*id),
+                    name,
+                    icon: *icon,
+                })
+                .collect();
+        }
+        choices
     }
 
     fn set_selected_agent_and_persist(&mut self, agent: Agent, cx: &mut Context<Self>) {
@@ -1979,6 +2369,9 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         if !self.supports_terminal(cx) {
+            if !self.has_open_project(cx) {
+                self.show_open_folder_toast("Open a folder to start a terminal in it.", cx);
+            }
             return;
         }
         self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Terminal, cx);
@@ -2013,8 +2406,9 @@ impl AgentPanel {
     }
 
     pub fn should_create_terminal_for_new_entry(&self, cx: &App) -> bool {
-        self.last_created_entry_kind == AgentPanelEntryKind::Terminal
-            && self.project.read(cx).supports_terminal(cx)
+        // Without a folder New chat falls back to a chat: a terminal has
+        // nowhere to start.
+        self.last_created_entry_kind == AgentPanelEntryKind::Terminal && self.supports_terminal(cx)
     }
 
     fn set_last_created_entry_kind_from_user_action(
@@ -2951,15 +3345,71 @@ impl AgentPanel {
             .and_then(|workspace| terminal_view::default_working_directory(workspace.read(cx), cx))
     }
 
+    /// Whether a folder is open. The chat itself does not need one: the
+    /// connection screen and a chat with the built-in agent work in an empty
+    /// window. What does need one says so when it is asked for: an external
+    /// agent ([`Self::needs_folder`]) and a terminal.
     fn has_open_project(&self, cx: &App) -> bool {
         self.project.read(cx).visible_worktrees(cx).next().is_some()
     }
 
-    fn ensure_native_agent_connection(&self, cx: &mut Context<Self>) {
-        if !self.has_open_project(cx) {
-            return;
-        }
+    /// An external agent is a program started in the project's folder; with
+    /// no folder it would be let loose on the home directory.
+    fn needs_folder(&self, agent: &Agent, cx: &App) -> bool {
+        !agent.is_native() && !self.has_open_project(cx)
+    }
 
+    /// The agent a new chat starts with: the selected one, or the built-in
+    /// agent while the selected one cannot run (no folder open, or a shared
+    /// project). The selection itself is kept for the next folder.
+    fn new_chat_agent(&self, cx: &App) -> Agent {
+        let agent = self.selected_agent(cx);
+        if self.needs_folder(&agent, cx) {
+            Agent::NativeAgent
+        } else {
+            agent
+        }
+    }
+
+    fn say_folder_needed(&self, agent: &Agent, cx: &mut App) {
+        let message = match agent {
+            Agent::Custom { id } => format!(
+                "Open a folder to chat with {}: it works on the files of a folder.",
+                self.external_agent_name(id, cx)
+            ),
+            _ => "Open a folder to start this chat.".to_string(),
+        };
+        self.show_open_folder_toast(message, cx);
+    }
+
+    /// Says, where the user asked, that something needs a folder, and offers
+    /// to open one. The chat on screen stays as it is.
+    fn show_open_folder_toast(&self, message: impl Into<SharedString>, cx: &mut App) {
+        let workspace = self.workspace.clone();
+        let message: SharedString = message.into();
+        cx.defer(move |cx| {
+            let Some(workspace) = workspace.upgrade() else {
+                return;
+            };
+            workspace.update(cx, |workspace, cx| {
+                struct FolderNeededToast;
+                workspace.show_toast(
+                    workspace::Toast::new(
+                        workspace::notifications::NotificationId::unique::<FolderNeededToast>(),
+                        message.to_string(),
+                    )
+                    .on_click("Open Folder", |window, cx| {
+                        window.dispatch_action(workspace::Open::default().boxed_clone(), cx);
+                    })
+                    // It sits over the composer: it must not stay there.
+                    .autohide(),
+                    cx,
+                );
+            });
+        });
+    }
+
+    fn ensure_native_agent_connection(&self, cx: &mut Context<Self>) {
         let fs = self.fs.clone();
         let thread_store = self.thread_store.clone();
         self.connection_store.update(cx, |store, cx| {
@@ -2978,10 +3428,6 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_open_project(cx) {
-            return;
-        }
-
         let draft = self.ensure_draft(source, window, cx);
         if let BaseView::AgentThread { conversation_view } = &self.base_view {
             if conversation_view.entity_id() == draft.entity_id() {
@@ -3007,7 +3453,7 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<ConversationView> {
-        let desired_agent = self.selected_agent(cx);
+        let desired_agent = self.new_chat_agent(cx);
         if let Some(draft) = &self.draft_thread {
             let draft_entity = draft.entity_id();
             let agent_matches = *draft.read(cx).agent_key() == desired_agent;
@@ -3356,6 +3802,82 @@ impl AgentPanel {
         }
     }
 
+    /// Past chats of this project for the History list, newest first.
+    pub(crate) fn history_chats(&self, cx: &App) -> Vec<ThreadMetadata> {
+        let Some(store) = ThreadMetadataStore::try_global(cx) else {
+            return Vec::new();
+        };
+        let project = self.project.read(cx);
+        let path_list = project.default_path_list(cx);
+        let remote_connection = project.remote_connection_options(cx);
+        let mut chats = store
+            .read(cx)
+            .entries_for_path(&path_list, remote_connection)
+            .filter(|chat| !chat.is_draft())
+            .cloned()
+            .collect::<Vec<_>>();
+        chats.sort_by_key(|chat| std::cmp::Reverse(chat.updated_at));
+        chats
+    }
+
+    /// Reopens a chat picked in History.
+    pub(crate) fn open_chat(
+        &mut self,
+        chat: &ThreadMetadata,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_agent_thread(
+            Agent::from(chat.agent_id.clone()),
+            chat.thread_id,
+            Some(chat.folder_paths().clone()),
+            chat.title.clone(),
+            true,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+    }
+
+    /// Deletes a chat for good: its row here, and the session its agent keeps.
+    pub(crate) fn delete_chat(
+        &mut self,
+        chat: &ThreadMetadata,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let thread_id = chat.thread_id;
+        let session_id = chat.session_id.clone();
+        self.remove_thread(thread_id, window, cx);
+
+        let agent = Agent::from(chat.agent_id.clone());
+        let server = agent.server(self.fs.clone(), self.thread_store.clone());
+        let connection = self.connection_store.update(cx, |store, cx| {
+            store
+                .request_connection(agent, server, cx)
+                .read(cx)
+                .wait_for_connection()
+        });
+        cx.spawn(async move |_this, cx| {
+            let state = connection.await?;
+            let Some(session_id) = session_id else {
+                return anyhow::Ok(());
+            };
+            let delete = cx.update(|cx| {
+                match state
+                    .connection
+                    .session_list(cx)
+                    .filter(|list| list.supports_delete())
+                {
+                    Some(list) => list.delete_session(&session_id, cx),
+                    None => Task::ready(Ok(())),
+                }
+            });
+            delete.await
+        })
+        .detach_and_log_err(cx);
+    }
+
     pub fn ephemeral_draft_thread_id(&self, cx: &App) -> Option<ThreadId> {
         let draft = self.draft_thread.as_ref()?;
         let draft = draft.read(cx);
@@ -3551,11 +4073,13 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if resume_thread_id.is_none() && !self.has_open_project(cx) {
+        let agent = agent_choice.unwrap_or_else(|| self.new_chat_agent(cx));
+        // A chat from History keeps the folders it was started in.
+        if resume_thread_id.is_none() && self.needs_folder(&agent, cx) {
+            self.say_folder_needed(&agent, cx);
             return;
         }
 
-        let agent = agent_choice.unwrap_or_else(|| self.selected_agent(cx));
         let thread = self.create_agent_thread_with_server(
             agent,
             None,
@@ -3578,8 +4102,8 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         window.dispatch_action(
-            Box::new(zed_actions::OpenSettingsAt {
-                path: zed_actions::AGENT_SKILLS_SETTINGS_PATH.to_string(),
+            Box::new(app_actions::OpenSettingsAt {
+                path: app_actions::AGENT_SKILLS_SETTINGS_PATH.to_string(),
                 target: None,
             }),
             cx,
@@ -3588,10 +4112,6 @@ impl AgentPanel {
 
     /// Refresh the native agent's view of available skills
     pub fn refresh_skills(&mut self, cx: &mut Context<Self>) {
-        if !self.has_open_project(cx) {
-            return;
-        }
-
         self.ensure_native_agent_connection(cx);
         let Some(connect_task) = self.connection_store.update(cx, |store, cx| {
             store
@@ -3645,11 +4165,18 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_open_project(cx) {
+        // Without external agents there is no one to choose: the shortcut
+        // starts a chat.
+        if !crate::show_external_agents() {
+            self.new_thread(&NewThread, window, cx);
             return;
         }
 
-        self.new_thread_menu_handle.toggle(window, cx);
+        if self.new_thread_menu_handle.is_deployed() {
+            self.new_thread_menu_handle.hide(cx);
+        } else {
+            self.open_new_chat_chooser(window, cx);
+        }
     }
 
     pub fn increase_font_size(
@@ -3747,7 +4274,7 @@ impl AgentPanel {
 
     pub(crate) fn open_configuration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.dispatch_action(
-            Box::new(zed_actions::OpenSettingsPage {
+            Box::new(app_actions::OpenSettingsPage {
                 page: "AI".to_string(),
                 target: None,
             }),
@@ -3856,7 +4383,7 @@ impl AgentPanel {
 
     fn load_thread_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.has_open_project(cx) {
-            Self::show_deferred_toast(&self.workspace, "Open a project to load a thread", cx);
+            Self::show_deferred_toast(&self.workspace, "Open a folder to load a chat", cx);
             return;
         }
 
@@ -4355,7 +4882,11 @@ impl AgentPanel {
         if let BaseView::AgentThread { conversation_view } = &self.base_view {
             let conversation_view = conversation_view.read(cx);
             let thread_agent = conversation_view.agent_key().clone();
-            if self.selected_agent != thread_agent {
+            // The built-in agent standing in for an external one while no
+            // folder is open is not the user's choice of agent: theirs is
+            // kept for the next folder.
+            let stands_in = thread_agent.is_native() && self.needs_folder(&self.selected_agent, cx);
+            if self.selected_agent != thread_agent && !stands_in {
                 self.selected_agent = thread_agent;
                 self.serialize(cx);
             }
@@ -4673,7 +5204,11 @@ impl AgentPanel {
         let workspace = self.workspace.clone();
         let project = self.project.clone();
 
-        self.set_selected_agent_and_persist(agent.clone(), cx);
+        // The built-in agent standing in for an external one while no folder
+        // is open is not the user's choice of agent: theirs is kept.
+        if !(agent.is_native() && self.needs_folder(&self.selected_agent, cx)) {
+            self.set_selected_agent_and_persist(agent.clone(), cx);
+        }
 
         let server = server_override
             .unwrap_or_else(|| agent.server(self.fs.clone(), self.thread_store.clone()));
@@ -4859,7 +5394,7 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
         cx.spawn(async move |cx| {
             let agent_choice = match request.agent_id.as_deref() {
                 None => None,
-                Some(id) if id == agent::ZED_AGENT_ID.as_ref() => Some(Agent::NativeAgent),
+                Some(id) if id == agent::IDE_AGENT_ID.as_ref() => Some(Agent::NativeAgent),
                 Some(id) => {
                     // Reject unknown agent ids up front so the model gets a
                     // structured error pointing at `list_agents_and_models`,
@@ -4921,12 +5456,12 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
                 // detached HEAD state — the agent can attach to a branch via
                 // git afterwards.
                 let branch_target = match request.base_ref.as_ref() {
-                    Some(ref_name) => zed_actions::NewWorktreeBranchTarget::ExistingBranch {
+                    Some(ref_name) => app_actions::NewWorktreeBranchTarget::ExistingBranch {
                         name: ref_name.clone(),
                     },
-                    None => zed_actions::NewWorktreeBranchTarget::CurrentBranch,
+                    None => app_actions::NewWorktreeBranchTarget::CurrentBranch,
                 };
-                let action = zed_actions::CreateWorktree {
+                let action = app_actions::CreateWorktree {
                     worktree_name: request.worktree_name.clone(),
                     branch_target,
                 };
@@ -5012,9 +5547,7 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
         let agent_server_store = project.read(cx).agent_server_store().clone();
         let store = agent_server_store.read(cx);
         for agent_id in store.external_agents() {
-            let display = store
-                .agent_display_name(agent_id)
-                .unwrap_or_else(|| agent_id.0.clone());
+            let display = agent_display_name(agent_id, store.agent_display_name(agent_id));
             agents.push(agent::AvailableAgent {
                 id: agent_id.0.to_string(),
                 name: display,
@@ -5073,14 +5606,16 @@ impl Panel for AgentPanel {
         agent_panel_dock_position(cx)
     }
 
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        position != DockPosition::Bottom
+    fn position_is_valid(&self, _position: DockPosition) -> bool {
+        // The chat goes where the user puts it: either side or the bottom.
+        true
     }
 
     fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
         let side = match position {
             DockPosition::Left => "left",
-            DockPosition::Right | DockPosition::Bottom => "right",
+            DockPosition::Right => "right",
+            DockPosition::Bottom => "bottom",
         };
         telemetry::event!("Agent Panel Side Changed", side = side);
         settings::update_settings_file(self.fs.clone(), cx, move |settings, _| {
@@ -5135,11 +5670,15 @@ impl Panel for AgentPanel {
     }
 
     fn icon(&self, _window: &Window, cx: &App) -> Option<IconName> {
-        (self.enabled(cx) && AgentSettings::get_global(cx).button).then_some(IconName::ZedAssistant)
+        (self.enabled(cx) && AgentSettings::get_global(cx).button).then_some(IconName::AppAssistant)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Agent Panel")
+        Some("Chat")
+    }
+
+    fn title(&self, _window: &Window, _cx: &App) -> SharedString {
+        "Chat".into()
     }
 
     fn toggle_action(&self) -> Box<dyn Action> {
@@ -5429,8 +5968,7 @@ impl AgentPanel {
         matches!(
             self.visible_surface(),
             VisibleSurface::AgentThread(_) | VisibleSurface::Terminal(_)
-        ) && self.has_open_project(cx)
-            && !self.is_title_editor_focused(window, cx)
+        ) && !self.is_title_editor_focused(window, cx)
     }
 
     fn render_title_view(&self, window: &mut Window, cx: &Context<Self>) -> AnyElement {
@@ -5450,16 +5988,10 @@ impl AgentPanel {
                     .map(|r| r.read(cx).title_editor.clone())
                 {
                     if is_generating_title {
+                        // Muted until the title arrives; nothing pulses.
                         Label::new(server_view_ref.title(cx))
                             .color(Color::Muted)
                             .truncate()
-                            .with_animation(
-                                "generating_title",
-                                Animation::new(Duration::from_secs(2))
-                                    .repeat()
-                                    .with_easing(pulsating_between(0.4, 0.8)),
-                                |label, delta| label.alpha(delta),
-                            )
                             .into_any_element()
                     } else {
                         let editable_title = div()
@@ -5524,7 +6056,6 @@ impl AgentPanel {
                     }
                 } else {
                     Label::new(conversation_view.read(cx).title(cx))
-                        .color(Color::Muted)
                         .truncate()
                         .into_any_element()
                 }
@@ -5560,7 +6091,7 @@ impl AgentPanel {
                             .flex_1()
                             .cursor_text()
                             .overflow_x_scroll()
-                            .child(Label::new(title).color(Color::Muted).single_line())
+                            .child(Label::new(title).single_line())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.edit_terminal_title(terminal_id, window, cx);
                             }))
@@ -5571,18 +6102,8 @@ impl AgentPanel {
                 }
             }
 
-            VisibleSurface::Uninitialized => Label::new("Agent").truncate().into_any_element(),
+            VisibleSurface::Uninitialized => Label::new("New Chat").truncate().into_any_element(),
         };
-
-        let toolbar_bg = cx.theme().colors().tab_bar_background;
-        let gradient_overlay = GradientFade::new(toolbar_bg, toolbar_bg, toolbar_bg)
-            .width(px(64.0))
-            .right(px(0.0))
-            .gradient_stop(0.75);
-        // The fade gradient renders as a visible patch on transparent windows
-        // (the title already truncates).
-        let opaque_window =
-            cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
 
         h_flex()
             .key_context("TitleEditor")
@@ -5594,20 +6115,23 @@ impl AgentPanel {
             .overflow_x_hidden()
             .child(content)
             .when(self.should_show_title_edit(window, cx), |this| {
-                this.when(opaque_window, |this| this.child(gradient_overlay))
-                    .child(
-                        h_flex()
-                            .visible_on_hover("title_editor")
-                            .absolute()
-                            .right_0()
-                            .h_full()
-                            .bg(cx.theme().colors().tab_bar_background)
-                            .child(
-                                IconButton::new("edit_tile", IconName::Pencil)
-                                    .icon_size(IconSize::Small)
-                                    .tooltip(Tooltip::text("Edit Thread Title")),
-                            ),
-                    )
+                // The pencil covers the end of a long title on the header's
+                // own ground; the title itself truncates, nothing fades.
+                this.child(
+                    h_flex()
+                        .visible_on_hover("title_editor")
+                        .absolute()
+                        .right_0()
+                        .h_full()
+                        .pl_1()
+                        .bg(cx.theme().colors().background)
+                        .child(
+                            IconButton::new("edit_tile", IconName::Pencil)
+                                .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
+                                .tooltip(Tooltip::text("Edit Title")),
+                        ),
+                )
             })
             .into_any()
     }
@@ -5615,7 +6139,7 @@ impl AgentPanel {
     fn show_no_thread_summary_model_toast(workspace: Entity<Workspace>, cx: &mut App) {
         workspace.update(cx, |workspace, cx| {
             let toast = StatusToast::new(
-                "No model is configured for summarizing thread titles.",
+                "No model is set up to write chat titles.",
                 cx,
                 |this, _cx| {
                     this.icon(
@@ -5649,10 +6173,11 @@ impl AgentPanel {
 
     fn render_panel_options_menu(
         &self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
+        let is_full_screen = self.is_zoomed(window, cx);
         // Resolve menu shortcuts at the thread root; the active editor can
         // shadow panel-level commands such as ManageSkills.
         let menu_action_context = match &self.base_view {
@@ -5679,39 +6204,35 @@ impl AgentPanel {
                         .is_some_and(|thread| !thread.read(cx).is_generating_title())
             });
 
-        let has_thread_messages = conversation_view.as_ref().is_some_and(|conversation_view| {
-            conversation_view.read(cx).has_user_submitted_prompt(cx)
-        });
-
-        let has_auth_methods = match &self.base_view {
-            BaseView::AgentThread { conversation_view } => {
-                conversation_view.read(cx).has_auth_methods()
-            }
-            _ => false,
-        };
-        let supports_logout = self
-            .active_conversation_view()
+        // Sign-in and restart belong to external agents; the built-in agent
+        // has neither.
+        let external_conversation_view = conversation_view
+            .clone()
+            .filter(|conversation_view| !conversation_view.read(cx).agent_key().is_native());
+        let has_auth_methods = external_conversation_view
+            .as_ref()
+            .is_some_and(|conversation_view| conversation_view.read(cx).has_auth_methods());
+        let supports_logout = external_conversation_view
+            .as_ref()
             .is_some_and(|conversation_view| conversation_view.read(cx).supports_logout());
 
-        let project_agents_md_path = project_agents_md_path(&self.project, true, cx);
-
-        let global_agents_md_loaded = UserAgentsMd::global(cx)
-            .and_then(|md| md.content())
-            .is_some();
+        // Rules are read by the built-in agent only: an external agent and a
+        // terminal read their own files.
+        let offers_rules = !showing_terminal && external_conversation_view.is_none();
+        let has_project_rules = project_agents_md_path(&self.project, true, cx).is_some();
+        let sandbox_state = self.sandbox_state(cx);
 
         let workspace = self.workspace.clone();
+        let fs = self.fs.clone();
 
         PopoverMenu::new("agent-options-menu")
             .trigger_with_tooltip(
                 IconButton::new("agent-options-menu", IconName::Ellipsis)
-                    .icon_size(IconSize::Small),
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .aria_label("More"),
                 move |_window, cx| {
-                    Tooltip::for_action_in(
-                        "Toggle Agent Menu",
-                        &ToggleOptionsMenu,
-                        &focus_handle,
-                        cx,
-                    )
+                    Tooltip::for_action_in("More", &ToggleOptionsMenu, &focus_handle, cx)
                 },
             )
             .anchor(Anchor::TopRight)
@@ -5721,145 +6242,48 @@ impl AgentPanel {
                     Some(ContextMenu::build(window, cx, |mut menu, _window, cx| {
                         menu = menu.context(menu_action_context.clone());
 
-                        if has_thread_messages {
-                            menu = menu.header("Current Thread");
-
-                            if let Some(conversation_view) = conversation_view.as_ref() {
-                                if can_regenerate_thread_title {
-                                    menu = menu.entry("Regenerate Thread Title", None, {
-                                        let conversation_view = conversation_view.clone();
-                                        let workspace = workspace.clone();
-                                        move |_, cx| {
-                                            Self::handle_regenerate_thread_title(
-                                                conversation_view.clone(),
-                                                workspace.clone(),
-                                                cx,
-                                            );
+                        // Rules…, Regenerate Title
+                        if offers_rules {
+                            let workspace = workspace.clone();
+                            menu = menu.entry("Rules…", None, move |window, cx| {
+                                workspace
+                                    .update(cx, |workspace, cx| {
+                                        // The project's AGENTS.md when it has
+                                        // one, else the user's own rules.
+                                        if has_project_rules {
+                                            open_project_rules(workspace, window, cx);
+                                        } else {
+                                            open_global_rules(workspace, window, cx);
                                         }
-                                    });
-                                }
-
-                                let root_thread_view =
-                                    conversation_view.read(cx).root_thread_view();
-                                if let Some(thread_view) = root_thread_view {
-                                    let workspace = workspace.clone();
-                                    menu = menu.entry("Open Thread as Markdown", None, {
-                                        move |window, cx| {
-                                            if let Some(workspace) = workspace.upgrade() {
-                                                thread_view.update(cx, |thread_view, cx| {
-                                                    thread_view
-                                                        .open_thread_as_markdown(
-                                                            workspace, window, cx,
-                                                        )
-                                                        .detach_and_log_err(cx);
-                                                });
-                                            }
-                                        }
-                                    });
-                                }
-
-                                menu = menu.separator();
-                            }
+                                    })
+                                    .log_err();
+                            });
                         }
-
-                        if !showing_terminal {
-                            menu = menu
-                                .header("MCP Servers")
-                                .action(
-                                    "Add Server…",
-                                    Box::new(zed_actions::OpenSettingsAt {
-                                        path: "context_servers".to_string(),
-                                        target: None,
-                                    }),
-                                )
-                                .action(
-                                    "Install New Servers…",
-                                    Box::new(zed_actions::Extensions {
-                                        category_filter: Some(
-                                            zed_actions::ExtensionCategoryFilter::ContextServers,
-                                        ),
-                                        id: None,
-                                    }),
-                                )
-                                .separator()
-                                .header("Context")
-                                .action("Skills", Box::new(ManageSkills));
-
-                            if project_agents_md_path.is_some() || global_agents_md_loaded {
-                                if global_agents_md_loaded {
-                                    let workspace = workspace.clone();
-
-                                    menu = menu.custom_entry(
-                                        |_window, _cx| {
-                                            h_flex()
-                                                .w_full()
-                                                .gap_1()
-                                                .child(Label::new("Open Global Rules"))
-                                                .child(
-                                                    Label::new("(AGENTS.md)")
-                                                        .color(Color::Muted)
-                                                        .size(LabelSize::Small),
-                                                )
-                                                .into_any_element()
-                                        },
-                                        move |window, cx| {
-                                            workspace
-                                                .update(cx, |workspace, cx| {
-                                                    open_global_rules(workspace, window, cx);
-                                                })
-                                                .log_err();
-                                        },
+                        if can_regenerate_thread_title
+                            && let Some(conversation_view) = conversation_view.as_ref()
+                        {
+                            menu = menu.entry("Regenerate Title", None, {
+                                let conversation_view = conversation_view.clone();
+                                let workspace = workspace.clone();
+                                move |_, cx| {
+                                    Self::handle_regenerate_thread_title(
+                                        conversation_view.clone(),
+                                        workspace.clone(),
+                                        cx,
                                     );
                                 }
+                            });
+                        }
 
-                                if project_agents_md_path.is_some() {
-                                    let workspace = workspace.clone();
-                                    menu = menu.custom_entry(
-                                        |_window, _cx| {
-                                            h_flex()
-                                                .w_full()
-                                                .gap_1()
-                                                .child(Label::new("Open Project Rules"))
-                                                .child(
-                                                    Label::new("(AGENTS.md)")
-                                                        .color(Color::Muted)
-                                                        .size(LabelSize::Small),
-                                                )
-                                                .into_any_element()
-                                        },
-                                        move |window, cx| {
-                                            workspace
-                                                .update(cx, |workspace, cx| {
-                                                    open_project_rules(workspace, window, cx);
-                                                })
-                                                .log_err();
-                                        },
-                                    );
-                                }
+                        // An external agent's own account and process.
+                        if let Some(conversation_view) = external_conversation_view.as_ref() {
+                            if has_auth_methods {
+                                menu = menu.action("Sign In Again", Box::new(ReauthenticateAgent));
                             }
-
-                            menu = menu
-                                .separator()
-                                .action("Profiles", Box::new(ManageProfiles::default()));
-                        }
-
-                        menu = menu
-                            .action("Settings", Box::new(OpenSettings))
-                            .separator()
-                            .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
-
-                        if has_auth_methods || supports_logout {
-                            menu = menu.separator()
-                        }
-                        if has_auth_methods {
-                            menu = menu.action("Reauthenticate", Box::new(ReauthenticateAgent))
-                        }
-                        if supports_logout {
-                            menu = menu.action("Log Out", Box::new(LogoutAgent))
-                        }
-
-                        if let Some(conversation_view) = conversation_view.as_ref() {
-                            menu = menu.entry("Reload Agent", None, {
+                            if supports_logout {
+                                menu = menu.action("Sign Out", Box::new(LogoutAgent));
+                            }
+                            menu = menu.entry("Restart Agent", None, {
                                 let conversation_view = conversation_view.clone();
                                 move |window, cx| {
                                     conversation_view.update(cx, |conversation_view, cx| {
@@ -5869,406 +6293,353 @@ impl AgentPanel {
                             });
                         }
 
-                        menu
+                        if offers_rules
+                            || can_regenerate_thread_title
+                            || external_conversation_view.is_some()
+                        {
+                            menu = menu.separator();
+                        }
+
+                        // Connections…, Chat Settings…
+                        menu = menu
+                            .action("Connections…", Box::new(crate::ManageProviders))
+                            .action("Chat Settings…", Box::new(OpenSettings));
+                        // The way back from "Allow All" on a tool request.
+                        // An external agent decides by itself when to ask.
+                        if offers_rules {
+                            let asks = crate::asks_before_using_tools(cx);
+                            let fs = fs.clone();
+                            menu = menu.toggleable_entry(
+                                "Ask Before Using Tools",
+                                asks,
+                                IconPosition::End,
+                                None,
+                                move |_window, cx| {
+                                    crate::set_ask_before_using_tools(!asks, fs.clone(), cx);
+                                },
+                            );
+                        }
+                        if let Some(sandbox_state) = sandbox_state {
+                            menu = menu.action(
+                                match sandbox_state {
+                                    SandboxState::On => "Sandbox: On…",
+                                    SandboxState::Off | SandboxState::OffForThisChat => {
+                                        "Sandbox: Off…"
+                                    }
+                                },
+                                Box::new(app_actions::OpenSettingsAt {
+                                    path: app_actions::AGENT_SANDBOX_SETTINGS_PATH.to_string(),
+                                    target: None,
+                                }),
+                            );
+                        }
+                        if crate::show_threads_sidebar_entry() {
+                            menu = menu
+                                .action("Toggle Chats Sidebar", Box::new(ToggleWorkspaceSidebar));
+                        }
+
+                        // Full Screen
+                        menu.separator().action(
+                            if is_full_screen {
+                                "Exit Full Screen"
+                            } else {
+                                "Full Screen"
+                            },
+                            Box::new(ToggleZoom),
+                        )
                     }))
                 }
             })
     }
 
-    fn render_no_project_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let focus_handle = self.focus_handle(cx);
-
-        ProjectEmptyState::new(
-            "Agent Panel",
-            focus_handle.clone(),
-            KeyBinding::for_action_in(&workspace::Open::default(), &focus_handle, cx),
-        )
-        .on_open_project(|_, window, cx| {
-            telemetry::event!("Agent Panel Add Project Clicked");
-            window.dispatch_action(workspace::Open::default().boxed_clone(), cx);
-        })
-        .on_clone_repo(|_, window, cx| {
-            telemetry::event!("Agent Panel Clone Repo Clicked");
-            window.dispatch_action(git::Clone.boxed_clone(), cx);
+    /// The command sandbox of the built-in agent in the active chat, when
+    /// this platform has one.
+    fn sandbox_state(&self, cx: &App) -> Option<SandboxState> {
+        let thread = self
+            .active_conversation_view()?
+            .read(cx)
+            .as_native_thread(cx)?;
+        let (settings_sandbox, chat_sandbox) = thread.read(cx).sandbox_status(cx)?;
+        Some(if settings_sandbox.is_unsandboxed() {
+            SandboxState::Off
+        } else if chat_sandbox.is_unsandboxed() {
+            SandboxState::OffForThisChat
+        } else {
+            SandboxState::On
         })
     }
 
-    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let agent_server_store = self.project.read(cx).agent_server_store().clone();
-
+    /// Builds the "New chat with" chooser: who answers a new chat.
+    fn new_chat_menu_builder(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&mut Window, &mut App) -> Option<Entity<ContextMenu>> + 'static {
+        let panel = cx.weak_entity();
         let focus_handle = self.focus_handle(cx);
 
-        let can_create_entries = self.has_open_project(cx);
-        let supports_terminal = self.supports_terminal(cx);
+        move |window, cx| {
+            let choices = panel
+                .read_with(cx, |panel, cx| panel.new_chat_choices(cx))
+                .ok()?;
+            let panel = panel.clone();
+            let focus_handle = focus_handle.clone();
+
+            Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                menu = menu.context(focus_handle).custom_row(|_, _| {
+                    div()
+                        .py_0p5()
+                        .child(SectionLabel::new("New chat with"))
+                        .into_any_element()
+                });
+
+                for choice in choices.agents {
+                    let agent_id = choice.agent.id();
+                    let panel = panel.clone();
+                    menu = menu.custom_entry(
+                        move |_, _| render_new_chat_choice(&choice),
+                        move |window, cx| {
+                            panel
+                                .update(cx, |panel, cx| {
+                                    panel.start_chat_with_agent(
+                                        agent_id.clone(),
+                                        false,
+                                        window,
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                        },
+                    );
+                }
+
+                if !choices.to_set_up.is_empty() {
+                    menu = menu.separator();
+                }
+                for agent in choices.to_set_up {
+                    let panel = panel.clone();
+                    menu = menu.item(
+                        ContextMenuEntry::new(format!("Set Up {}…", agent.name))
+                            .icon(agent.icon)
+                            .icon_color(Color::Muted)
+                            .handler(move |window, cx| {
+                                panel
+                                    .update(cx, |panel, cx| {
+                                        panel.start_chat_with_agent(
+                                            agent.id.clone(),
+                                            true,
+                                            window,
+                                            cx,
+                                        );
+                                    })
+                                    .ok();
+                            }),
+                    );
+                }
+
+                // The same icon as the activity bar's Connections button.
+                menu.separator().item(
+                    ContextMenuEntry::new("Connections…")
+                        .icon(IconName::Link)
+                        .icon_color(Color::Muted)
+                        .action(Box::new(crate::ManageProviders))
+                        .handler(|window, cx| {
+                            window.dispatch_action(Box::new(crate::ManageProviders), cx);
+                        }),
+                )
+            }))
+        }
+    }
+
+    /// The header: the chat's title, then New chat with its chooser, History
+    /// and More. Built on the header every panel uses, so its line continues
+    /// the one under the editor tabs.
+    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus_handle = self.focus_handle(cx);
         let showing_terminal = matches!(self.visible_surface(), VisibleSurface::Terminal(_));
 
-        let (selected_agent_custom_icon, selected_agent_label) = if showing_terminal {
-            (None, SharedString::from("Terminal"))
-        } else if let Agent::Custom { id, .. } = &self.selected_agent {
-            let store = agent_server_store.read(cx);
-            let icon = store.agent_icon(&id);
-
-            let label = store
-                .agent_display_name(&id)
-                .unwrap_or_else(|| self.selected_agent.label());
-            (icon, label)
+        // Who answers, said only when it is not the built-in agent.
+        let answered_by = if showing_terminal {
+            Some(SharedString::new_static("Terminal"))
         } else {
-            (None, self.selected_agent.label())
-        };
-
-        let new_thread_menu_builder: Rc<
-            dyn Fn(&mut Window, &mut App) -> Option<Entity<ContextMenu>>,
-        > = {
-            let selected_agent = self.selected_agent.clone();
-            let is_agent_selected = move |agent: Agent| selected_agent == agent;
-
-            let workspace = self.workspace.clone();
-            let is_via_collab = workspace
-                .update(cx, |workspace, cx| {
-                    workspace.project().read(cx).is_via_collab()
-                })
-                .unwrap_or_default();
-
-            let focus_handle = focus_handle.clone();
-            let agent_server_store = agent_server_store;
-
-            Rc::new(move |window, cx| {
-                Some(ContextMenu::build(window, cx, |menu, _window, cx| {
-                    menu.context(focus_handle.clone())
-                        .item(
-                            ContextMenuEntry::new("Zed Agent")
-                                .when(
-                                    !showing_terminal && is_agent_selected(Agent::NativeAgent),
-                                    |this| this.action(Box::new(NewThread)),
-                                )
-                                .icon(IconName::ZedAgent)
-                                .icon_color(Color::Muted)
-                                .handler({
-                                    let workspace = workspace.clone();
-                                    move |window, cx| {
-                                        if let Some(workspace) = workspace.upgrade() {
-                                            workspace.update(cx, |workspace, cx| {
-                                                if let Some(panel) =
-                                                    workspace.panel::<AgentPanel>(cx)
-                                                {
-                                                    panel.update(cx, |panel, cx| {
-                                                        panel.selected_agent = Agent::NativeAgent;
-                                                        panel.activate_new_thread(
-                                                            true,
-                                                            AgentThreadSource::AgentPanel,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                            });
-                                        }
-                                    }
-                                }),
-                        )
-                        .when(supports_terminal, |menu| {
-                            menu.item(
-                                ContextMenuEntry::new("Terminal")
-                                    .when(showing_terminal, |this| this.action(Box::new(NewThread)))
-                                    .when(!showing_terminal, |this| {
-                                        this.action(Box::new(NewTerminalThread))
-                                    })
-                                    .icon(IconName::Terminal)
-                                    .icon_color(Color::Muted)
-                                    .handler({
-                                        let workspace = workspace.clone();
-                                        move |window, cx| {
-                                            if let Some(workspace) = workspace.upgrade() {
-                                                workspace.update(cx, |workspace, cx| {
-                                                    if let Some(panel) =
-                                                        workspace.panel::<AgentPanel>(cx)
-                                                    {
-                                                        panel.update(cx, |panel, cx| {
-                                                            panel.new_terminal(
-                                                                Some(workspace),
-                                                                AgentThreadSource::AgentPanel,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        });
-                                                    }
-                                                });
-                                            }
-                                        }
-                                    }),
-                            )
-                        })
-                        .map(|mut menu| {
-                            let agent_server_store = agent_server_store.read(cx);
-                            let registry_store = project::AgentRegistryStore::try_global(cx);
-                            let registry_store_ref = registry_store.as_ref().map(|s| s.read(cx));
-
-                            struct AgentMenuItem {
-                                id: AgentId,
-                                display_name: SharedString,
-                            }
-
-                            let agent_items = agent_server_store
-                                .external_agents()
-                                .map(|agent_id| {
-                                    let display_name = agent_server_store
-                                        .agent_display_name(agent_id)
-                                        .or_else(|| {
-                                            registry_store_ref
-                                                .as_ref()
-                                                .and_then(|store| store.agent(agent_id))
-                                                .map(|a| a.name().clone())
-                                        })
-                                        .unwrap_or_else(|| agent_id.0.clone());
-                                    AgentMenuItem {
-                                        id: agent_id.clone(),
-                                        display_name,
-                                    }
-                                })
-                                .sorted_unstable_by_key(|e| e.display_name.to_lowercase())
-                                .collect::<Vec<_>>();
-
-                            if !agent_items.is_empty() {
-                                menu = menu.separator().header("External Agents");
-                            }
-                            for item in &agent_items {
-                                let mut entry = ContextMenuEntry::new(item.display_name.clone());
-
-                                let icon_path =
-                                    agent_server_store.agent_icon(&item.id).or_else(|| {
-                                        registry_store_ref
-                                            .as_ref()
-                                            .and_then(|store| store.agent(&item.id))
-                                            .and_then(|a| a.icon_path().cloned())
-                                    });
-
-                                if let Some(icon_path) = icon_path {
-                                    entry = entry.custom_icon_svg(icon_path);
-                                } else {
-                                    entry = entry.icon(IconName::Sparkle);
-                                }
-
-                                entry = entry
-                                    .when(
-                                        !showing_terminal
-                                            && is_agent_selected(Agent::Custom {
-                                                id: item.id.clone(),
-                                            }),
-                                        |this| this.action(Box::new(NewThread)),
-                                    )
-                                    .icon_color(Color::Muted)
-                                    .disabled(is_via_collab)
-                                    .handler({
-                                        let workspace = workspace.clone();
-                                        let agent_id = item.id.clone();
-                                        move |window, cx| {
-                                            if let Some(workspace) = workspace.upgrade() {
-                                                workspace.update(cx, |workspace, cx| {
-                                                    if let Some(panel) =
-                                                        workspace.panel::<AgentPanel>(cx)
-                                                    {
-                                                        panel.update(cx, |panel, cx| {
-                                                            panel.new_external_agent_thread(
-                                                                &NewExternalAgentThread {
-                                                                    agent: agent_id.clone(),
-                                                                },
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        });
-                                                    }
-                                                });
-                                            }
-                                        }
-                                    });
-
-                                menu = menu.item(entry);
-                            }
-
-                            menu
-                        })
-                        .separator()
-                        .item(
-                            ContextMenuEntry::new("Add More Agents")
-                                .icon(IconName::Plus)
-                                .icon_color(Color::Muted)
-                                .handler({
-                                    move |window, cx| {
-                                        window
-                                            .dispatch_action(Box::new(zed_actions::AcpRegistry), cx)
-                                    }
-                                }),
-                        )
-                }))
-            })
-        };
-
-        let is_thread_loading = self
-            .active_conversation_view()
-            .map(|thread| thread.read(cx).is_loading())
-            .unwrap_or(false);
-
-        let has_custom_icon = selected_agent_custom_icon.is_some();
-        let selected_agent_builtin_icon = if showing_terminal {
-            Some(IconName::Terminal)
-        } else {
-            self.selected_agent.icon()
-        };
-        let selected_agent_label_for_tooltip = selected_agent_label.clone();
-
-        let selected_agent = div()
-            .id("selected_agent_icon")
-            .px_0p5()
-            .when_some(selected_agent_custom_icon, |this, icon_path| {
-                this.child(
-                    Icon::from_external_svg(icon_path)
-                        .color(Color::Muted)
-                        .size(IconSize::Small),
+            self.active_conversation_view()
+                .and_then(
+                    |conversation_view| match conversation_view.read(cx).agent_key() {
+                        Agent::Custom { id } => Some(self.external_agent_name(id, cx)),
+                        _ => None,
+                    },
                 )
-            })
-            .when(!has_custom_icon, |this| {
-                this.when_some(selected_agent_builtin_icon, |this, icon| {
-                    this.child(Icon::new(icon).color(Color::Muted))
-                })
-            })
-            .tooltip(move |_, cx| {
-                Tooltip::with_meta(
-                    selected_agent_label_for_tooltip.clone(),
-                    None,
-                    "Selected Agent",
-                    cx,
+        };
+
+        let title = if let Some(pending) = &self.pending_agent_set_up {
+            Label::new(format!(
+                "Setting up {}…",
+                self.external_agent_name(&pending.agent_id, cx)
+            ))
+            .color(Color::Muted)
+            .truncate()
+            .into_any_element()
+        } else if matches!(self.base_view, BaseView::Terminal { .. })
+            || self.active_thread_has_messages(cx)
+        {
+            self.render_title_view(window, cx)
+        } else {
+            Label::new("New Chat").truncate().into_any_element()
+        };
+
+        let title_slot = h_flex()
+            // The header sizes its title to the content, and an editable
+            // title has no width of its own: claim the row and let the
+            // header shrink this to what the buttons leave.
+            .w(px(4096.))
+            .min_w_0()
+            .overflow_hidden()
+            .gap_2()
+            .child(title)
+            .when_some(answered_by, |this, name| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .px_1p5()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .child(SectionLabel::new(name)),
                 )
             });
 
-        let selected_agent = if is_thread_loading {
-            selected_agent
-                .with_animation(
-                    "pulsating-icon",
-                    Animation::new(Duration::from_secs(1))
-                        .repeat()
-                        .with_easing(pulsating_between(0.2, 0.6)),
-                    |icon, delta| icon.opacity(delta),
-                )
-                .into_any_element()
-        } else {
-            selected_agent.into_any_element()
-        };
+        let mut header = PanelHeader::new("Chat")
+            .id("agent-panel-toolbar")
+            .title_slot(title_slot);
 
-        enum ToolbarMode {
-            Terminal,
-            EmptyThread,
-            ActiveThread,
-        }
-
-        let mode = if matches!(self.base_view, BaseView::Terminal { .. }) {
-            ToolbarMode::Terminal
-        } else if self.active_thread_has_messages(cx) {
-            ToolbarMode::ActiveThread
-        } else {
-            ToolbarMode::EmptyThread
-        };
-
-        let is_full_screen = self.is_zoomed(window, cx);
-        let (icon_name, tooltip_text) = if is_full_screen {
-            (IconName::Minimize, "Disable Full Screen")
-        } else {
-            (IconName::Maximize, "Enable Full Screen")
-        };
-        let full_screen_button = IconButton::new("toggle-full-screen", icon_name)
-            .icon_size(IconSize::Small)
-            .toggle_state(is_full_screen)
-            .tooltip(move |_, cx| Tooltip::for_action(tooltip_text, &ToggleZoom, cx))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.toggle_zoom(&ToggleZoom, window, cx);
-            }));
-
-        let max_content_width = AgentSettings::get_global(cx).max_content_width;
-
-        let base_container = h_flex()
-            .size_full()
-            .when(
-                matches!(mode, ToolbarMode::EmptyThread | ToolbarMode::ActiveThread),
-                |this| this.when_some(max_content_width, |this, max_w| this.max_w(max_w).mx_auto()),
-            )
-            .flex_none()
-            .justify_between();
-
-        let empty_thread_title = matches!(mode, ToolbarMode::EmptyThread).then(|| {
-            Label::new(format!("New {} Thread", selected_agent_label))
-                .color(Color::Muted)
-                .truncate()
-                .into_any_element()
-        });
-
-        let toolbar_content = {
-            let new_thread_menu = PopoverMenu::new("new_thread_menu")
-                .trigger_with_tooltip(
-                    IconButton::new("new_thread_menu_btn", IconName::Plus)
-                        .icon_size(IconSize::Small),
-                    {
-                        move |_window, cx| {
-                            Tooltip::for_action_in(
-                                "New Thread\u{2026}",
-                                &ToggleNewThreadMenu,
-                                &focus_handle,
-                                cx,
-                            )
-                        }
-                    },
-                )
-                .anchor(Anchor::TopRight)
-                .with_handle(self.new_thread_menu_handle.clone())
-                .menu(move |window, cx| new_thread_menu_builder(window, cx));
-
-            let sandbox_status = self
+        // The sandbox lives in the More menu. It comes up here only when it
+        // is off for this chat although the settings ask for it.
+        if self.sandbox_state(cx) == Some(SandboxState::OffForThisChat)
+            && let Some(sandbox_status) = self
                 .active_conversation_view()
                 .and_then(|conversation_view| conversation_view.read(cx).root_thread_view())
                 .and_then(|thread_view| {
                     thread_view.update(cx, |thread_view, cx| thread_view.render_sandbox_status(cx))
-                });
+                })
+        {
+            header = header.end_slot(sandbox_status);
+        }
 
-            base_container
-                .child(
-                    h_flex()
-                        .relative()
-                        .h_full()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .gap(DynamicSpacing::Base04.rems(cx))
-                        .pl(DynamicSpacing::Base04.rems(cx))
-                        .child(selected_agent.into_any_element())
-                        .child(match empty_thread_title {
-                            Some(title) => title,
-                            None => self.render_title_view(window, cx),
-                        }),
-                )
-                .child(
-                    h_flex()
-                        .px_1()
-                        .h_full()
-                        .flex_none()
-                        .gap_1()
-                        .children(sandbox_status)
-                        .when(can_create_entries, |this| this.child(new_thread_menu))
-                        .child(full_screen_button)
-                        .child(self.render_panel_options_menu(window, cx)),
-                )
-                .into_any_element()
-        };
+        {
+            // Said in the tooltip when New chat is answered by someone else
+            // than the built-in agent.
+            let new_chat_meta = if self.should_create_terminal_for_new_entry(cx) {
+                Some(SharedString::new_static("Opens a terminal"))
+            } else {
+                match self.new_chat_agent(cx) {
+                    Agent::Custom { id } => Some(SharedString::from(format!(
+                        "Answered by {}",
+                        self.external_agent_name(&id, cx)
+                    ))),
+                    _ => None,
+                }
+            };
+            let new_chat = IconButton::new("new-chat", IconName::Plus)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .aria_label("New Chat")
+                .tooltip({
+                    let focus_handle = focus_handle.clone();
+                    move |_window, cx| match &new_chat_meta {
+                        Some(meta) => Tooltip::with_meta_in(
+                            "New Chat",
+                            Some(&NewThread),
+                            meta.clone(),
+                            &focus_handle,
+                            cx,
+                        ),
+                        None => Tooltip::for_action_in("New Chat", &NewThread, &focus_handle, cx),
+                    }
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.new_thread(&NewThread, window, cx);
+                }));
 
-        h_flex()
-            .id("agent-panel-toolbar")
-            .h(Tab::container_height(cx))
-            .flex_shrink_0()
-            .max_w_full()
-            .bg(cx.theme().colors().tab_bar_background)
-            .border_b_1()
-            .border_color(cx.theme().colors().border)
-            .child(toolbar_content)
+            // One control in two parts: the caret chooses who answers.
+            let chooser = crate::show_external_agents().then(|| {
+                if self.header_menu_to_open.get() == Some(HeaderMenu::NewChatWith) {
+                    self.header_menu_to_open.set(None);
+                    // The menu's button is laid out by the end of this frame.
+                    let handle = self.new_thread_menu_handle.clone();
+                    window.defer(cx, move |window, cx| handle.show(window, cx));
+                }
+
+                let focus_handle = focus_handle.clone();
+                PopoverMenu::new("new-chat-with-menu")
+                    .trigger_with_tooltip(
+                        IconButton::new("new-chat-with", IconName::ChevronDown)
+                            .icon_size(IconSize::XSmall)
+                            .icon_color(Color::Muted)
+                            .width(rems_from_px(14_f32))
+                            .aria_label("New Chat With"),
+                        move |_window, cx| {
+                            Tooltip::for_action_in(
+                                "New Chat With…",
+                                &ToggleNewThreadMenu,
+                                &focus_handle,
+                                cx,
+                            )
+                        },
+                    )
+                    .anchor(Anchor::TopRight)
+                    .with_handle(self.new_thread_menu_handle.clone())
+                    .menu(self.new_chat_menu_builder(cx))
+            });
+
+            header = header.end_slot(h_flex().child(new_chat).children(chooser));
+        }
+
+        if self.header_menu_to_open.get() == Some(HeaderMenu::History) {
+            self.header_menu_to_open.set(None);
+            let handle = self.history_menu_handle.clone();
+            window.defer(cx, move |window, cx| handle.show(window, cx));
+        }
+
+        let panel = cx.weak_entity();
+        let history_focus_handle = focus_handle;
+        header = header
+            .end_slot(
+                PopoverMenu::new("chat-history-menu")
+                    .trigger_with_tooltip(
+                        IconButton::new("chat-history", IconName::Clock)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .aria_label("History"),
+                        move |_window, cx| {
+                            Tooltip::for_action_in(
+                                "History",
+                                &ToggleHistory,
+                                &history_focus_handle,
+                                cx,
+                            )
+                        },
+                    )
+                    .anchor(Anchor::TopRight)
+                    .with_handle(self.history_menu_handle.clone())
+                    .menu(move |window, cx| {
+                        let panel = panel.clone();
+                        Some(cx.new(|cx| crate::chat_history::chat_history(panel, window, cx)))
+                    }),
+            )
+            .end_slot(self.render_panel_options_menu(window, cx));
+
+        // The panel's content follows the chat's font size; its header is
+        // window chrome and keeps the height of the tab bar beside it.
+        WithRemSize::new(ThemeSettings::get_global(cx).ui_font_size(cx))
+            .flex_none()
+            .w_full()
+            .child(header)
     }
 
     fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
+        // No Zed plans here: nothing to upsell.
+        if !crate::show_zed_account_ui() {
+            return false;
+        }
         if TrialEndUpsell::dismissed(cx) {
             return false;
         }
@@ -6278,7 +6649,7 @@ impl AgentPanel {
                 if LanguageModelRegistry::global(cx)
                     .read(cx)
                     .default_model()
-                    .is_some_and(|model| model.provider_id != language_model::ZED_CLOUD_PROVIDER_ID)
+                    .is_some_and(|model| model.provider_id != language_model::IDE_CLOUD_PROVIDER_ID)
                 {
                     return false;
                 }
@@ -6302,6 +6673,10 @@ impl AgentPanel {
     }
 
     fn should_render_new_user_onboarding(&mut self, cx: &mut Context<Self>) -> bool {
+        // The Zed sign-in / plans card: the connection screen replaces it.
+        if !crate::show_zed_account_ui() {
+            return false;
+        }
         if self
             .new_user_onboarding_upsell_dismissed
             .load(Ordering::Acquire)
@@ -6331,7 +6706,7 @@ impl AgentPanel {
             .iter()
             .any(|provider| {
                 provider.is_authenticated(cx)
-                    && provider.id() != language_model::ZED_CLOUD_PROVIDER_ID
+                    && provider.id() != language_model::IDE_CLOUD_PROVIDER_ID
             });
 
         match &self.base_view {
@@ -6357,8 +6732,11 @@ impl AgentPanel {
         }
 
         Some(
+            // Zed's own plans are not this product's pitch: keep the block on
+            // the panel colour, set off by a single line.
             div()
-                .bg(cx.theme().colors().editor_background)
+                .border_b_1()
+                .border_color(cx.theme().colors().border)
                 .child(self.new_user_onboarding.clone()),
         )
     }
@@ -6614,6 +6992,65 @@ impl AgentPanel {
     }
 }
 
+/// A menu of the chat header that a command can open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaderMenu {
+    NewChatWith,
+    History,
+}
+
+/// The state of the built-in agent's command sandbox in a chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SandboxState {
+    On,
+    /// Turned off in the settings.
+    Off,
+    /// Asked for by the settings, but not applied in this chat.
+    OffForThisChat,
+}
+
+/// A row of the "New chat with" chooser: icon, name, who pays and what
+/// differs, and a tick on the agent New chat uses.
+fn render_new_chat_choice(choice: &NewChatChoice) -> AnyElement {
+    let icon = match &choice.icon {
+        NewChatIcon::Named(icon) => Icon::new(*icon),
+        NewChatIcon::Svg(path) => Icon::from_external_svg(path.clone()),
+    };
+
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .py_0p5()
+        // The spacing of an ordinary menu row, so the names line up.
+        .gap_1p5()
+        .items_start()
+        .child(
+            div()
+                .pt_0p5()
+                .child(icon.size(IconSize::Small).color(Color::Muted)),
+        )
+        .child(
+            v_flex()
+                .min_w_0()
+                .flex_1()
+                .child(Label::new(choice.title.clone()).truncate())
+                .child(
+                    Label::new(choice.note)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .truncate(),
+                ),
+        )
+        .when(choice.is_default, |this| {
+            this.child(
+                div()
+                    .pt_0p5()
+                    .child(Icon::new(IconName::Check).size(IconSize::Small)),
+            )
+        })
+        .into_any_element()
+}
+
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // WARNING: Changes to this element hierarchy can have
@@ -6673,9 +7110,6 @@ impl Render for AgentPanel {
             .child(self.render_toolbar(window, cx))
             .children(self.render_new_user_onboarding(window, cx))
             .map(|parent| match self.visible_surface() {
-                VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
-                    parent.child(self.render_no_project_state(cx))
-                }
                 VisibleSurface::Uninitialized => parent,
                 VisibleSurface::AgentThread(conversation_view) => parent
                     .child(conversation_view.clone())
@@ -7152,7 +7586,7 @@ mod tests {
 
     impl AgentConnection for SessionTrackingConnection {
         fn agent_id(&self) -> AgentId {
-            agent::ZED_AGENT_ID.clone()
+            agent::IDE_AGENT_ID.clone()
         }
 
         fn telemetry_id(&self) -> SharedString {
@@ -7270,6 +7704,9 @@ mod tests {
         });
 
         let fs = FakeFs::new(cx.executor());
+        // Focusing the panel of a window without a folder starts a chat with
+        // the built-in agent, which reads the global file system.
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
         let project = Project::test(fs, [], cx).await;
         let multi_workspace =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -7385,6 +7822,9 @@ mod tests {
         });
 
         let fs = FakeFs::new(cx.executor());
+        // Focusing the panel of a window without a folder starts a chat with
+        // the built-in agent, which reads the global file system.
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
         let project = Project::test(fs, [], cx).await;
         let multi_workspace =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -7435,7 +7875,7 @@ mod tests {
             acp::ContentChunk::new("New response".into()),
         )]);
         user_message_editor.update_in(cx, |_editor, window, cx| {
-            window.dispatch_action(Box::new(zed_actions::agent::Chat), cx);
+            window.dispatch_action(Box::new(app_actions::agent::Chat), cx);
         });
         cx.update(|window, cx| window.blur(cx));
         cx.run_until_parked();
@@ -8788,8 +9228,8 @@ mod tests {
             "resource text should be the raw conflict"
         );
         assert!(
-            uri.starts_with("zed:///agent/merge-conflict"),
-            "URI should use the zed merge-conflict scheme, got: {uri}"
+            uri.starts_with("ide:///agent/merge-conflict"),
+            "URI should use the internal merge-conflict scheme, got: {uri}"
         );
         assert!(uri.contains("utils.rs"), "URI should encode the file path");
     }
@@ -9341,15 +9781,25 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    async fn test_empty_workspace_does_not_create_agent_entries(cx: &mut TestAppContext) {
+    /// A window with no folder open, its chat panel in the dock.
+    async fn setup_panel_without_project(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Workspace>,
+        Entity<Project>,
+        Entity<AgentPanel>,
+        Arc<language_model::fake_provider::FakeLanguageModelProvider>,
+        VisualTestContext,
+    ) {
         init_test(cx);
-        cx.update(|cx| {
-            agent::ThreadStore::init_global(cx);
-            language_model::LanguageModelRegistry::test(cx);
-        });
-
         let fs = FakeFs::new(cx.executor());
+        let provider = cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            <dyn fs::Fs>::set_global(fs.clone(), cx);
+            language_model::LanguageModelRegistry::test(cx)
+        });
+        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+
         let project = Project::test(fs.clone(), [], cx).await;
         let multi_workspace =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -9358,74 +9808,214 @@ mod tests {
                 multi_workspace.workspace().clone()
             })
             .unwrap();
-        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
 
-        let panel = workspace.update_in(cx, |workspace, window, cx| {
+        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
             let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
             workspace.add_panel(panel.clone(), window, cx);
             panel
         });
+        (workspace, project, panel, provider, cx)
+    }
 
-        panel.read_with(cx, |panel, cx| {
-            assert_eq!(
+    #[gpui::test]
+    async fn test_chat_works_without_a_project(cx: &mut TestAppContext) {
+        let (workspace, _project, panel, provider, mut cx) = setup_panel_without_project(cx).await;
+
+        panel.read_with(&cx, |panel, cx| {
+            assert_ne!(
                 panel
                     .connection_store()
                     .read(cx)
                     .connection_status(&Agent::NativeAgent, cx),
                 crate::agent_connection_store::AgentConnectionStatus::Disconnected,
-                "empty workspaces should not start the native agent connection"
+                "the built-in agent should be started in a window without a folder"
             );
         });
 
-        panel.update_in(cx, |panel, window, cx| {
-            panel.new_thread(&NewThread, window, cx);
-            panel.activate_draft(true, AgentThreadSource::AgentPanel, window, cx);
-            panel.new_external_agent_thread(
-                &NewExternalAgentThread {
-                    agent: AgentId::new("external-agent"),
-                },
-                window,
-                cx,
-            );
+        // Opening the panel is enough: there is a chat, not a wall.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_panel::<AgentPanel>(window, cx);
         });
         cx.run_until_parked();
 
-        panel.read_with(cx, |panel, cx| {
-            assert!(
-                panel.active_conversation_view().is_none(),
-                "empty workspaces should not create agent threads"
-            );
-            assert!(
-                panel.draft_thread.is_none(),
-                "empty workspaces should not create draft threads"
-            );
-            assert!(
-                panel.terminals(cx).is_empty(),
-                "empty workspaces should not create agent panel terminals"
-            );
+        let thread_view = panel.read_with(&cx, |panel, cx| {
+            let conversation_view = panel
+                .active_conversation_view()
+                .expect("a window without a folder should show a chat");
+            assert_eq!(*conversation_view.read(cx).agent_key(), Agent::NativeAgent);
+            assert!(panel.draft_thread.is_some());
+            conversation_view
+                .read(cx)
+                .root_thread_view()
+                .expect("the chat should have connected to the built-in agent")
         });
 
+        // Connected: a chat that can send, whose one starting point is
+        // opening a folder.
+        thread_view.read_with(&cx, |view, cx| {
+            let readiness = view.chat_readiness(cx);
+            assert!(
+                readiness.can_send(),
+                "expected a chat that can send, got: {readiness:?}"
+            );
+        });
+        assert!(cx.debug_bounds("chat-composer").is_some());
+        assert!(cx.debug_bounds("empty-state-suggestion-0").is_some());
+        assert!(cx.debug_bounds("empty-state-suggestion-1").is_none());
+
+        // Unaligned: it answers, and that is all. Without a folder its
+        // working directory would be the home directory, so the model is
+        // offered nothing that reads, writes or runs; the line above the
+        // composer says why and offers "Open Folder".
+        thread_view.read_with(&cx, |view, cx| {
+            assert!(view.agent_has_no_folder(cx));
+            let thread = view
+                .as_native_thread(cx)
+                .expect("the built-in agent answers");
+            let thread = thread.read(cx);
+            assert!(!thread.has_open_folder(cx));
+            let tools = thread.enabled_tool_names(cx);
+            for forbidden in [
+                "edit_file",
+                "write_file",
+                "create_directory",
+                "copy_path",
+                "move_path",
+                "delete_path",
+                "terminal",
+                "read_file",
+                "list_directory",
+                "grep",
+                "find_path",
+            ] {
+                assert!(
+                    !tools.iter().any(|tool| tool == forbidden),
+                    "{forbidden} offered without a folder: {tools:?}"
+                );
+            }
+        });
+        assert!(cx.debug_bounds("no-folder-notice").is_some());
+
+        // New chat works too.
+        let first_chat = panel.read_with(&cx, |panel, _cx| {
+            panel.active_conversation_view().unwrap().entity_id()
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            let conversation_view = panel
+                .active_conversation_view()
+                .expect("New Chat should leave a chat on screen");
+            assert_eq!(*conversation_view.read(cx).agent_key(), Agent::NativeAgent);
+            // The empty draft is reused, as in a window with a folder.
+            assert_eq!(conversation_view.entity_id(), first_chat);
+        });
+
+        // Nothing connected: the same panel is the connection screen, so a
+        // key can be pasted in the very first window.
+        cx.update(|_, cx| {
+            language_model::LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                use language_model::LanguageModelProvider as _;
+                registry.unregister_provider(provider.id(), cx);
+            });
+        });
+        cx.run_until_parked();
+        thread_view.read_with(&cx, |view, cx| {
+            assert_eq!(
+                view.chat_readiness(cx),
+                crate::conversation_view::ChatReadiness::NotConnected
+            );
+        });
+        assert!(cx.debug_bounds("chat-composer").is_none());
+        assert!(cx.debug_bounds("empty-state-suggestion-0").is_none());
+    }
+
+    #[gpui::test]
+    async fn test_external_agents_and_terminals_wait_for_a_folder(cx: &mut TestAppContext) {
+        let (workspace, project, panel, _provider, mut cx) = setup_panel_without_project(cx).await;
+        let external_agent = Agent::Custom {
+            id: AgentId::new("external-agent"),
+        };
+
+        // The agent chosen in another window, and a last entry that was a
+        // terminal: neither can start here.
         cx.update(|_, cx| {
             cx.update_flags(true, vec!["agent-panel-terminal".to_string()]);
         });
-        panel.update_in(cx, |panel, window, cx| {
+        panel.update(&mut cx, |panel, _cx| {
+            panel.selected_agent = external_agent.clone();
+            panel.last_created_entry_kind = AgentPanelEntryKind::Terminal;
+        });
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        cx.run_until_parked();
+
+        let chat = panel.read_with(&cx, |panel, cx| {
+            let conversation_view = panel
+                .active_conversation_view()
+                .expect("the built-in agent should answer while no folder is open");
+            assert_eq!(*conversation_view.read(cx).agent_key(), Agent::NativeAgent);
+            assert_eq!(panel.new_chat_agent(cx), Agent::NativeAgent);
+            assert_eq!(
+                panel.selected_agent, external_agent,
+                "the user's choice of agent should be kept for the next folder"
+            );
+            assert!(panel.terminals(cx).is_empty());
+            conversation_view.entity_id()
+        });
+        let notifications_before =
+            workspace.read_with(&cx, |workspace, _cx| workspace.notification_ids().len());
+
+        // Asking for the external agent or for a terminal says why not, and
+        // leaves the chat where it is.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_external_agent_thread(
+                &NewExternalAgentThread::with_agent(AgentId::new("external-agent")),
+                window,
+                cx,
+            );
+            panel.start_chat_with_agent(AgentId::new("external-agent"), true, window, cx);
             panel.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
         });
         cx.run_until_parked();
 
-        panel.read_with(cx, |panel, cx| {
-            assert!(
-                panel.terminals(cx).is_empty(),
-                "empty workspaces should not create terminals after the terminal feature is enabled"
-            );
+        panel.read_with(&cx, |panel, cx| {
             assert_eq!(
                 panel
-                    .connection_store()
-                    .read(cx)
-                    .connection_status(&Agent::NativeAgent, cx),
-                crate::agent_connection_store::AgentConnectionStatus::Disconnected,
-                "empty workspace actions should not start the native agent connection"
+                    .active_conversation_view()
+                    .map(|view| view.entity_id()),
+                Some(chat),
+                "the chat on screen should not be replaced"
             );
+            assert!(panel.pending_agent_set_up.is_none());
+            assert!(
+                panel.terminals(cx).is_empty(),
+                "a window without a folder should not start a terminal"
+            );
+        });
+        workspace.read_with(&cx, |workspace, _cx| {
+            assert_eq!(
+                workspace.notification_ids().len(),
+                notifications_before + 1,
+                "the refusal should be said once, in one message"
+            );
+        });
+
+        // With a folder the chosen agent answers new chats again.
+        project
+            .update(&mut cx, |project, cx| {
+                project.find_or_create_worktree("/project", true, cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            assert!(panel.has_open_project(cx));
+            assert_eq!(panel.new_chat_agent(cx), external_agent);
         });
     }
 
@@ -9435,7 +10025,7 @@ mod tests {
 
     impl AgentServer for DelayedSelectionAgentServer {
         fn logo(&self) -> IconName {
-            IconName::ZedAgent
+            IconName::AppAgent
         }
 
         fn agent_id(&self) -> AgentId {
@@ -9793,7 +10383,12 @@ mod tests {
             .into_iter()
             .map(|bytes| String::from_utf8(bytes).expect("pasted bytes should be valid UTF-8"))
             .collect();
-        assert_eq!(pasted_current_line, "file.rs:1 ");
+        // With nothing selected the action only opens the chat (it is bound
+        // to Cmd/Ctrl+L): the cursor's line is not attached.
+        assert_eq!(pasted_current_line, "");
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(panel.active_terminal_id(), Some(terminal_id));
+        });
 
         // Now highlight a portion of the file: from the start of line 2 into line 3.
         editor.update_in(&mut cx, |editor, window, cx| {
@@ -10195,7 +10790,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_skills_menu_entry_shows_manage_skills_shortcut(cx: &mut TestAppContext) {
+    async fn test_more_menu_entries(cx: &mut TestAppContext) {
         init_test(cx);
         cx.update(|cx| {
             let default_key_bindings = settings::KeymapFile::load_asset_allow_partial_failure(
@@ -10238,14 +10833,292 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert!(
-            cx.debug_bounds("MENU_ITEM-Skills").is_some(),
-            "Skills menu item should be visible"
+        // The connections, the chat settings and full screen, in this order
+        // and whatever the chat is.
+        let top_of = |cx: &mut VisualTestContext, selector: &'static str| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("the More menu should have {selector}"))
+                .top()
+        };
+        let connections = top_of(&mut cx, "MENU_ITEM-Connections…");
+        let chat_settings = top_of(&mut cx, "MENU_ITEM-Chat Settings…");
+        let full_screen = top_of(&mut cx, "MENU_ITEM-Full Screen");
+        assert!(connections < chat_settings && chat_settings < full_screen);
+
+        // A chat answered by another agent can restart it, and has no rules
+        // of the built-in agent to open.
+        assert!(top_of(&mut cx, "MENU_ITEM-Restart Agent") < connections);
+        assert!(cx.debug_bounds("MENU_ITEM-Rules…").is_none());
+
+        // Gone: profile management, the threads sidebar, and the entries
+        // that Chat Settings leads to.
+        for selector in [
+            "MENU_ITEM-Profiles",
+            "MENU_ITEM-Skills",
+            "MENU_ITEM-Add Server…",
+            "MENU_ITEM-Toggle Threads Sidebar",
+            "MENU_ITEM-Settings",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_none(),
+                "the More menu should not have {selector}"
+            );
+        }
+    }
+
+    fn set_user_settings(json: &str, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store
+                    .set_user_settings(json, cx)
+                    .expect("user settings should load");
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn test_chat_can_be_docked_on_both_sides_and_at_the_bottom(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+
+        panel.read_with(&cx, |panel, _| {
+            for position in [
+                DockPosition::Left,
+                DockPosition::Right,
+                DockPosition::Bottom,
+            ] {
+                assert!(
+                    panel.position_is_valid(position),
+                    "the chat should accept {position:?}"
+                );
+            }
+        });
+        cx.update(|window, cx| {
+            let panel = panel.read(cx);
+            assert_eq!(panel.title(window, cx).as_ref(), "Chat");
+            assert_eq!(panel.position(window, cx), DockPosition::Right);
+            assert_eq!(
+                panel.default_size(window, cx),
+                AgentSettings::get_global(cx).default_width
+            );
+            assert_eq!(panel.min_size(window, cx), Some(MIN_PANEL_WIDTH));
+        });
+
+        set_user_settings(r#"{ "agent": { "dock": "bottom" } }"#, &mut cx);
+
+        cx.update(|window, cx| {
+            let panel = panel.read(cx);
+            assert_eq!(panel.position(window, cx), DockPosition::Bottom);
+            assert_eq!(
+                panel.default_size(window, cx),
+                AgentSettings::get_global(cx).default_height,
+                "at the bottom the chat is sized by its height"
+            );
+            assert_eq!(panel.min_size(window, cx), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_new_chat_choices(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+
+        // Nothing set up: the built-in agent, ticked, and the three
+        // subscription agents to set up.
+        panel.read_with(&cx, |panel, cx| {
+            let choices = panel.new_chat_choices(cx);
+            assert_eq!(
+                choices.agents,
+                [NewChatChoice {
+                    agent: Agent::NativeAgent,
+                    title: "Agent".into(),
+                    note: BUILT_IN_AGENT_NOTE,
+                    icon: NewChatIcon::Named(IconName::AppAssistant),
+                    is_default: true,
+                }]
+            );
+            assert_eq!(
+                choices
+                    .to_set_up
+                    .iter()
+                    .map(|agent| (agent.id.0.as_ref(), agent.name))
+                    .collect::<Vec<_>>(),
+                [
+                    ("claude-acp", "Claude Code"),
+                    ("codex-acp", "Codex"),
+                    ("gemini", "Gemini CLI"),
+                ]
+            );
+        });
+
+        // Agents of the settings are listed by name; the ones that are set
+        // up are no longer offered for set-up.
+        set_user_settings(
+            r#"{ "agent_servers": {
+                "my-agent": { "type": "custom", "command": "my-agent" },
+                "codex-acp": { "type": "registry" }
+            } }"#,
+            &mut cx,
         );
-        assert!(
-            cx.debug_bounds("KEY_BINDING-l").is_some(),
-            "Skills menu item should show the ManageSkills shortcut"
+        panel.update(&mut cx, |panel, _| {
+            panel.selected_agent = Agent::Custom {
+                id: "codex-acp".into(),
+            };
+        });
+
+        panel.read_with(&cx, |panel, cx| {
+            let choices = panel.new_chat_choices(cx);
+            assert_eq!(
+                choices
+                    .agents
+                    .iter()
+                    .map(|choice| (
+                        choice.title.as_ref(),
+                        choice.note,
+                        choice.icon.clone(),
+                        choice.is_default
+                    ))
+                    .collect::<Vec<_>>(),
+                [
+                    (
+                        "Agent",
+                        BUILT_IN_AGENT_NOTE,
+                        NewChatIcon::Named(IconName::AppAssistant),
+                        false
+                    ),
+                    (
+                        "Codex",
+                        EXTERNAL_AGENT_NOTE,
+                        NewChatIcon::Named(IconName::AiOpenAi),
+                        true
+                    ),
+                    (
+                        "my-agent",
+                        EXTERNAL_AGENT_NOTE,
+                        NewChatIcon::Named(IconName::Sparkle),
+                        false
+                    ),
+                ]
+            );
+            assert_eq!(
+                choices
+                    .to_set_up
+                    .iter()
+                    .map(|agent| agent.name)
+                    .collect::<Vec<_>>(),
+                ["Claude Code", "Gemini CLI"]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_set_up_agent_writes_settings_then_starts_its_chat(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        let fs = cx.update(|_, cx| <dyn fs::Fs>::global(cx));
+        let claude = AgentId::new("claude-acp");
+
+        // Without "set up", nothing is written: the chat starts and reports
+        // on its own that the agent is missing.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.start_chat_with_agent(claude.clone(), false, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(!fs.is_file(paths::settings_file()).await);
+        panel.read_with(&cx, |panel, _| {
+            assert!(panel.pending_agent_set_up.is_none());
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.start_chat_with_agent(Agent::NativeAgent.id(), false, window, cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            assert_eq!(panel.selected_agent(cx), Agent::NativeAgent);
+        });
+
+        // "Set up Claude Code…": the settings first, the chat once they are
+        // applied.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.start_chat_with_agent(claude.clone(), true, window, cx);
+            assert_eq!(
+                panel
+                    .pending_agent_set_up
+                    .as_ref()
+                    .map(|pending| pending.agent_id.clone()),
+                Some(claude.clone()),
+                "the header says what is being set up until the chat starts"
+            );
+            assert_eq!(
+                panel.selected_agent(cx),
+                Agent::NativeAgent,
+                "no chat with the agent before it is in the settings"
+            );
+        });
+        cx.run_until_parked();
+
+        let written = fs.load(paths::settings_file()).await.unwrap();
+        let written: serde_json::Value =
+            serde_json_lenient::from_str(&written).expect("settings should stay valid");
+        assert_eq!(
+            written["agent_servers"]["claude-acp"],
+            json!({ "type": "registry" })
         );
+
+        let claude_agent = Agent::Custom { id: claude.clone() };
+        panel.read_with(&cx, |panel, cx| {
+            assert!(panel.pending_agent_set_up.is_none());
+            assert_eq!(
+                panel.selected_agent(cx),
+                claude_agent,
+                "New chat now starts chats with the agent that was chosen"
+            );
+            assert_eq!(
+                panel
+                    .active_conversation_view()
+                    .map(|view| view.read(cx).agent_key().clone()),
+                Some(claude_agent.clone()),
+                "the chat that opened is answered by the agent"
+            );
+            let choices = panel.new_chat_choices(cx);
+            assert!(
+                choices
+                    .agents
+                    .iter()
+                    .any(|choice| choice.agent == claude_agent
+                        && choice.title.as_ref() == "Claude Code"
+                        && choice.is_default)
+            );
+            assert!(choices.to_set_up.iter().all(|agent| agent.id != claude));
+        });
+
+        // An agent that is already in the settings is not written again.
+        set_user_settings(
+            r#"{ "agent_servers": { "claude-acp": { "type": "custom", "command": "claude" } } }"#,
+            &mut cx,
+        );
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.start_chat_with_agent(claude.clone(), true, window, cx);
+            assert!(panel.pending_agent_set_up.is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_external_agent_command_without_agent_opens_the_chooser(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_external_agent_thread(&NewExternalAgentThread::default(), window, cx);
+        });
+        panel.read_with(&cx, |panel, cx| {
+            assert!(
+                panel.header_menu_to_open.get() == Some(HeaderMenu::NewChatWith),
+                "the chooser opens with the next frame of the header"
+            );
+            assert_eq!(
+                panel.selected_agent(cx),
+                Agent::NativeAgent,
+                "asking who answers chooses nobody"
+            );
+        });
     }
 
     #[gpui::test]
@@ -13508,9 +14381,7 @@ mod tests {
         // into `retained_threads` (keeping the user's prompt accessible
         // from the sidebar) and a fresh empty draft on the new agent
         // should become active.
-        cx.dispatch_action(NewExternalAgentThread {
-            agent: Agent::Stub.id(),
-        });
+        cx.dispatch_action(NewExternalAgentThread::with_agent(Agent::Stub.id()));
         cx.run_until_parked();
 
         // A new draft should have been created for the Stub agent.
@@ -14159,7 +15030,7 @@ mod tests {
 
     impl AgentConnection for DisassociationTrackingConnection {
         fn agent_id(&self) -> AgentId {
-            agent::ZED_AGENT_ID.clone()
+            agent::IDE_AGENT_ID.clone()
         }
 
         fn telemetry_id(&self) -> SharedString {

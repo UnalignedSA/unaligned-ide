@@ -340,7 +340,10 @@ impl Render for LanguageServerPrompt {
             .occlude()
             .w_full()
             .max_h(vh(0.8, window))
-            .elevation_3(cx)
+            // Flat card: a raised background and a 1px line, no shadow.
+            .bg(cx.theme().colors().elevated_surface_background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
             .on_modifiers_changed(cx.listener(|_, _, _, cx| cx.notify()))
@@ -1233,7 +1236,10 @@ pub mod simple_message_notification {
                         })
                         .p_3()
                         .gap_2()
-                        .elevation_3(cx)
+                        // Flat card: a raised background and a 1px line, no shadow.
+                        .bg(cx.theme().colors().elevated_surface_background)
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
                         .child(
                             h_flex()
                                 .gap_4()
@@ -1275,7 +1281,7 @@ pub mod simple_message_notification {
             });
 
             let with_primary_action = cx.new(|cx| {
-                MessageNotification::new("A new version of Zed is available for download.", cx)
+                MessageNotification::new("A new version is available for download.", cx)
                     .with_title("Update Available")
                     .primary_message("Restart Now")
                     .primary_icon(IconName::ArrowCircle)
@@ -1378,16 +1384,19 @@ pub mod simple_message_notification {
                     "Linux desktop portal initialization failed.".into()
                 }
                 fn secondary_message(&self) -> Option<SharedString> {
-                    Some("Zed needs an xdg-desktop-portal implementation to open files.".into())
+                    Some(
+                        format!(
+                            "{} needs an xdg-desktop-portal implementation to open files.",
+                            branding::PRODUCT_NAME
+                        )
+                        .into(),
+                    )
                 }
                 fn severity(&self) -> ErrorSeverity {
                     ErrorSeverity::Critical
                 }
                 fn primary_action(&self) -> ErrorAction {
-                    ErrorAction::link(
-                        "See Docs",
-                        "https://zed.dev/docs/linux#i-cant-open-any-files",
-                    )
+                    ErrorAction::link("See Docs", branding::DOCS_URL)
                 }
             }
 
@@ -1396,13 +1405,13 @@ pub mod simple_message_notification {
             struct UpdateRequiredError;
             impl WorkspaceError for UpdateRequiredError {
                 fn primary_message(&self) -> SharedString {
-                    "An update is required to continue using Zed AI.".into()
+                    "An update is required to continue.".into()
                 }
                 fn severity(&self) -> ErrorSeverity {
                     ErrorSeverity::Critical
                 }
                 fn primary_action(&self) -> ErrorAction {
-                    ErrorAction::link("Update Zed", "https://zed.dev/releases")
+                    ErrorAction::link("See Releases", branding::WEBSITE_URL)
                 }
                 fn secondary_action(&self) -> Option<ErrorAction> {
                     Some(ErrorAction::dismiss())

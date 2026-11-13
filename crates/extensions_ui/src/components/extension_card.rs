@@ -44,7 +44,10 @@ struct ExtensionCardDetails {
     name: SharedString,
     version: Arc<str>,
     description: Option<SharedString>,
+    /// The authors as published ("Name <address>"), for the context menu.
     authors: SharedString,
+    /// The authors' names without their addresses, for the row.
+    author_names: SharedString,
     repository_url: Option<SharedString>,
     repository_icon: IconName,
     provided_features: Vec<&'static str>,
@@ -102,6 +105,9 @@ pub struct ExtensionCard {
 }
 
 impl ExtensionCard {
+    /// Rows have a fixed height: the page lays them out in a uniform list.
+    const ROW_HEIGHT: f32 = 92.;
+
     pub fn for_dev(extension: Arc<ExtensionManifest>, extension_store: &ExtensionStore) -> Self {
         let status = extension_store.extension_status(&extension.id);
         Self::manifest(extension, status, LocalExtensionKind::Dev)
@@ -136,6 +142,7 @@ impl ExtensionCard {
             version: extension.version.clone(),
             description: extension.description.clone().map(Into::into),
             authors: extension.authors.join(", ").into(),
+            author_names: author_names(&extension.authors).into(),
             repository_url: extension.repository.clone().map(Into::into),
             repository_icon: IconName::Link,
             provided_features: provided_feature_labels(extension.provides()),
@@ -160,6 +167,7 @@ impl ExtensionCard {
             version: extension.manifest.version.clone(),
             description: extension.manifest.description.clone().map(Into::into),
             authors: extension.manifest.authors.join(", ").into(),
+            author_names: author_names(&extension.manifest.authors).into(),
             repository_url: Some(extension.manifest.repository.clone().into()),
             repository_icon: IconName::Link,
             provided_features: provided_feature_labels(extension.manifest.provides.iter().copied()),
@@ -248,7 +256,7 @@ impl ExtensionCard {
                 SharedString::from(format!("rebuild-{}", extension.id)),
                 "Rebuild",
             )
-            .color(Color::Accent)
+            .style(ButtonStyle::Outlined)
             .disabled(Self::disables_actions(status))
             .on_click({
                 let extension_id = extension.id.clone();
@@ -260,19 +268,11 @@ impl ExtensionCard {
             })
         });
         let uninstall = Self::uninstall_button(&extension.id, is_dev)
-            .when_else(
-                is_dev,
-                |button| button.color(Color::Accent),
-                |button| button.style(ButtonStyle::OutlinedGhost),
-            )
+            .style(ButtonStyle::Outlined)
             .disabled(Self::disables_actions(status));
         let configure = (!extension.context_servers.is_empty()).then(|| {
             Self::configure_button(&extension.id, Some(extension.clone()))
-                .when_else(
-                    is_dev,
-                    |button| button.color(Color::Accent),
-                    |button| button.style(ButtonStyle::OutlinedGhost),
-                )
+                .style(ButtonStyle::Outlined)
                 .disabled(Self::disables_actions(status))
         });
 
@@ -288,12 +288,8 @@ impl ExtensionCard {
             Self::button_id(extension_id, ExtensionOperation::Install),
             "Install",
         )
-        .style(ButtonStyle::Tinted(ui::TintColor::Accent))
-        .start_icon(
-            Icon::new(IconName::Download)
-                .size(IconSize::Small)
-                .color(Color::Muted),
-        )
+        // A repeated row action: outlined, never the filled accent (D2).
+        .style(ButtonStyle::Outlined)
         .on_click({
             let extension_id = extension_id.clone();
             move |_, _, cx| {
@@ -334,17 +330,19 @@ impl ExtensionCard {
             ],
             ExtensionStatus::Upgrading | ExtensionStatus::Removing => {
                 let uninstall = Self::uninstall_button(&extension.id, false)
-                    .style(ButtonStyle::OutlinedGhost)
+                    .style(ButtonStyle::Outlined)
                     .disabled(Self::disables_actions(status));
                 let upgrade = matches!(status, ExtensionStatus::Upgrading).then(|| {
                     Button::new(
                         Self::button_id(&extension.id, ExtensionOperation::Upgrade),
                         "Upgrade",
                     )
+                    .style(ButtonStyle::Outlined)
                     .disabled(Self::disables_actions(status))
                 });
                 let configure = is_configurable.then(|| {
                     Self::configure_button(&extension.id, None)
+                        .style(ButtonStyle::Outlined)
                         .disabled(Self::disables_actions(status))
                 });
 
@@ -352,7 +350,7 @@ impl ExtensionCard {
             }
             ExtensionStatus::Installed(installed_version) => {
                 let uninstall =
-                    Self::uninstall_button(&extension.id, false).style(ButtonStyle::OutlinedGhost);
+                    Self::uninstall_button(&extension.id, false).style(ButtonStyle::Outlined);
                 let upgrade = (installed_version != &extension.manifest.version).then(|| {
                     let is_compatible = extension_host::is_version_compatible(
                         ReleaseChannel::global(cx),
@@ -362,14 +360,15 @@ impl ExtensionCard {
                         Self::button_id(&extension.id, ExtensionOperation::Upgrade),
                         "Upgrade",
                     )
-                    .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                    .style(ButtonStyle::Outlined)
                     .when(!is_compatible, |button| {
                         button.tooltip({
                             let version = extension.manifest.version.clone();
                             move |_, cx| {
                                 Tooltip::simple(
                                     format!(
-                                        "v{version} is not compatible with this version of Zed."
+                                        "v{version} is not compatible with this version of {}.",
+                                        branding::PRODUCT_NAME
                                     ),
                                     cx,
                                 )
@@ -391,7 +390,7 @@ impl ExtensionCard {
                     })
                 });
                 let configure = is_configurable.then(|| {
-                    Self::configure_button(&extension.id, None).style(ButtonStyle::OutlinedGhost)
+                    Self::configure_button(&extension.id, None).style(ButtonStyle::Outlined)
                 });
 
                 [upgrade, configure, Some(uninstall)]
@@ -422,6 +421,24 @@ fn provided_feature_labels(
         .filter(|provides| !provides.is_deprecated())
         .map(extension_provides_label)
         .collect()
+}
+
+/// Authors are published as "Name <address>". The row shows the names; the
+/// full text stays one click away ("Copy Author Info").
+fn author_names(authors: &[String]) -> String {
+    authors
+        .iter()
+        .map(|author| {
+            let name = author.split('<').next().unwrap_or_default().trim();
+            if name.is_empty() {
+                author.trim().trim_matches(|c| c == '<' || c == '>')
+            } else {
+                name
+            }
+        })
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub(crate) fn extension_provides_label(provides: ExtensionProvides) -> &'static str {
@@ -464,8 +481,8 @@ impl Component for ExtensionCard {
                     name: name.to_owned(),
                     version: version.into(),
                     description: Some(description.to_owned()),
-                    authors: vec!["Zed Industries".to_owned()],
-                    repository: "https://github.com/zed-industries/zed".to_owned(),
+                    authors: vec!["Example Author".to_owned()],
+                    repository: "https://example.com/extension".to_owned(),
                     schema_version: Some(1),
                     wasm_api_version: None,
                     provides: BTreeSet::from_iter(provides),
@@ -477,13 +494,13 @@ impl Component for ExtensionCard {
 
         fn dev_extension() -> Arc<ExtensionManifest> {
             Arc::new(ExtensionManifest {
-                // Fake ID which will never be accepted during publishing
-                id: "zed-demo-theme".into(),
+                // Fake ID of a local extension, for the preview only
+                id: "dev-demo-theme".into(),
                 name: "Local Theme".to_owned(),
                 version: "0.1.0".into(),
                 schema_version: SchemaVersion::ZERO,
                 description: Some("A locally installed extension under development.".to_owned()),
-                repository: Some("https://github.com/zed-industries/zed".to_owned()),
+                repository: Some("https://example.com/extension".to_owned()),
                 authors: vec!["Extension Developer".to_owned()],
                 lib: Default::default(),
                 themes: Vec::new(),
@@ -604,6 +621,7 @@ impl RenderOnce for ExtensionCard {
             version,
             description,
             authors,
+            author_names,
             repository_url,
             repository_icon,
             provided_features,
@@ -616,43 +634,50 @@ impl RenderOnce for ExtensionCard {
         let repository_button_id = SharedString::from(format!("repository-{id}"));
         let context_menu_button_id = SharedString::from(format!("more-{id}"));
         let context_menu_extension_id = id;
-        let context_menu_authors = authors.clone();
 
-        div().w_full().child(
-            v_flex()
-                .mt_4()
+        let colors = cx.theme().colors();
+        // Versions and counts: code font, so digits do not jitter (D3).
+        let mono_meta = |text: String| {
+            Label::new(text)
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .buffer_font(cx)
+        };
+
+        // One calm row: three lines of text on the left; the count, the two
+        // quiet icons and the outlined action on the right. No card, no hover
+        // ground (the row itself does nothing), a 1px line under it.
+        div().w_full().px_4().child(
+            h_flex()
+                .relative()
                 .w_full()
-                .h(rems_from_px(110_f32))
-                .p_3()
-                .gap_2()
-                .bg(cx.theme().colors().elevated_surface_background.opacity(0.5))
-                .border_1()
-                .border_color(cx.theme().colors().border_variant)
-                .rounded_md()
+                .h(rems_from_px(ExtensionCard::ROW_HEIGHT))
+                .py_3()
+                .gap_4()
+                .border_b_1()
+                .border_color(colors.border)
                 .child(
-                    h_flex()
-                        .gap_2()
-                        .justify_between()
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
                         .child(
                             h_flex()
-                                .flex_shrink_1()
                                 .min_w_0()
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .gap_2()
-                                .child(Headline::new(name).size(HeadlineSize::Small))
-                                .child(
-                                    Headline::new(if is_dev {
-                                        format!("v{version} (dev)")
-                                    } else {
-                                        format!("v{version}")
-                                    })
-                                    .size(HeadlineSize::XSmall)
-                                    .color(Color::Muted),
-                                )
+                                .child(Label::new(name).weight(gpui::FontWeight::MEDIUM))
+                                .child(mono_meta(if is_dev {
+                                    format!("v{version} (dev)")
+                                } else {
+                                    format!("v{version}")
+                                }))
                                 .children(installed_version.map(|installed_version| {
-                                    Headline::new(format!("(v{installed_version} installed)"))
-                                        .size(HeadlineSize::XSmall)
+                                    Label::new(format!("v{installed_version} installed"))
+                                        .size(LabelSize::Small)
+                                        .color(Color::Warning)
+                                        .buffer_font(cx)
                                 }))
                                 .when(!provided_features.is_empty(), |parent| {
                                     parent.child(
@@ -663,60 +688,43 @@ impl RenderOnce for ExtensionCard {
                                 }),
                         )
                         .child(
-                            h_flex()
-                                .flex_shrink_0()
-                                .gap_1()
-                                .children(actions.into_iter().flatten()),
+                            Label::new(description.unwrap_or_default())
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                        .child(
+                            Label::new(author_names)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate(),
                         ),
                 )
                 .child(
                     h_flex()
+                        .flex_none()
                         .gap_2()
-                        .justify_between()
-                        .children(description.map(|description| {
-                            Label::new(description)
-                                .size(LabelSize::Small)
-                                .color(Color::Default)
-                                .truncate()
-                        }))
                         .children(download_count.map(|download_count| {
-                            Label::new(format!(
-                                "Downloads: {}",
-                                format_number_with_commas(u128::from(download_count))
-                            ))
-                            .size(LabelSize::Small)
-                        })),
-                )
-                .child(
-                    h_flex()
-                        .min_w_0()
-                        .w_full()
-                        .justify_between()
-                        .child(
                             h_flex()
-                                .min_w_0()
+                                .flex_none()
                                 .gap_1()
                                 .child(
-                                    Icon::new(IconName::Person)
+                                    Icon::new(IconName::Download)
                                         .size(IconSize::XSmall)
                                         .color(Color::Muted),
                                 )
-                                .child(
-                                    Label::new(authors)
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted)
-                                        .truncate(),
-                                ),
-                        )
+                                .child(mono_meta(format_number_with_commas(u128::from(
+                                    download_count,
+                                ))))
+                        }))
                         .child(
                             h_flex()
-                                .gap_1()
-                                .flex_shrink_0()
+                                .flex_none()
                                 .when_some(repository_url, |this, repository_url| {
                                     let repository_url_for_tooltip = repository_url.clone();
                                     this.child(
                                         IconButton::new(repository_button_id, repository_icon)
                                             .icon_size(IconSize::Small)
+                                            .icon_color(Color::Muted)
                                             .tooltip(move |_, cx| {
                                                 Tooltip::with_meta(
                                                     "Visit Extension Repository",
@@ -738,7 +746,8 @@ impl RenderOnce for ExtensionCard {
                                                     context_menu_button_id,
                                                     IconName::Ellipsis,
                                                 )
-                                                .icon_size(IconSize::Small),
+                                                .icon_size(IconSize::Small)
+                                                .icon_color(Color::Muted),
                                             )
                                             .anchor(Anchor::TopRight)
                                             .offset(Point {
@@ -748,13 +757,21 @@ impl RenderOnce for ExtensionCard {
                                             .menu(move |window, cx| {
                                                 context_menu(
                                                     context_menu_extension_id.clone(),
-                                                    context_menu_authors.clone(),
+                                                    authors.clone(),
                                                     window,
                                                     cx,
                                                 )
                                             }),
                                     )
                                 }),
+                        )
+                        .child(
+                            h_flex().flex_none().gap_1().children(
+                                actions
+                                    .into_iter()
+                                    .flatten()
+                                    .map(|button| button.size(ButtonSize::Medium)),
+                            ),
                         ),
                 )
                 .when(is_overridden, |card| {
@@ -767,10 +784,42 @@ impl RenderOnce for ExtensionCard {
                             .cursor_default()
                             .size_full()
                             .justify_center()
-                            .bg(cx.theme().colors().elevated_surface_background.alpha(0.8))
+                            .bg(colors.editor_background.alpha(0.85))
                             .child(Label::new("Overridden by dev extension.")),
                     )
                 }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_author_names_drop_addresses() {
+        let authors = |authors: &[&str]| {
+            author_names(
+                &authors
+                    .iter()
+                    .map(|author| author.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            authors(&["Isaac Clayton <someone@example.com>"]),
+            "Isaac Clayton"
+        );
+        assert_eq!(
+            authors(&["d1y <a@example.com>", "Peter Tripp <b@example.com>"]),
+            "d1y, Peter Tripp"
+        );
+        assert_eq!(
+            authors(&["Java Extension Contributors"]),
+            "Java Extension Contributors"
+        );
+        // An address alone is all there is to show.
+        assert_eq!(authors(&["<only@example.com>"]), "only@example.com");
+        assert_eq!(authors(&[]), "");
     }
 }

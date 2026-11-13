@@ -33,8 +33,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use url::Url;
 
-/// The CIMD URL where Zed's OAuth client metadata document is hosted.
-pub const CIMD_URL: &str = "https://zed.dev/oauth/client-metadata.json";
+/// The address of the product's OAuth client metadata document (CIMD), which
+/// an authorization server that accepts such documents takes as the client id.
+/// `None` while the product's site publishes none (`brand.env`): the app then
+/// registers itself with each server (DCR). Never upstream's document: it
+/// would present the app as Zed on the server's consent page.
+pub fn cimd_url() -> Option<&'static str> {
+    branding::oauth_client_metadata_url()
+}
 
 /// Validate that a URL is safe to use as an OAuth endpoint.
 ///
@@ -508,13 +514,23 @@ pub enum ClientRegistrationStrategy {
 }
 
 /// Determine how to register with the authorization server, following the
-/// spec's recommended priority: CIMD first, DCR fallback.
+/// spec's recommended priority: CIMD first, DCR fallback. CIMD needs a client
+/// metadata document of the product ([`cimd_url`]); without one it is skipped.
 pub fn determine_registration_strategy(
     auth_server_metadata: &AuthServerMetadata,
 ) -> ClientRegistrationStrategy {
-    if auth_server_metadata.client_id_metadata_document_supported {
+    registration_strategy_for(auth_server_metadata, cimd_url())
+}
+
+fn registration_strategy_for(
+    auth_server_metadata: &AuthServerMetadata,
+    cimd_url: Option<&str>,
+) -> ClientRegistrationStrategy {
+    if let Some(client_id) = cimd_url
+        && auth_server_metadata.client_id_metadata_document_supported
+    {
         ClientRegistrationStrategy::Cimd {
-            client_id: CIMD_URL.to_string(),
+            client_id: client_id.to_string(),
         }
     } else if let Some(ref endpoint) = auth_server_metadata.registration_endpoint {
         ClientRegistrationStrategy::Dcr {
@@ -725,7 +741,7 @@ pub fn dcr_registration_body(
     };
 
     let mut body = serde_json::json!({
-        "client_name": "Zed",
+        "client_name": branding::PRODUCT_NAME,
         "redirect_uris": [redirect_uri],
         "grant_types": grant_types,
         "response_types": ["code"],
@@ -1297,6 +1313,9 @@ mod tests {
     use super::*;
     use http_client::Response;
 
+    /// A stand-in for a published client metadata document.
+    const TEST_CIMD_URL: &str = "https://client.example.com/oauth/client-metadata.json";
+
     // -- require_https_or_loopback tests ------------------------------------
 
     #[test]
@@ -1679,11 +1698,39 @@ mod tests {
             grant_types_supported: None,
         };
         assert_eq!(
-            determine_registration_strategy(&metadata),
+            registration_strategy_for(&metadata, Some(TEST_CIMD_URL)),
             ClientRegistrationStrategy::Cimd {
-                client_id: CIMD_URL.to_string(),
+                client_id: TEST_CIMD_URL.to_string(),
             }
         );
+    }
+
+    /// Without a client metadata document of its own the app never presents
+    /// one (least of all upstream's): it registers itself instead.
+    #[test]
+    fn test_registration_strategy_skips_cimd_without_a_document() {
+        let reg_endpoint = Url::parse("https://auth.example.com/register").unwrap();
+        let metadata = AuthServerMetadata {
+            issuer: Url::parse("https://auth.example.com").unwrap(),
+            authorization_endpoint: Url::parse("https://auth.example.com/authorize").unwrap(),
+            token_endpoint: Url::parse("https://auth.example.com/token").unwrap(),
+            registration_endpoint: Some(reg_endpoint.clone()),
+            scopes_supported: None,
+            code_challenge_methods_supported: Some(vec!["S256".into()]),
+            client_id_metadata_document_supported: true,
+            grant_types_supported: None,
+        };
+        assert_eq!(
+            registration_strategy_for(&metadata, None),
+            ClientRegistrationStrategy::Dcr {
+                registration_endpoint: reg_endpoint,
+            }
+        );
+        assert_eq!(
+            determine_registration_strategy(&metadata),
+            registration_strategy_for(&metadata, cimd_url())
+        );
+        assert!(cimd_url().is_none_or(|url| !url.contains("zed.dev")));
     }
 
     #[test]
@@ -1909,7 +1956,7 @@ mod tests {
     fn test_dcr_registration_body_without_server_metadata() {
         // When server metadata is unavailable, include all supported grant types.
         let body = dcr_registration_body("http://127.0.0.1:12345/callback", None, &[]);
-        assert_eq!(body["client_name"], "Zed");
+        assert_eq!(body["client_name"], branding::PRODUCT_NAME);
         assert_eq!(body["redirect_uris"][0], "http://127.0.0.1:12345/callback");
         assert_eq!(body["grant_types"][0], "authorization_code");
         assert_eq!(body["grant_types"][1], "refresh_token");
@@ -2321,11 +2368,19 @@ mod tests {
             let discovery = discover(&client, &server_url, &www_auth).await.unwrap();
             let registration =
                 resolve_client_registration(&client, &discovery, "http://127.0.0.1:12345/callback")
-                    .await
-                    .unwrap();
+                    .await;
 
-            assert_eq!(registration.client_id, CIMD_URL);
-            assert_eq!(registration.client_secret, None);
+            // This server accepts a client metadata document and has no
+            // registration endpoint.
+            match cimd_url() {
+                Some(cimd_url) => {
+                    let registration = registration.unwrap();
+                    assert_eq!(registration.client_id, cimd_url);
+                    assert_eq!(registration.client_secret, None);
+                }
+                // The product publishes no document: nothing to present.
+                None => assert!(registration.is_err()),
+            }
             assert_eq!(discovery.scopes, vec!["mcp:read"]);
         });
     }
@@ -2480,7 +2535,7 @@ mod tests {
                 &client,
                 &metadata,
                 "auth_code_123",
-                CIMD_URL,
+                TEST_CIMD_URL,
                 "http://127.0.0.1:9999/callback",
                 "verifier_abc",
                 "https://mcp.example.com",
@@ -2522,7 +2577,7 @@ mod tests {
                 &client,
                 &token_endpoint,
                 "old_refresh_token",
-                CIMD_URL,
+                TEST_CIMD_URL,
                 "https://mcp.example.com",
                 None,
             )

@@ -105,7 +105,7 @@ fn collect_process_tree() -> anyhow::Result<Value> {
         .collect();
 
     Ok(serde_json::json!({
-        "zed_pid": current_pid.as_u32(),
+        "app_pid": current_pid.as_u32(),
         "descendant_count": entries.len(),
         "descendants": entries,
     }))

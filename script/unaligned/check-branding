@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+"""Check that nothing the user can read or reach still presents the product as its upstream.
+
+    script/unaligned/check-branding              scan, print the remaining hits, PASS or FAIL
+    script/unaligned/check-branding -q           the count line and the verdict only
+    script/unaligned/check-branding --by-crate   also a count of remaining hits per crate or directory
+    script/unaligned/check-branding --stats      also how many hits each allowlist reason covered
+    script/unaligned/check-branding --unused     also the allowlist entries that matched nothing
+    script/unaligned/check-branding --all        print every hit, allowlisted ones too, with the reason
+    script/unaligned/check-branding PATH...      only files under these paths (relative to the root)
+
+Output: one line per remaining hit, `file:line: [kind] text`, a count line, then PASS or FAIL.
+Exit status 0 (PASS) or 1 (FAIL), 2 for a broken allowlist. The script reads files and writes
+nothing; it needs Python 3 and nothing else, and takes a few seconds.
+
+What is scanned (paths relative to the repository root, found from this file's own location)
+
+  crates/**/*.rs               string literals only (code, identifiers and comments are not text a
+                               user reads); items under `#[cfg(test)]`, `#[test]`, `#[gpui::test]`,
+                               `#[cfg(any(test, ...))]` and `#[cfg(feature = "test-support")]` are
+                               skipped (the item's braces are matched with strings and comments
+                               blanked)
+  crates/settings_content/**   also `///` comments: they become the descriptions of settings
+  assets/settings/*.json       comments for the name; every line for the other kinds
+  assets/keymaps/**/*.json     the same (the base keymaps under linux/ and macos/ included)
+  crates/ide/resources/**      every line of every text file (packaging: desktop entries, plists,
+                               installer scripts)
+  script/unaligned/**          every line
+  .github/**                   every line
+  README.md                    every line
+
+What counts as a hit
+
+  name     the word "Zed" with a capital (the product-name use)
+  host     zed.dev and its subdomains
+  org      zed-industries (upstream's GitHub organisation, in URLs and package ids)
+  scheme   zed://, zed-cli:// and other zed-something:// URL schemes
+  path     /usr/local/bin/zed, ~/.config/zed, ~/.local/share/zed, the bundle id dev.zed.*
+  word     `zed` in lower case as a word of its own or as a part of a name set off by `-`, `_`,
+           `.`, `/` or `:` (`zed-askpass`, `zed_dev.log`, `bin/zed`, `x-zed-version`): the names
+           given to temporary files, sockets, threads and commands, the values sent to other
+           programs and servers, settings keys and example paths. Not reported where one of the
+           kinds above already covers the same word (zed.dev, zed-industries, zed://), and not
+           inside a longer word (`maximized`, `zeditor`). Also "Zed" glued into a name written
+           in capitals and small letters (`.ZedMono`, `ZedPredictModal`, `ContactSupport`), which the
+           kind `name` does not see. Identifiers in code are not scanned (only string literals
+           are), so a Rust name such as `zed_urls` or `ZedPredict` is no hit; the name of an
+           action or of a key context is one only where it is written as a string.
+
+The allowlist: `branding-allowlist.txt` beside this script. One entry per line, three fields
+separated by a tab: `path-glob<TAB>regex<TAB>reason`. `*` in the glob also crosses `/`, so
+`crates/collab_ui/**` covers the whole crate. The regex is searched in the text of the hit's line
+(the whole source line, stripped); an empty regex or `.*` covers every hit of the files. Lines that
+are empty or start with `#` are ignored. A hit is dropped when at least one entry matches both its
+path and its line. A reason that starts with `OPEN` marks a known problem that is tolerated, not a
+legitimate use: those hits are counted on a `NOTE` line before the verdict. Keep each entry as narrow as its reason: a new product-name "Zed" in a file that
+has an allowlisted identifier must still fail.
+"""
+
+import argparse
+import fnmatch
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ALLOWLIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "branding-allowlist.txt")
+
+PATTERNS = [
+    ("name", re.compile(r"\bZed\b")),
+    ("host", re.compile(r"\bzed\.dev\b")),
+    ("org", re.compile(r"\bzed-industries\b")),
+    ("scheme", re.compile(r"\bzed(?:-[a-z]+)*://")),
+    ("path", re.compile(r"/usr/local/bin/zed\b|\.config/zed\b|\.local/share/zed\b|\bdev\.zed\.")),
+    # `_` counts as a separator here (unlike `\b`), so `zed_dev.log` and `open_zed` are hits.
+    # The last two alternatives are "Zed" glued into a longer name: `ZedMono`, `ContactSupport`.
+    ("word", re.compile(
+        r"(?<![A-Za-z0-9])zed(?![A-Za-z0-9]|\.dev\b|-industries\b|(?:-[a-z]+)*://)"
+        r"|Zed(?=[A-Z0-9_])|(?<=[a-z0-9_])Zed"
+    )),
+]
+# A cheap test on the raw bytes before any parsing: most files have nothing.
+PREFILTER = re.compile(rb"Zed|(?<![A-Za-z0-9])zed(?![A-Za-z0-9])")
+
+# Comments, raw strings, strings and character literals of a Rust file, in the order a lexer
+# would meet them. Block comments do not nest here, which is enough for a guard.
+RUST_TOKEN = re.compile(
+    r"""
+      (?P<line>//[^\n]*)
+    | (?P<block>/\*.*?\*/)
+    | (?P<raw>\bb?r(?P<hashes>\#*)".*?"(?P=hashes))
+    | (?P<str>\bb?"(?:[^"\\]|\\.)*" | "(?:[^"\\]|\\.)*")
+    | (?P<char>'(?:[^'\\\n]|\\[^\n']{1,10})')
+    """,
+    re.S | re.X,
+)
+TEST_ATTRIBUTE = re.compile(
+    r"#\[(?:cfg\((?:test\b|any\(\s*test\b|all\(\s*test\b)|test\]|gpui::test|tokio::test|rstest|test_case|cfg\(feature = \"test-support\"\))"
+)
+JSON_COMMENT = re.compile(r"(?<!:)//.*$")
+TEXT_SUFFIXES_SKIPPED = (
+    ".png", ".ico", ".icns", ".jpg", ".jpeg", ".gif", ".webp", ".ttf", ".otf", ".woff", ".woff2",
+    ".wasm", ".zip", ".gz", ".pdf", ".dll", ".exe", ".mdb",
+)
+
+
+def list_files():
+    """Tracked and untracked-but-not-ignored files, so a new crate is seen before its first commit."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", ROOT, "ls-files", "-co", "--exclude-standard", "-z"],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        ).stdout.decode("utf-8", "replace")
+        files = [f for f in out.split("\0") if f]
+        if files:
+            return files
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    files = []
+    for top in ("crates", "assets", "script", ".github"):
+        for directory, directories, names in os.walk(os.path.join(ROOT, top)):
+            directories[:] = [d for d in directories if d not in ("target", "node_modules", ".git")]
+            for name in names:
+                files.append(os.path.relpath(os.path.join(directory, name), ROOT))
+    files.append("README.md")
+    return files
+
+
+def scan_mode(path):
+    """How a file is read: 'rust', 'rust+doc', 'json', 'lines', or None when it is out of scope."""
+    if path.startswith("crates/ide/resources/"):
+        return None if path.lower().endswith(TEXT_SUFFIXES_SKIPPED) else "lines"
+    if path.startswith("crates/") and path.endswith(".rs"):
+        return "rust+doc" if path.startswith("crates/settings_content/") else "rust"
+    if path.endswith(".json") and "/" not in path[len("assets/settings/"):] and path.startswith("assets/settings/"):
+        return "json"
+    if path.endswith(".json") and path.startswith("assets/keymaps/"):
+        return "json"
+    if path.startswith("script/unaligned/") or path.startswith(".github/"):
+        return None if path.lower().endswith(TEXT_SUFFIXES_SKIPPED) else "lines"
+    if path == "README.md":
+        return "lines"
+    return None
+
+
+def blank(match):
+    """A token replaced by spaces of the same shape, so offsets and line numbers stay valid."""
+    return re.sub(r"[^\n]", " ", match.group(0))
+
+
+def test_spans(source):
+    """Character spans of test-only items: from a test attribute to the end of the item it marks.
+
+    Braces are matched on a copy of the source in which comments, strings and character literals
+    are blanked, so a `}` inside a fixture does not end the item early.
+    """
+    code = RUST_TOKEN.sub(blank, source)
+    spans = []
+    position = 0
+    while True:
+        attribute = TEST_ATTRIBUTE.search(source, position)
+        if attribute is None:
+            break
+        start = attribute.start()
+        if code[start] != "#":
+            position = attribute.end()
+            continue
+        # Skip this attribute and the ones that follow it, up to the item itself.
+        cursor = start
+        while True:
+            while cursor < len(code) and code[cursor].isspace():
+                cursor += 1
+            if code.startswith("#[", cursor):
+                depth = 0
+                while cursor < len(code):
+                    if code[cursor] == "[":
+                        depth += 1
+                    elif code[cursor] == "]":
+                        depth -= 1
+                        if depth == 0:
+                            cursor += 1
+                            break
+                    cursor += 1
+                continue
+            break
+        line_end = code.find("\n", cursor)
+        line_end = len(code) if line_end < 0 else line_end
+        first_line = code[cursor:line_end].rstrip()
+        if first_line.endswith(",") or first_line.endswith(";"):
+            end = line_end
+        else:
+            end = cursor
+            depth = 0
+            while end < len(code):
+                character = code[end]
+                if character == "{":
+                    depth += 1
+                elif character == "}":
+                    depth -= 1
+                    if depth <= 0:
+                        break
+                elif character == ";" and depth == 0:
+                    break
+                end += 1
+        spans.append((start, end))
+        position = max(end, attribute.end())
+    return spans
+
+
+def find(text):
+    return [kind for kind, pattern in PATTERNS if pattern.search(text)]
+
+
+def scan_rust(source, with_doc_comments):
+    lines = source.split("\n")
+    spans = test_spans(source)
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line) + 1)
+
+    def line_of(offset):
+        low, high = 0, len(starts) - 1
+        while low < high:
+            middle = (low + high + 1) // 2
+            if starts[middle] <= offset:
+                low = middle
+            else:
+                high = middle - 1
+        return low
+
+    hits = {}
+    for token in RUST_TOKEN.finditer(source):
+        if token.group("line") is not None:
+            if not (with_doc_comments and token.group("line").startswith("///")):
+                continue
+        elif token.group("raw") is None and token.group("str") is None:
+            continue
+        text = token.group(0)
+        for kind, pattern in PATTERNS:
+            for match in pattern.finditer(text):
+                offset = token.start() + match.start()
+                if any(start <= offset <= end for start, end in spans):
+                    continue
+                number = line_of(offset)
+                hits.setdefault(number, [])
+                if kind not in hits[number]:
+                    hits[number].append(kind)
+    return [(number + 1, kinds, lines[number].strip()) for number, kinds in sorted(hits.items())]
+
+
+def scan_json(source):
+    hits = []
+    for number, line in enumerate(source.split("\n"), 1):
+        comment = JSON_COMMENT.search(line)
+        comment = comment.group(0) if comment else ""
+        kinds = []
+        for kind, pattern in PATTERNS:
+            subject = comment if kind == "name" else line
+            if subject and pattern.search(subject):
+                kinds.append(kind)
+        if kinds:
+            hits.append((number, kinds, line.strip()))
+    return hits
+
+
+def scan_lines(source):
+    hits = []
+    for number, line in enumerate(source.split("\n"), 1):
+        kinds = find(line)
+        if kinds:
+            hits.append((number, kinds, line.strip()))
+    return hits
+
+
+def load_allowlist():
+    entries = []
+    try:
+        with open(ALLOWLIST, encoding="utf-8") as handle:
+            content = handle.read()
+    except OSError as error:
+        print("check-branding: cannot read the allowlist: %s" % error, file=sys.stderr)
+        sys.exit(2)
+    for number, line in enumerate(content.split("\n"), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 3 or not fields[0].strip() or not fields[2].strip():
+            print("check-branding: %s:%d: expected `path-glob<TAB>regex<TAB>reason`" % (os.path.basename(ALLOWLIST), number), file=sys.stderr)
+            sys.exit(2)
+        glob, expression, reason = (field.strip() for field in fields)
+        try:
+            compiled = re.compile(expression) if expression not in ("", ".*") else None
+        except re.error as error:
+            print("check-branding: %s:%d: bad regex: %s" % (os.path.basename(ALLOWLIST), number, error), file=sys.stderr)
+            sys.exit(2)
+        entries.append({"glob": glob, "regex": compiled, "reason": reason, "line": number, "used": 0})
+    return entries
+
+
+def group_of(path):
+    parts = path.split("/")
+    if parts[0] == "crates" and len(parts) > 1:
+        return "crates/" + parts[1]
+    if parts[0] in ("assets", "script") and len(parts) > 2:
+        return "/".join(parts[:2])
+    return parts[0]
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Find user-visible upstream names, hosts, schemes and paths.", usage="check-branding [-q] [--by-crate] [--stats] [--unused] [--all] [PATH...]")
+    parser.add_argument("paths", nargs="*")
+    parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("--by-crate", action="store_true")
+    parser.add_argument("--stats", action="store_true")
+    parser.add_argument("--unused", action="store_true")
+    parser.add_argument("--all", action="store_true")
+    arguments = parser.parse_args()
+
+    entries = load_allowlist()
+    own = (os.path.relpath(os.path.abspath(__file__), ROOT), os.path.relpath(ALLOWLIST, ROOT))
+    wanted = [os.path.normpath(path).rstrip("/") for path in arguments.paths]
+    globs_for = {}
+    remaining = []
+    files_scanned = 0
+    hits_total = 0
+
+    for path in sorted(set(list_files())):
+        mode = scan_mode(path)
+        if mode is None or path in own:
+            continue
+        if wanted and not any(path == prefix or path.startswith(prefix + "/") for prefix in wanted):
+            continue
+        try:
+            with open(os.path.join(ROOT, path), "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            continue
+        files_scanned += 1
+        if not PREFILTER.search(raw) or b"\0" in raw[:4096]:
+            continue
+        source = raw.decode("utf-8", "replace")
+        if mode in ("rust", "rust+doc"):
+            hits = scan_rust(source, mode == "rust+doc")
+        elif mode == "json":
+            hits = scan_json(source)
+        else:
+            hits = scan_lines(source)
+        if not hits:
+            continue
+        if path not in globs_for:
+            globs_for[path] = [entry for entry in entries if fnmatch.fnmatchcase(path, entry["glob"])]
+        for number, kinds, text in hits:
+            hits_total += 1
+            covering = None
+            for entry in globs_for[path]:
+                if entry["regex"] is None or entry["regex"].search(text):
+                    entry["used"] += 1
+                    if covering is None:
+                        covering = entry
+            shown = text if len(text) <= 220 else text[:217] + "..."
+            if covering is None:
+                remaining.append((path, number, kinds, shown))
+            elif arguments.all:
+                print("%s:%d: [%s] %s    (allowed: %s)" % (path, number, ",".join(kinds), shown, covering["reason"]))
+
+    if not arguments.quiet:
+        for path, number, kinds, shown in remaining:
+            print("%s:%d: [%s] %s" % (path, number, ",".join(kinds), shown))
+    if arguments.by_crate and remaining:
+        counts = {}
+        for path, _, _, _ in remaining:
+            counts[group_of(path)] = counts.get(group_of(path), 0) + 1
+        print()
+        for group, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+            print("%5d  %s" % (count, group))
+    if arguments.stats:
+        reasons = {}
+        for entry in entries:
+            reasons[entry["reason"]] = reasons.get(entry["reason"], 0) + entry["used"]
+        print()
+        for reason, count in sorted(reasons.items(), key=lambda item: -item[1]):
+            print("%5d  allowed: %s" % (count, reason))
+    if arguments.unused and not wanted:
+        unused = [entry for entry in entries if entry["used"] == 0]
+        if unused:
+            print()
+            for entry in unused:
+                print("unused allowlist entry, line %d: %s" % (entry["line"], entry["glob"]))
+    open_issues = sum(entry["used"] for entry in entries if entry["reason"].startswith("OPEN"))
+    if open_issues:
+        print("NOTE %d hits are allowed as open issues, not as legitimate uses (allowlist reasons that start with OPEN; `--all` lists them)" % open_issues)
+    print("%d files scanned, %d hits, %d allowed, %d remaining" % (files_scanned, hits_total, hits_total - len(remaining), len(remaining)))
+    print("FAIL" if remaining else "PASS")
+    return 1 if remaining else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

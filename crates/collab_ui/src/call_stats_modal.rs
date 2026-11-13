@@ -1,4 +1,5 @@
 use anyhow::Result;
+use app_actions::ShowCallStats;
 use call::{
     ActiveCall,
     diagnostics::{CallDiagnostics, RemoteAudioDiagnostics},
@@ -14,7 +15,6 @@ use serde::Serialize;
 use std::{cmp::Reverse, path::PathBuf};
 use ui::prelude::*;
 use workspace::{ModalView, Workspace};
-use zed_actions::ShowCallStats;
 
 const WEBRTC_AUDIO_SAMPLES_PER_MILLISECOND: f64 = 48.0;
 const PLAYBACK_FRAME_DURATION_MILLISECONDS: u64 = 10;

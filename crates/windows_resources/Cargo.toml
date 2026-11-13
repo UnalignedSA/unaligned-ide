@@ -14,4 +14,5 @@ doctest = false
 test = false
 
 [target.'cfg(target_os = "windows")'.dependencies]
+branding.workspace = true
 embed-resource = "3.0"

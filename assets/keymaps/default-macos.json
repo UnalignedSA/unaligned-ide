@@ -28,15 +28,15 @@
       "alt-shift-enter": "menu::Restart",
       "cmd-shift-w": "workspace::CloseWindow",
       "shift-escape": "workspace::ToggleZoom",
-      "cmd-=": ["zed::IncreaseBufferFontSize", { "persist": false }],
-      "cmd-+": ["zed::IncreaseBufferFontSize", { "persist": false }],
-      "cmd--": ["zed::DecreaseBufferFontSize", { "persist": false }],
-      "cmd-0": ["zed::ResetBufferFontSize", { "persist": false }],
-      "cmd-alt-,": "zed::OpenSettingsFile",
-      "cmd-q": "zed::Quit",
-      "cmd-h": "zed::Hide",
-      "alt-cmd-h": "zed::HideOthers",
-      "cmd-m": "zed::Minimize",
+      "cmd-=": ["app::IncreaseBufferFontSize", { "persist": false }],
+      "cmd-+": ["app::IncreaseBufferFontSize", { "persist": false }],
+      "cmd--": ["app::DecreaseBufferFontSize", { "persist": false }],
+      "cmd-0": ["app::ResetBufferFontSize", { "persist": false }],
+      "cmd-alt-,": "app::OpenSettingsFile",
+      "cmd-q": "app::Quit",
+      "cmd-h": "app::Hide",
+      "alt-cmd-h": "app::HideOthers",
+      "cmd-m": "app::Minimize",
       "ctrl-cmd-z": "edit_prediction::RatePredictions",
       "ctrl-cmd-i": "edit_prediction::ToggleMenu",
       "ctrl-cmd-l": "lsp_tool::ToggleMenu",
@@ -591,7 +591,7 @@
       "cmd-f2": "editor::SelectAllMatches", // Select all occurrences of current word
       "cmd-k cmd-d": ["editor::SelectNext", { "replace_newest": true }], // editor.action.moveSelectionToNextFindMatch / find_under_expand_skip
       // macOS binds `ctrl-cmd-d` to Show Dictionary which breaks these two binds
-      // To use `ctrl-cmd-d` or `ctrl-k ctrl-cmd-d` in Zed you must execute this command and then restart:
+      // To use `ctrl-cmd-d` or `ctrl-k ctrl-cmd-d` you must execute this command and then restart:
       //   defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 70 '<dict><key>enabled</key><false/></dict>'
       "ctrl-cmd-d": ["editor::SelectPrevious", { "replace_newest": false }], // editor.action.addSelectionToPreviousFindMatch
       "cmd-k ctrl-cmd-d": ["editor::SelectPrevious", { "replace_newest": true }], // editor.action.moveSelectionToPreviousFindMatch
@@ -628,7 +628,7 @@
       "cmd-k cmd-9": "editor::FoldAtLevel_9",
       "cmd-k cmd-0": "editor::FoldAll",
       "cmd-k cmd-j": "editor::UnfoldAll",
-      // Using `ctrl-space` / `ctrl-shift-space` in Zed requires disabling the macOS global shortcut.
+      // Using `ctrl-space` / `ctrl-shift-space` requires disabling the macOS global shortcut.
       // System Preferences->Keyboard->Keyboard Shortcuts->Input Sources->Select the previous input source (uncheck)
       "ctrl-space": "editor::ShowCompletions",
       "ctrl-shift-space": "editor::ShowWordCompletions",
@@ -704,8 +704,8 @@
       "f6": "workspace::FocusNextPart",
       "shift-f6": "workspace::FocusPreviousPart",
       "cmd-f6": "workspace::FocusNextPart",
-      "fn-f": "zed::ToggleFullScreen",
-      "ctrl-cmd-f": "zed::ToggleFullScreen",
+      "fn-f": "app::ToggleFullScreen",
+      "ctrl-cmd-f": "app::ToggleFullScreen",
       // Change the default action on `menu::Confirm` by setting the parameter
       // "alt-cmd-o": ["projects::OpenRecent", {"create_new_window": true }],
       "alt-cmd-o": "projects::OpenRecent",
@@ -748,7 +748,7 @@
       "cmd-shift-h": ["pane::DeploySearch", { "replace_enabled": true }],
       "cmd-shift-t": "pane::ReopenClosedItem",
       "cmd-k cmd-p": "workspace::ReopenLastPicker",
-      "cmd-k cmd-s": "zed::OpenKeymap",
+      "cmd-k cmd-s": "app::OpenKeymap",
       "cmd-k cmd-t": "theme_selector::Toggle",
       "cmd-k cmd-shift-t": "theme::ToggleMode",
       "ctrl-alt-cmd-p": "settings_profile_selector::Toggle",
@@ -776,7 +776,7 @@
       "cmd-k shift-right": "workspace::SwapPaneRight",
       "cmd-k shift-up": "workspace::SwapPaneUp",
       "cmd-k shift-down": "workspace::SwapPaneDown",
-      "cmd-shift-x": "zed::Extensions",
+      "cmd-shift-x": "app::Extensions",
       "f5": "debugger::Rerun",
       "cmd-w": ["pane::CloseActiveItem", { "close_pinned": false }],
       "ctrl-alt-w": "workspace::CloseActiveDock",
@@ -988,7 +988,6 @@
     "bindings": {
       "ctrl-alt-cmd-f": "workspace::FollowNextCollaborator",
       // TODO: Move this to a dock open action
-      "cmd-shift-c": "collab_panel::ToggleFocus",
       // Only available in debug builds: opens an element inspector for development.
       "cmd-alt-i": "dev::ToggleInspector",
       // Cycles the frame-time debug overlay between hidden, frame-time-only, and detailed modes.
@@ -1252,31 +1251,6 @@
     },
   },
   {
-    "context": "CollabPanel && not_editing",
-    "use_key_equivalents": true,
-    "bindings": {
-      "ctrl-backspace": "collab_panel::Remove",
-      "space": "menu::Confirm",
-    },
-  },
-  {
-    "context": "CollabPanel",
-    "use_key_equivalents": true,
-    "bindings": {
-      "alt-up": "collab_panel::MoveChannelUp",
-      "alt-down": "collab_panel::MoveChannelDown",
-      "alt-enter": "collab_panel::OpenSelectedChannelNotes",
-      "shift-enter": "collab_panel::ToggleSelectedChannelFavorite",
-    },
-  },
-  {
-    "context": "(CollabPanel && editing) > Editor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "space": "collab_panel::InsertSpace",
-    },
-  },
-  {
     "context": "ChannelModal",
     "use_key_equivalents": true,
     "bindings": {
@@ -1418,7 +1392,7 @@
       "cmd-home": "terminal::ScrollToTop",
       "shift-end": "terminal::ScrollToBottom",
       "cmd-end": "terminal::ScrollToBottom",
-      // Using `ctrl-shift-space` in Zed requires disabling the macOS global shortcut.
+      // Using `ctrl-shift-space` requires disabling the macOS global shortcut.
       // System Preferences->Keyboard->Keyboard Shortcuts->Input Sources->Select the previous input source (uncheck)
       "ctrl-shift-space": "terminal::ToggleViMode",
       "ctrl-alt-up": "pane::SplitUp",
@@ -1459,7 +1433,7 @@
     },
   },
   {
-    "context": "ZedPredictModal",
+    "context": "EditPredictionOnboardingModal",
     "use_key_equivalents": true,
     "bindings": {
       "escape": "menu::Cancel",
@@ -1532,7 +1506,7 @@
       "cmd-c": "keymap_editor::CopyAction",
       "cmd-shift-c": "keymap_editor::CopyContext",
       "cmd-t": "keymap_editor::ShowMatchingKeybinds",
-      "cmd-e": "zed::OpenKeymapFile",
+      "cmd-e": "app::OpenKeymapFile",
     },
   },
   {
@@ -1571,13 +1545,11 @@
     "context": "Onboarding",
     "use_key_equivalents": true,
     "bindings": {
-      "cmd-=": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "cmd-+": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "cmd--": ["zed::DecreaseUiFontSize", { "persist": false }],
-      "cmd-0": ["zed::ResetUiFontSize", { "persist": false }],
+      "cmd-=": ["app::IncreaseUiFontSize", { "persist": false }],
+      "cmd-+": ["app::IncreaseUiFontSize", { "persist": false }],
+      "cmd--": ["app::DecreaseUiFontSize", { "persist": false }],
+      "cmd-0": ["app::ResetUiFontSize", { "persist": false }],
       "cmd-enter": "onboarding::Finish",
-      "alt-tab": "onboarding::SignIn",
-      "alt-shift-a": "onboarding::OpenAccount",
     },
   },
   {
@@ -1585,15 +1557,18 @@
     "use_key_equivalents": true,
     "bindings": {
       "cmd-n": "workspace::NewFile",
-      "cmd-=": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "cmd-+": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "cmd--": ["zed::DecreaseUiFontSize", { "persist": false }],
-      "cmd-0": ["zed::ResetUiFontSize", { "persist": false }],
+      "cmd-=": ["app::IncreaseUiFontSize", { "persist": false }],
+      "cmd-+": ["app::IncreaseUiFontSize", { "persist": false }],
+      "cmd--": ["app::DecreaseUiFontSize", { "persist": false }],
+      "cmd-0": ["app::ResetUiFontSize", { "persist": false }],
       "cmd-1": ["welcome::OpenRecentProject", 0],
       "cmd-2": ["welcome::OpenRecentProject", 1],
       "cmd-3": ["welcome::OpenRecentProject", 2],
       "cmd-4": ["welcome::OpenRecentProject", 3],
       "cmd-5": ["welcome::OpenRecentProject", 4],
+      "cmd-6": ["welcome::OpenRecentProject", 5],
+      "cmd-7": ["welcome::OpenRecentProject", 6],
+      "cmd-8": ["welcome::OpenRecentProject", 7],
     },
   },
   {
@@ -1609,7 +1584,7 @@
     "context": "!SettingsWindow",
     "use_key_equivalents": true,
     "bindings": {
-      "cmd-,": "zed::OpenSettings",
+      "cmd-,": "app::OpenSettings",
     },
   },
   {
@@ -1715,7 +1690,7 @@
     "bindings": {
       "cmd-shift-backspace": "worktree_picker::DeleteWorktree",
       "cmd-alt-shift-backspace": "worktree_picker::ForceDeleteWorktree",
-      "cmd-shift-c": "zed::OpenWorktreeSetupTasks",
+      "cmd-shift-c": "app::OpenWorktreeSetupTasks",
     },
   },
   {

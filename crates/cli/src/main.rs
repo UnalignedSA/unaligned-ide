@@ -31,7 +31,100 @@ use walkdir::WalkDir;
 
 use std::io::IsTerminal;
 
-const URL_PREFIX: [&'static str; 5] = ["zed://", "http://", "https://", "file://", "ssh://"];
+/// Arguments that start with one of these are links, not paths. The product's
+/// own links (`<branding::URL_SCHEME>://…`) are recognised by
+/// `cli::is_product_url` and rewritten to the internal `ide://` form before
+/// they are sent to the app.
+const URL_PREFIX: [&'static str; 5] = ["ide://", "http://", "https://", "file://", "ssh://"];
+
+/// Splits off the arguments that are links. A product link is returned in the
+/// internal form the app parses; a path is returned as `None`.
+fn url_argument(arg: &str) -> Option<String> {
+    if cli::is_product_url(arg) {
+        Some(cli::to_internal_url(arg).into_owned())
+    } else if URL_PREFIX.iter().any(|&prefix| arg.starts_with(prefix)) {
+        Some(arg.to_string())
+    } else {
+        None
+    }
+}
+
+/// The line printed by `--version`: the product, its version, the upstream
+/// version it is based on, and where the app was found.
+fn version_line(version: &str, app_path: &Path) -> String {
+    let version = version.trim();
+    format!(
+        "{}{}{} (based on {} {}) – {}",
+        branding::PRODUCT_NAME,
+        if version.is_empty() { "" } else { " " },
+        version,
+        branding::UPSTREAM_NAME,
+        branding::UPSTREAM_VERSION,
+        app_path.display(),
+    )
+}
+
+/// `--uninstall` is refused. Upstream runs its `script/uninstall.sh` here,
+/// which deletes Zed's own application, data, configuration and command
+/// (`/Applications/Zed.app`, `~/Library/Application Support/Zed`,
+/// `~/.config/zed`, `~/.local/bin/zed`, …): on a machine that also has Zed
+/// installed it would remove Zed, and it would remove nothing of this product.
+/// The flag stays so that it answers with an explanation instead of
+/// "unexpected argument"; it comes back when the product has an uninstall
+/// script of its own.
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    not(feature = "no-bundled-uninstall")
+))]
+fn refuse_uninstall() -> anyhow::Error {
+    anyhow::anyhow!(
+        "`--uninstall` is not available in {} yet. Nothing was removed.",
+        branding::PRODUCT_NAME
+    )
+}
+
+/// The text shown above `--help`. The command is named after the product
+/// (`branding::APP_ID`), which is the name the installed link carries.
+fn before_help() -> String {
+    let command = branding::APP_ID;
+    let product = branding::PRODUCT_NAME;
+    format!(
+        "The {product} command-line tool.
+It is a separate binary that starts {product} or talks to the running one.
+
+Examples:
+    `{command}`
+          Simply opens {product}
+    `{command} --foreground`
+          Runs in foreground (shows all logs)
+    `{command} path-to-your-project`
+          Open your project in {product}
+    `{command} -n path-to-file `
+          Open file/folder in a new window"
+    )
+}
+
+fn after_help() -> String {
+    format!(
+        "To read from stdin, append '-', e.g. 'ps axf | {} -'",
+        branding::APP_ID
+    )
+}
+
+/// The long help of `--user-data-dir`. Not a doc comment on the argument,
+/// because it names the default directories, which follow `paths::APP_NAME`
+/// (the same text as the app's own `--help`).
+fn user_data_dir_help() -> String {
+    let app_name = paths::APP_NAME;
+    format!(
+        "Sets a custom directory for all user data (e.g., database, extensions, logs).\n\n\
+         This overrides the default platform-specific data directory location, and puts\n\
+         the configuration, state, cache and logs inside the directory as well.\n\
+         On macOS, the default is `~/Library/Application Support/{app_name}`.\n\
+         On Linux/FreeBSD, the default is `$XDG_DATA_HOME/{app_name}`.\n\
+         On Windows, the default is `%LOCALAPPDATA%\\{app_name}`."
+    )
+}
 
 struct Detect;
 
@@ -48,21 +141,10 @@ trait InstalledApp {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "zed",
+    name = branding::APP_ID,
     disable_version_flag = true,
-    before_help = "The Zed CLI binary.
-This CLI is a separate binary that invokes Zed.
-
-Examples:
-    `zed`
-          Simply opens Zed
-    `zed --foreground`
-          Runs in foreground (shows all logs)
-    `zed path-to-your-project`
-          Open your project in Zed
-    `zed -n path-to-file `
-          Open file/folder in a new window",
-    after_help = "To read from stdin, append '-', e.g. 'ps axf | zed -'"
+    before_help = before_help(),
+    after_help = after_help()
 )]
 struct Args {
     /// Wait for all of the given paths to be opened/closed before exiting.
@@ -79,41 +161,34 @@ struct Args {
     /// Reuse an existing window, replacing its workspace
     #[arg(short, long, overrides_with_all = ["add", "new", "existing", "classic"], hide = true)]
     reuse: bool,
-    /// Open in existing Zed window
+    /// Open in an existing window
     #[arg(short = 'e', long = "existing", overrides_with_all = ["add", "new", "reuse", "classic"])]
     existing: bool,
     /// Use the classic open behavior: new window for directories, reuse for files
     #[arg(long, hide = true, overrides_with_all = ["add", "new", "reuse", "existing"])]
     classic: bool,
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
-    /// This overrides the default platform-specific data directory location:
-    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Zed`.")]
-    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Zed`.")]
-    #[cfg_attr(
-        not(any(target_os = "windows", target_os = "macos")),
-        doc = "`$XDG_DATA_HOME/zed`."
-    )]
-    #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
+    #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath, long_help = user_data_dir_help())]
     user_data_dir: Option<String>,
-    /// The paths to open in Zed (space-separated).
+    /// The paths or links to open (space-separated).
     ///
     /// Use `path:line:column` syntax to open a file at the given line and column.
     #[arg(trailing_var_arg = true, value_hint = clap::ValueHint::AnyPath)]
     paths_with_position: Vec<String>,
-    /// Print Zed's version and the app path.
+    /// Print the version and the app path.
     #[arg(short, long)]
     version: bool,
-    /// Run zed in the foreground (useful for debugging)
+    /// Run the app in the foreground (useful for debugging)
     #[arg(long)]
     foreground: bool,
-    /// Custom path to Zed.app or the zed binary
-    #[arg(long)]
+    /// Custom path to the app bundle or to the editor binary
+    #[arg(long = "app", value_name = "PATH")]
     zed: Option<PathBuf>,
-    /// Run zed in dev-server mode
-    #[arg(long)]
+    /// Removed: dev servers were replaced by SSH remoting
+    #[arg(long, hide = true)]
     dev_server_token: Option<String>,
     /// The username and WSL distribution to use when opening paths. If not specified,
-    /// Zed will attempt to open the paths directly.
+    /// the paths are opened directly.
     ///
     /// The username is optional, and if not specified, the default user for the distribution
     /// will be used.
@@ -124,11 +199,11 @@ struct Args {
     #[cfg(target_os = "windows")]
     #[arg(long, value_name = "USER@DISTRO")]
     wsl: Option<String>,
-    /// Not supported in Zed CLI, only supported on Zed binary
+    /// Not supported in the command-line tool, only on the editor binary.
     /// Will attempt to give the correct command to run
     #[arg(long)]
     system_specs: bool,
-    /// Print a JSON snapshot of the running Zed's GPUI and platform state
+    /// Print a JSON snapshot of the running app's GPUI and platform state
     /// (windows, displays, frame scheduling, cursor), for debugging.
     #[arg(long)]
     debug_state: bool,
@@ -142,19 +217,19 @@ struct Args {
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.
     #[arg(long, action = clap::ArgAction::Append, num_args = 2, value_names = ["OLD_PATH", "NEW_PATH"], value_hint = clap::ValueHint::AnyPath)]
     diff: Vec<String>,
-    /// Generate shell completions for Zed
+    /// Generate shell completions
     #[arg(long, value_names = ["SHELL"])]
     completions: Option<Shell>,
-    /// Uninstall Zed from user system
+    /// Not available: see `refuse_uninstall`.
     #[cfg(all(
         any(target_os = "linux", target_os = "macos"),
         not(feature = "no-bundled-uninstall")
     ))]
-    #[arg(long)]
+    #[arg(long, hide = true)]
     uninstall: bool,
 
     /// Used for SSH/Git password authentication, to remove the need for netcat as a dependency,
-    /// by having Zed act like netcat communicating over a Unix socket.
+    /// by having this binary act like netcat communicating over a Unix socket.
     #[arg(long, hide = true)]
     askpass: Option<String>,
 }
@@ -268,6 +343,102 @@ fn create_empty_stub(temp_dir: &mut TempDir, rel: &Path) -> anyhow::Result<PathB
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn product_links_are_sent_to_the_app_in_the_internal_form() {
+        let scheme = branding::URL_SCHEME;
+        for (rest, expected) in [
+            ("settings", "ide://settings"),
+            ("file/tmp/a.rs:3", "ide://file/tmp/a.rs:3"),
+            ("extension/html", "ide://extension/html"),
+            ("agent?prompt=hi", "ide://agent?prompt=hi"),
+            (
+                "git/clone/?repo=https://example.com/a.git",
+                "ide://git/clone/?repo=https://example.com/a.git",
+            ),
+        ] {
+            assert_eq!(
+                url_argument(&format!("{scheme}://{rest}")).as_deref(),
+                Some(expected)
+            );
+        }
+        // A literal internal link and the other schemes go through unchanged.
+        for url in [
+            "ide://settings",
+            "file:///tmp/a.rs",
+            "ssh://host/a",
+            "https://example.com",
+        ] {
+            assert_eq!(url_argument(url).as_deref(), Some(url));
+        }
+        // Paths are not links.
+        for path in ["src/main.rs", "/tmp/a.rs:3:4", "-", scheme] {
+            assert_eq!(url_argument(path), None, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn version_line_names_the_product_and_its_upstream() {
+        let line = version_line("1.2.3", Path::new("/opt/app"));
+        assert_eq!(
+            line,
+            format!(
+                "{} 1.2.3 (based on {} {}) – /opt/app",
+                branding::PRODUCT_NAME,
+                branding::UPSTREAM_NAME,
+                branding::UPSTREAM_VERSION
+            )
+        );
+        // No version (a development build): no double space.
+        let line = version_line("", Path::new("/opt/app"));
+        assert!(
+            line.starts_with(&format!("{} (based on ", branding::PRODUCT_NAME)),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn help_names_the_command_after_the_product() {
+        let mut command = Args::command();
+        assert_eq!(command.get_name(), branding::APP_ID);
+        let help = command.render_long_help().to_string();
+        assert!(
+            help.contains(&format!("Usage: {}", branding::APP_ID)),
+            "{help}"
+        );
+        // Upstream's name never appears, neither as a command name nor as
+        // an option (the path of the editor is given with `--app`).
+        assert!(help.contains("--app <PATH>"), "{help}");
+        for line in help.lines() {
+            assert!(
+                !line
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|word| word.eq_ignore_ascii_case("zed")),
+                "help line names Zed: {line}"
+            );
+        }
+        assert!(help.contains(paths::APP_NAME), "{help}");
+    }
+
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos"),
+        not(feature = "no-bundled-uninstall")
+    ))]
+    #[test]
+    fn uninstall_is_refused_and_upstream_script_is_not_embedded() {
+        // The flag still parses, so the user gets the explanation.
+        let args = Args::try_parse_from([branding::APP_ID, "--uninstall"]).unwrap();
+        assert!(args.uninstall);
+        assert!(
+            refuse_uninstall()
+                .to_string()
+                .contains("Nothing was removed")
+        );
+        // Upstream's script removes Zed's own files; it must not be compiled in.
+        let source = include_str!("main.rs");
+        let needle = ["include_bytes!(\"../../../script/", "uninstall.sh\")"].concat();
+        assert!(!source.contains(&needle));
+    }
     use util::path;
     use util::paths::SanitizedPath;
     use util::test::TempTree;
@@ -462,7 +633,7 @@ fn run() -> Result<()> {
 
     // Must happen before clap — SSH invokes cli.exe directly as SSH_ASKPASS
     // and passes the socket path via env var to avoid argument parsing.
-    if let Ok(socket) = std::env::var("ZED_ASKPASS_SOCKET") {
+    if let Ok(socket) = std::env::var("IDE_ASKPASS_SOCKET") {
         askpass::main_from_args(&socket, std::env::args().skip(1));
         return Ok(());
     }
@@ -473,6 +644,14 @@ fn run() -> Result<()> {
     if let Some(socket) = &args.askpass {
         askpass::main(socket);
         return Ok(());
+    }
+
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos"),
+        not(feature = "no-bundled-uninstall")
+    ))]
+    if args.uninstall {
+        return Err(refuse_uninstall());
     }
 
     // Set custom data directory before any path operations
@@ -508,39 +687,16 @@ fn run() -> Result<()> {
     if args.system_specs {
         let path = app.path();
         let msg = [
-            "The `--system-specs` argument is not supported in the Zed CLI, only on Zed binary.",
+            "The `--system-specs` argument is not supported in the command-line tool, only on the editor binary.",
             "To retrieve the system specs on the command line, run the following command:",
             &format!("{} --system-specs", path.display()),
         ];
         anyhow::bail!(msg.join("\n"));
     }
 
-    #[cfg(all(
-        any(target_os = "linux", target_os = "macos"),
-        not(feature = "no-bundled-uninstall")
-    ))]
-    if args.uninstall {
-        static UNINSTALL_SCRIPT: &[u8] = include_bytes!("../../../script/uninstall.sh");
-
-        let tmp_dir = tempfile::tempdir()?;
-        let script_path = tmp_dir.path().join("uninstall.sh");
-        fs::write(&script_path, UNINSTALL_SCRIPT)?;
-
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
-
-        let status = std::process::Command::new("sh")
-            .arg(&script_path)
-            .env("ZED_CHANNEL", &*release_channel::RELEASE_CHANNEL_NAME)
-            .status()
-            .context("Failed to execute uninstall script")?;
-
-        std::process::exit(status.code().unwrap_or(1));
-    }
-
-    let (server, server_name) =
-        IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Zed spawn")?;
-    let url = format!("zed-cli://{server_name}");
+    let (server, server_name) = IpcOneShotServer::<IpcHandshake>::new()
+        .context("Handshake before the editor is spawned")?;
+    let url = format!("ide-cli://{server_name}");
 
     let open_behavior = if args.new {
         cli::OpenBehavior::AlwaysNew
@@ -629,8 +785,8 @@ fn run() -> Result<()> {
     let wsl = None;
 
     for path in args.paths_with_position.iter() {
-        if URL_PREFIX.iter().any(|&prefix| path.starts_with(prefix)) {
-            urls.push(path.to_string());
+        if let Some(url) = url_argument(path) {
+            urls.push(url);
         } else if path == "-" && args.paths_with_position.len() == 1 {
             let file = NamedTempFile::new()?;
             paths.push(file.path().to_string_lossy().into_owned());
@@ -650,7 +806,7 @@ fn run() -> Result<()> {
 
     anyhow::ensure!(
         args.dev_server_token.is_none(),
-        "Dev servers were removed in v0.157.x please upgrade to SSH remoting: https://zed.dev/docs/remote-development"
+        "Dev servers were removed: use SSH remoting instead"
     );
 
     rayon::ThreadPoolBuilder::new()
@@ -666,7 +822,9 @@ fn run() -> Result<()> {
             let exit_status = exit_status.clone();
             let user_data_dir_for_thread = user_data_dir.clone();
             move || {
-                let (_, handshake) = server.accept().context("Handshake after Zed spawn")?;
+                let (_, handshake) = server
+                    .accept()
+                    .context("Handshake after the editor is spawned")?;
                 let (tx, rx) = (handshake.requests, handshake.responses);
 
                 #[cfg(target_os = "windows")]
@@ -812,16 +970,19 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     let blue = console::Style::new().blue();
     let items = [
         format!(
-            "Add to existing Zed window ({})",
-            blue.apply_to("zed --existing")
+            "Add to the existing window ({})",
+            blue.apply_to(format!("{} --existing", branding::APP_ID))
         ),
-        format!("Open a new window ({})", blue.apply_to("zed --classic")),
+        format!(
+            "Open a new window ({})",
+            blue.apply_to(format!("{} --classic", branding::APP_ID))
+        ),
     ];
 
     let prompt = format!(
         "Configure default behavior for {}\n{}",
-        blue.apply_to("zed <path>"),
-        console::style("You can change this later in Zed settings"),
+        blue.apply_to(format!("{} <path>", branding::APP_ID)),
+        console::style("You can change this later in the settings"),
     );
 
     let selection = dialoguer::Select::new()
@@ -867,10 +1028,17 @@ mod linux {
                 let cli = env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
-                // ./zed is for the target directory in development builds.
-                let possible_locations =
-                    ["../libexec/zed-editor", "../lib/zed/zed-editor", "./zed"];
+                // What `script/unaligned/bundle-linux` stages
+                // (`libexec/<APP_ID>-editor`, the standard), the same under
+                // `lib` for distributions without libexec, then the editor
+                // beside the command: the target directory of a development
+                // build, where cargo names the binary after the product.
+                let app_id = branding::APP_ID;
+                let possible_locations = [
+                    format!("../libexec/{app_id}-editor"),
+                    format!("../lib/{app_id}/{app_id}-editor"),
+                    format!("./{app_id}"),
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -885,20 +1053,20 @@ mod linux {
 
     impl InstalledApp for App {
         fn zed_version_string(&self) -> String {
-            format!(
-                "Zed {}{}{} – {}",
+            let version = format!(
+                "{}{}{}",
                 if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
                     "".to_string()
                 } else {
                     format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
                 },
                 option_env!("RELEASE_VERSION").unwrap_or_default(),
-                match option_env!("ZED_COMMIT_SHA") {
-                    Some(commit_sha) => format!(" {commit_sha} "),
+                match option_env!("IDE_COMMIT_SHA") {
+                    Some(commit_sha) => format!(" {commit_sha}"),
                     None => "".to_string(),
                 },
-                self.0.display(),
-            )
+            );
+            crate::version_line(&version, &self.0)
         }
 
         fn launch(&self, ipc_url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
@@ -906,8 +1074,10 @@ mod linux {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| paths::data_dir().clone());
 
+            // The same name as in `listen_for_cli_connections` (crates/ide).
             let sock_path = data_dir.join(format!(
-                "zed-{}.sock",
+                "{}-{}.sock",
+                branding::APP_ID,
                 *release_channel::RELEASE_CHANNEL_NAME
             ));
             let sock = UnixDatagram::unbound()?;
@@ -994,16 +1164,27 @@ mod flatpak {
     use std::process::Command;
     use std::{env, process};
 
-    const EXTRA_LIB_ENV_NAME: &str = "ZED_FLATPAK_LIB_PATH";
-    const NO_ESCAPE_ENV_NAME: &str = "ZED_FLATPAK_NO_ESCAPE";
+    const EXTRA_LIB_ENV_NAME: &str = "IDE_FLATPAK_LIB_PATH";
+    const NO_ESCAPE_ENV_NAME: &str = "IDE_FLATPAK_NO_ESCAPE";
+
+    /// Shown by the app's update dialog under "<product> was installed via a
+    /// package manager."
+    fn update_explanation() -> String {
+        format!("Please use flatpak to update {}.", branding::PRODUCT_NAME)
+    }
+
+    /// The editor's file name in a packaged layout (`libexec/<APP_ID>-editor`).
+    fn editor_file_name() -> String {
+        format!("{}-editor", branding::APP_ID)
+    }
 
     fn restart_cli_args(flatpak_dir: &Path, invocation_args: &[OsString]) -> Vec<OsString> {
         let mut args = Vec::with_capacity(invocation_args.len() + 2);
 
-        if !invocation_args.iter().any(|arg| arg == "--zed") {
+        if !invocation_args.iter().any(|arg| arg == "--app") {
             // Positional paths consume all following arguments, so launcher options must precede them.
-            args.push("--zed".into());
-            args.push(flatpak_dir.join("libexec").join("zed-editor").into());
+            args.push("--app".into());
+            args.push(flatpak_dir.join("libexec").join(editor_file_name()).into());
         }
 
         args.extend_from_slice(invocation_args);
@@ -1030,7 +1211,7 @@ mod flatpak {
         if let Some(flatpak_dir) = get_flatpak_dir() {
             let mut args = vec!["/usr/bin/flatpak-spawn".into(), "--host".into()];
             args.append(&mut get_xdg_env_args());
-            args.push("--env=ZED_UPDATE_EXPLANATION=Please use flatpak to update zed".into());
+            args.push(format!("--env=IDE_UPDATE_EXPLANATION={}", update_explanation()).into());
             args.push(
                 format!(
                     "--env={EXTRA_LIB_ENV_NAME}={}",
@@ -1038,7 +1219,7 @@ mod flatpak {
                 )
                 .into(),
             );
-            args.push(flatpak_dir.join("bin").join("zed").into());
+            args.push(flatpak_dir.join("bin").join(branding::APP_ID).into());
 
             let invocation_args = env::args_os().skip(1).collect::<Vec<_>>();
             args.extend(restart_cli_args(&flatpak_dir, &invocation_args));
@@ -1051,11 +1232,11 @@ mod flatpak {
 
     pub fn set_bin_if_no_escape(mut args: super::Args) -> super::Args {
         if env::var(NO_ESCAPE_ENV_NAME).is_ok()
-            && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with("dev.zed.Zed"))
+            && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with(branding::REVERSE_DNS_ID))
             && args.zed.is_none()
         {
-            args.zed = Some("/app/libexec/zed-editor".into());
-            unsafe { env::set_var("ZED_UPDATE_EXPLANATION", "Please use flatpak to update zed") };
+            args.zed = Some(Path::new("/app/libexec").join(editor_file_name()));
+            unsafe { env::set_var("IDE_UPDATE_EXPLANATION", update_explanation()) };
         }
         args
     }
@@ -1066,7 +1247,7 @@ mod flatpak {
         }
 
         if let Ok(flatpak_id) = env::var("FLATPAK_ID") {
-            if !flatpak_id.starts_with("dev.zed.Zed") {
+            if !flatpak_id.starts_with(branding::REVERSE_DNS_ID) {
                 return None;
             }
 
@@ -1109,13 +1290,16 @@ mod flatpak {
             let flatpak_dir = Path::new("/flatpak");
             let args = restart_cli_args(flatpak_dir, &["project".into()]);
             let parsed =
-                crate::Args::try_parse_from(std::iter::once(OsString::from("zed")).chain(args))
+                crate::Args::try_parse_from(std::iter::once(OsString::from("cli")).chain(args))
                     .unwrap();
 
-            assert_eq!(parsed.zed, Some(flatpak_dir.join("libexec/zed-editor")));
+            assert_eq!(
+                parsed.zed,
+                Some(flatpak_dir.join("libexec").join(editor_file_name()))
+            );
             assert_eq!(parsed.paths_with_position, ["project"]);
 
-            let invocation_args = ["--zed".into(), "/custom/zed-editor".into()];
+            let invocation_args = ["--app".into(), "/custom/editor".into()];
             assert_eq!(
                 restart_cli_args(flatpak_dir, &invocation_args),
                 invocation_args
@@ -1162,20 +1346,20 @@ mod windows {
 
     impl InstalledApp for App {
         fn zed_version_string(&self) -> String {
-            format!(
-                "Zed {}{}{} – {}",
+            let version = format!(
+                "{}{}{}",
                 if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
                     "".to_string()
                 } else {
                     format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
                 },
                 option_env!("RELEASE_VERSION").unwrap_or_default(),
-                match option_env!("ZED_COMMIT_SHA") {
-                    Some(commit_sha) => format!(" {commit_sha} "),
+                match option_env!("IDE_COMMIT_SHA") {
+                    Some(commit_sha) => format!(" {commit_sha}"),
                     None => "".to_string(),
                 },
-                self.0.display(),
-            )
+            );
+            crate::version_line(&version, &self.0)
         }
 
         fn launch(&self, ipc_url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
@@ -1235,9 +1419,12 @@ mod windows {
                 let cli = std::env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // ../Zed.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
-                // directory in development builds.
-                let possible_locations = ["../Zed.exe", "../lib/zed/zed-editor.exe", "./zed.exe"];
+                // `<APP_ID>.exe` beside the `bin` directory that holds this
+                // command (what `script/unaligned/bundle-windows.ps1` stages),
+                // then the editor beside the command: the target directory
+                // of a development build.
+                let app_id = branding::APP_ID;
+                let possible_locations = [format!("../{app_id}.exe"), format!("./{app_id}.exe")];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -1293,6 +1480,12 @@ mod mac_os {
         },
     }
 
+    /// The editor inside an app bundle: `Contents/MacOS/<APP_ID>`, the name
+    /// `script/unaligned/bundle-mac` gives to `CFBundleExecutable`.
+    fn bundle_executable(app_bundle: &Path) -> PathBuf {
+        app_bundle.join("Contents/MacOS").join(branding::APP_ID)
+    }
+
     fn locate_bundle() -> Result<PathBuf> {
         let cli_path = std::env::current_exe()?.canonicalize()?;
         let mut app_path = cli_path.clone();
@@ -1336,7 +1529,7 @@ mod mac_os {
 
     impl InstalledApp for Bundle {
         fn zed_version_string(&self) -> String {
-            format!("Zed {} – {}", self.version(), self.path().display(),)
+            crate::version_line(&self.version(), self.path())
         }
 
         fn launch(&self, url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
@@ -1354,7 +1547,7 @@ mod mac_os {
                             kCFStringEncodingUTF8,
                             ptr::null(),
                         ));
-                        // equivalent to: open zed-cli:... -a /Applications/Zed\ Preview.app
+                        // equivalent to: open ide-cli:... -a /Applications/<the app bundle>.app
                         let urls_to_open =
                             CFArray::from_copyable(&[url_to_open.as_concrete_TypeRef()]);
                         LSOpenFromURLSpec(
@@ -1381,7 +1574,7 @@ mod mac_os {
                         .parent()
                         .with_context(|| format!("Executable {executable:?} path has no parent"))?;
                     let subprocess_stdout_file = fs::File::create(
-                        executable_parent.join("zed_dev.log"),
+                        executable_parent.join(format!("{}_dev.log", branding::APP_ID)),
                     )
                     .with_context(|| format!("Log file creation in {executable_parent:?}"))?;
                     let subprocess_stdin_file =
@@ -1413,7 +1606,7 @@ mod mac_os {
             user_data_dir: Option<&str>,
         ) -> io::Result<ExitStatus> {
             let path = match self {
-                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
+                Bundle::App { app_bundle, .. } => bundle_executable(app_bundle),
                 Bundle::LocalPath { executable, .. } => executable.clone(),
             };
 
@@ -1427,7 +1620,7 @@ mod mac_os {
 
         fn path(&self) -> PathBuf {
             match self {
-                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
+                Bundle::App { app_bundle, .. } => bundle_executable(app_bundle),
                 Bundle::LocalPath { executable, .. } => executable.clone(),
             }
         }

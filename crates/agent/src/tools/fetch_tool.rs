@@ -225,6 +225,11 @@ impl AgentTool for FetchTool {
         false
     }
 
+    // Reads a web page, nothing on this machine.
+    fn works_without_folder() -> bool {
+        true
+    }
+
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,

@@ -1,0 +1,1615 @@
+{
+  "defaults": {
+    "size": "1440x900",
+    "settle": 2.5,
+    "wait": 1.0
+  },
+  "scenes": [
+    {
+      "name": "onboarding",
+      "about": "First launch: no project, fresh data directory.",
+      "project": "none"
+    },
+    {
+      "name": "welcome",
+      "about": "Welcome page: a window with no project, once the onboarding tab is closed.",
+      "project": "none",
+      "actions": [
+        "pane::CloseActiveItem"
+      ],
+      "settings": {
+        "restore_on_startup": "launchpad"
+      }
+    },
+    {
+      "name": "restricted-mode",
+      "about": "The prompt shown when a folder is opened for the first time (untrusted project).",
+      "open": [
+        "src/main.rs"
+      ],
+      "settings": {
+        "session": {
+          "trust_all_worktrees": false
+        }
+      }
+    },
+    {
+      "name": "editor",
+      "about": "Editor with a Rust file and the explorer, git decorations in both.",
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "src/store.rs:44"
+      ]
+    },
+    {
+      "name": "editor-split",
+      "about": "Two panes side by side: Rust on the left, TypeScript on the right.",
+      "open": [
+        "src/store.rs:44",
+        "scripts/report.py",
+        "web/app.ts:30"
+      ],
+      "actions": [
+        "pane::SplitAndMoveRight"
+      ]
+    },
+    {
+      "name": "editor-narrow",
+      "about": "The editor scene in a small window (960x600), to check how the chrome shrinks.",
+      "size": "960x600",
+      "open": [
+        "web/app.ts",
+        "src/store.rs:44"
+      ]
+    },
+    {
+      "name": "empty-window",
+      "about": "A project with no file open: the empty editor area."
+    },
+    {
+      "name": "markdown-preview",
+      "about": "Markdown file with its preview to the side.",
+      "open": [
+        "README.md"
+      ],
+      "actions": [
+        "markdown::OpenPreviewToTheSide"
+      ]
+    },
+    {
+      "name": "find",
+      "about": "Find widget in the editor, with matches highlighted.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "buffer_search::Deploy",
+        {
+          "type": "task"
+        }
+      ]
+    },
+    {
+      "name": "find-replace",
+      "about": "Find widget with the replace row.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "buffer_search::DeployReplace",
+        {
+          "type": "task"
+        }
+      ]
+    },
+    {
+      "name": "project-search",
+      "about": "Project search with results.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "workspace::NewSearch",
+        300,
+        {
+          "type": "task"
+        },
+        {
+          "keys": "enter"
+        }
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "command-palette",
+      "about": "Command palette with a query.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "command_palette::Toggle",
+        {
+          "type": "split"
+        }
+      ]
+    },
+    {
+      "name": "file-finder",
+      "about": "File finder with a query.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "file_finder::Toggle",
+        300,
+        {
+          "type": "s"
+        }
+      ]
+    },
+    {
+      "name": "go-to-line",
+      "about": "Go to line prompt.",
+      "open": [
+        "src/store.rs"
+      ],
+      "actions": [
+        "go_to_line::Toggle",
+        {
+          "type": "52"
+        }
+      ]
+    },
+    {
+      "name": "tab-switcher",
+      "about": "Tab switcher over several open files.",
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "scripts/report.py",
+        "src/store.rs"
+      ],
+      "actions": [
+        "tab_switcher::ToggleAll"
+      ]
+    },
+    {
+      "name": "theme-selector",
+      "about": "Theme selector over the editor.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "theme_selector::Toggle"
+      ]
+    },
+    {
+      "name": "language-selector",
+      "about": "Language selector.",
+      "open": [
+        "src/store.rs"
+      ],
+      "actions": [
+        "language_selector::Toggle"
+      ]
+    },
+    {
+      "name": "recent-projects",
+      "about": "Recent projects picker.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "projects::OpenRecent"
+      ]
+    },
+    {
+      "name": "branch-picker",
+      "about": "Git branch picker.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "git::Branch"
+      ]
+    },
+    {
+      "name": "settings",
+      "about": "Settings, first page (General). The settings window is captured, not the main one.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "app::OpenSettings"
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "settings-ai",
+      "about": "Settings, AI page.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        [
+          "app::OpenSettingsPage",
+          {
+            "page": "AI"
+          }
+        ]
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "settings-appearance",
+      "about": "Settings, Appearance page.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        [
+          "app::OpenSettingsPage",
+          {
+            "page": "Appearance"
+          }
+        ]
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "keymap",
+      "about": "Keymap editor.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "app::OpenKeymap"
+      ],
+      "wait": 2.5
+    },
+    {
+      "name": "extensions",
+      "about": "Extensions page (the list needs the network).",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "app::Extensions"
+      ],
+      "wait": 4.0
+    },
+    {
+      "name": "git-panel",
+      "about": "Source control panel with staged, modified, added, deleted and untracked files.",
+      "open": [
+        "src/store.rs:32"
+      ],
+      "actions": [
+        "git_panel::ToggleFocus"
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "git-diff",
+      "about": "Uncommitted changes as a diff, next to the source control panel.",
+      "open": [
+        "src/store.rs:32"
+      ],
+      "actions": [
+        "git_panel::ToggleFocus",
+        500,
+        "git::Diff"
+      ],
+      "wait": 2.5
+    },
+    {
+      "name": "outline-panel",
+      "about": "Outline panel for a Rust file.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "outline_panel::ToggleFocus"
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "terminal",
+      "about": "Terminal panel open under the editor, with a command typed.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "terminal_panel::ToggleFocus",
+        1500,
+        {
+          "type": "git status --short"
+        },
+        {
+          "keys": "enter"
+        }
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "debug-panel",
+      "about": "Debug panel, empty state.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "debug_panel::ToggleFocus"
+      ]
+    },
+    {
+      "name": "diagnostics",
+      "about": "Project diagnostics, empty state (real diagnostics need a language server).",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "diagnostics::Deploy"
+      ]
+    },
+    {
+      "name": "chat-connect",
+      "about": "Chat panel with no provider connected: the connection screen.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "agent::ToggleFocus"
+      ],
+      "wait": 2.5
+    },
+    {
+      "name": "chat-providers",
+      "about": "Provider picker opened from the chat panel.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "agent::ToggleFocus",
+        800,
+        "agent::ManageProviders"
+      ],
+      "wait": 2.5
+    },
+    {
+      "name": "chat-ready",
+      "about": "Chat panel connected to Unaligned (stand-in API, no real key): empty conversation.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "actions": [
+        "agent::ToggleFocus"
+      ],
+      "wait": 3.0
+    },
+    {
+      "name": "chat-providers-connected",
+      "about": "Provider picker with Unaligned connected (stand-in API).",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "actions": [
+        "agent::ToggleFocus",
+        1500,
+        "agent::ManageProviders"
+      ],
+      "wait": 2.5
+    },
+    {
+      "name": "chat-model-selector",
+      "about": "Chat panel connected (stand-in API), model selector open.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "agent::ToggleFocus",
+        2000,
+        "agent::ToggleModelSelector"
+      ],
+      "wait": 2.0,
+      "fake_api": true
+    },
+    {
+      "name": "chat-reply",
+      "about": "Chat panel with a question, a tool call and a streamed answer (stand-in API).",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "actions": [
+        "agent::ToggleFocus",
+        2000,
+        {
+          "type": "Make search match tags too"
+        },
+        {
+          "keys": "enter"
+        }
+      ],
+      "wait": 6.0
+    },
+    {
+      "name": "inline-assist",
+      "about": "Inline assist box in the editor (Cmd+K), connected (stand-in API), prompt typed.",
+      "open": [
+        "src/store.rs:52"
+      ],
+      "actions": [
+        "assistant::InlineAssist",
+        800,
+        {
+          "type": "return an error when the file is empty"
+        }
+      ],
+      "wait": 2.0,
+      "fake_api": true
+    },
+    {
+      "name": "inline-assist-result",
+      "about": "Inline assist after the model answered: the proposed edit with accept and reject.",
+      "open": [
+        "src/store.rs:52"
+      ],
+      "fake_api": true,
+      "actions": [
+        "assistant::InlineAssist",
+        800,
+        {
+          "type": "return an error when the file is empty"
+        },
+        {
+          "keys": "enter"
+        }
+      ],
+      "wait": 5.0
+    },
+    {
+      "name": "inline-assist-no-provider",
+      "about": "Inline assist with no provider connected.",
+      "open": [
+        "src/store.rs:52"
+      ],
+      "actions": [
+        "assistant::InlineAssist"
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "full-layout",
+      "about": "Everything at once: explorer, editor, terminal and chat panel.",
+      "open": [
+        "web/app.ts",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "terminal_panel::ToggleFocus",
+        800,
+        "agent::ToggleFocus",
+        800,
+        "editor::ToggleFocus"
+      ],
+      "wait": 2.5
+    },
+    {
+      "name": "context-menu-editor",
+      "about": "Editor context menu.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        {
+          "right_click": [
+            700,
+            400
+          ]
+        }
+      ]
+    },
+    {
+      "name": "context-menu-explorer",
+      "about": "Explorer context menu on a file.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        {
+          "right_click": [
+            130,
+            226
+          ]
+        }
+      ]
+    },
+    {
+      "name": "context-menu-tab",
+      "about": "Tab context menu, pointer on one of its items.",
+      "open": [
+        "web/app.ts",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        {
+          "right_click": [
+            370,
+            52
+          ]
+        },
+        {
+          "hover": [
+            440,
+            272
+          ]
+        }
+      ]
+    },
+    {
+      "name": "about",
+      "about": "About window (a small window of its own: it is the one captured).",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "app::About"
+      ]
+    },
+    {
+      "name": "component-preview",
+      "about": "Component preview: every core UI component on one page (developer tool).",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "workspace::OpenComponentPreview"
+      ],
+      "wait": 3.0
+    },
+    {
+      "name": "corners-round",
+      "about": "Editor context menu in One Dark: a theme without a corners key keeps rounded corners.",
+      "open": [
+        "src/store.rs"
+      ],
+      "actions": [
+        "editor::OpenContextMenu"
+      ],
+      "settings": {
+        "theme": "One Dark"
+      }
+    },
+    {
+      "name": "corners-forced-square",
+      "about": "Editor context menu in One Dark with the setting corners = square: right-angle corners.",
+      "open": [
+        "src/store.rs"
+      ],
+      "actions": [
+        "editor::OpenContextMenu"
+      ],
+      "settings": {
+        "theme": "One Dark",
+        "corners": "square"
+      }
+    },
+    {
+      "name": "editor-selection",
+      "about": "Everything selected in a Rust file: text and syntax colours on the selection.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "editor::SelectAll"
+      ]
+    },
+    {
+      "name": "button-primary",
+      "about": "Component preview, Button entry: the primary button at rest, hovered, focused and disabled.",
+      "actions": [
+        "workspace::OpenComponentPreview",
+        2000,
+        {
+          "type": "Button"
+        },
+        1500,
+        {
+          "click": [
+            364,
+            355
+          ]
+        },
+        1000
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "button-primary-one-dark",
+      "about": "The primary button states in One Dark: readable label on the blue fill, rounded corners.",
+      "actions": [
+        "workspace::OpenComponentPreview",
+        2000,
+        {
+          "type": "Button"
+        },
+        1500,
+        {
+          "click": [
+            364,
+            355
+          ]
+        },
+        1000
+      ],
+      "settings": {
+        "theme": "One Dark"
+      },
+      "wait": 2.0
+    },
+    {
+      "name": "count-badge",
+      "about": "Component preview filtered to CountBadge: 3, 42 and 99+ in both sizes, and the inline variant.",
+      "actions": [
+        "workspace::OpenComponentPreview",
+        2000,
+        {
+          "type": "CountBadge"
+        },
+        1500
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "preview-section-label",
+      "about": "Component preview, SectionLabel: mono uppercase labels in three colours, one truncated.",
+      "size": "1100x960",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "workspace::CloseAllDocks",
+        "workspace::OpenComponentPreview",
+        800,
+        {
+          "type": "section label"
+        }
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "preview-panel-header",
+      "about": "Component preview, PanelHeader: title, end-slot buttons, start slot, title slot, 1px line under each.",
+      "size": "1100x960",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "workspace::CloseAllDocks",
+        "workspace::OpenComponentPreview",
+        800,
+        {
+          "type": "panel header"
+        }
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "preview-text-tab-strip",
+      "about": "Component preview, TextTabStrip: selected tab with its marker, a count, end-slot buttons, compact strip.",
+      "size": "1100x960",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "workspace::CloseAllDocks",
+        "workspace::OpenComponentPreview",
+        800,
+        {
+          "type": "text tab strip"
+        }
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "preview-input-shell",
+      "about": "Component preview, InputShell: three sizes, rest, focused, invalid, disabled, sunken and raised.",
+      "size": "1100x960",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "workspace::CloseAllDocks",
+        "workspace::OpenComponentPreview",
+        800,
+        {
+          "type": "input shell"
+        }
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "preview-marker",
+      "about": "Component preview, selected marker: four sides in the accent and in the neutral colour.",
+      "size": "1100x960",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "workspace::CloseAllDocks",
+        "workspace::OpenComponentPreview",
+        800,
+        {
+          "type": "selected marker"
+        }
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "preview-empty-state",
+      "about": "Component preview, EmptyState: panel variant with one filled button and action rows, centred variant.",
+      "size": "1100x960",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "workspace::CloseAllDocks",
+        "workspace::OpenComponentPreview",
+        800,
+        {
+          "type": "empty state"
+        }
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "layout-explorer-right",
+      "about": "The Explorer moved to the right dock by its action: open there, its icon gone from the left group.",
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "project_panel::ToggleFocus",
+        600,
+        "workspace::MoveFocusedPanelToRightDock",
+        2000
+      ]
+    },
+    {
+      "name": "layout-terminal-left",
+      "about": "The terminal moved to the left dock by its action: a focused 480px column, bottom dock closed.",
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "terminal_panel::ToggleFocus",
+        1500,
+        "workspace::MoveFocusedPanelToLeftDock",
+        2500
+      ]
+    },
+    {
+      "name": "chat-key-refused",
+      "about": "Chat panel when the stand-in API refuses the key (401): what the user is told and offered.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "sk-unal-bad",
+      "actions": [
+        "agent::ToggleFocus"
+      ],
+      "wait": 3.0
+    },
+    {
+      "name": "chat-low-balance",
+      "about": "Chat after a question when the stand-in API answers 402, balance too low: the error card.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "sk-unal-low",
+      "actions": [
+        "agent::ToggleFocus",
+        2000,
+        {
+          "type": "Make search match tags too"
+        },
+        {
+          "keys": "enter"
+        }
+      ],
+      "wait": 6.0
+    },
+    {
+      "name": "chat-server-error",
+      "about": "Chat after a question when the stand-in API answers 500: the error card.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "sk-unal-err",
+      "actions": [
+        "agent::ToggleFocus",
+        2000,
+        {
+          "type": "Make search match tags too"
+        },
+        {
+          "keys": "enter"
+        }
+      ],
+      "wait": 6.0
+    },
+    {
+      "name": "connect-first-run",
+      "about": "Chat panel with nothing connected (stand-in API, no key): the connection screen alone, Unaligned open with the cursor in its key field, no composer.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "none",
+      "actions": [
+        "agent::ToggleFocus"
+      ],
+      "wait": 2.5
+    },
+    {
+      "name": "connect-first-run-light",
+      "about": "The first-run connection screen in Unaligned Light.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "none",
+      "actions": [
+        "agent::ToggleFocus"
+      ],
+      "settings": {
+        "theme": {
+          "mode": "light",
+          "light": "Unaligned Light",
+          "dark": "Unaligned"
+        }
+      },
+      "wait": 2.5
+    },
+    {
+      "name": "connect-bad-key",
+      "about": "A refused key typed into the connection screen: Needs attention, the reason under the field, the key still in the field, no chat.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "none",
+      "actions": [
+        "agent::ToggleFocus",
+        800,
+        {
+          "type": "sk-unal-bad"
+        },
+        {
+          "keys": "enter"
+        },
+        1500
+      ],
+      "wait": 1.5
+    },
+    {
+      "name": "connect-and-chat",
+      "about": "The newcomer's path: open the chat, type a key, Enter. The empty chat is ready, with the model and the balance.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "none",
+      "actions": [
+        "agent::ToggleFocus",
+        800,
+        {
+          "type": "sk-unal-test"
+        },
+        {
+          "keys": "enter"
+        },
+        2000
+      ],
+      "wait": 1.0
+    },
+    {
+      "name": "connect-checking",
+      "about": "Connections modal while a key is being checked (slow stand-in): Checking at the row's edge, a neutral disabled button.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "none",
+      "actions": [
+        "agent::ManageProviders",
+        800,
+        {
+          "type": "sk-unal-slow"
+        },
+        {
+          "keys": "enter"
+        },
+        700
+      ],
+      "wait": 0.3
+    },
+    {
+      "name": "connect-connected",
+      "about": "Connections modal after an accepted key: the top line names the model, the Unaligned row is closed on Connected and the balance, no filled button left.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "none",
+      "actions": [
+        "agent::ManageProviders",
+        800,
+        {
+          "type": "sk-unal-test"
+        },
+        {
+          "keys": "enter"
+        },
+        1500
+      ],
+      "wait": 1.5
+    },
+    {
+      "name": "connections-disconnect",
+      "about": "Connections modal, Unaligned connected and opened, Disconnect clicked: the question with an outlined Disconnect and Cancel. Two fixed clicks (the row, then the link).",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "none",
+      "actions": [
+        "agent::ToggleFocus",
+        800,
+        {
+          "type": "sk-unal-test"
+        },
+        {
+          "keys": "enter"
+        },
+        2000,
+        "agent::ManageProviders",
+        800,
+        {
+          "click": [
+            720,
+            168
+          ]
+        },
+        600,
+        {
+          "click": [
+            720,
+            289
+          ]
+        },
+        600
+      ]
+    },
+    {
+      "name": "chat-checking-key",
+      "about": "Empty chat while Unaligned has not answered about the key yet (slow stand-in): checking the key under the model line.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "sk-unal-slow",
+      "settle": 1.2,
+      "actions": [
+        "agent::ToggleFocus"
+      ],
+      "wait": 0.4
+    },
+    {
+      "name": "chat-key-refused-sent",
+      "about": "Chat after a question when the stand-in API answers 401: the card with Replace Key and Open Connections.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "sk-unal-bad",
+      "actions": [
+        "agent::ToggleFocus",
+        2000,
+        {
+          "type": "Make search match tags too"
+        },
+        {
+          "keys": "enter"
+        }
+      ],
+      "wait": 4.0
+    },
+    {
+      "name": "chat-waiting",
+      "about": "Chat right after a question with the slow stand-in: the row Waiting for the model, Stop in the composer.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "fake_api_key": "sk-unal-slow",
+      "settle": 4.0,
+      "actions": [
+        "agent::ToggleFocus",
+        2000,
+        {
+          "type": "Make search match tags too"
+        },
+        {
+          "keys": "enter"
+        }
+      ],
+      "wait": 1.2
+    },
+    {
+      "name": "chat-no-models",
+      "about": "Chat with a key but an unreachable server (closed port): one card, Could not reach Unaligned, Retry and Open Connections, no composer.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "settings": {
+        "language_models": {
+          "unaligned": {
+            "api_url": "http://127.0.0.1:9"
+          }
+        }
+      },
+      "env": [
+        "UNALIGNED_API_KEY=sk-unal-screenshot"
+      ],
+      "actions": [
+        "agent::ToggleFocus"
+      ],
+      "wait": 4.0
+    },
+    {
+      "name": "chat-new-chat-with",
+      "about": "The chooser under the New Chat caret: Agent ticked, the three agents to set up, Connections.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "actions": [
+        "agent::ToggleFocus",
+        2000,
+        "agent::ToggleNewThreadMenu",
+        800
+      ]
+    },
+    {
+      "name": "chat-bottom",
+      "about": "The chat with a reply in the bottom dock: tab strip, chat header, transcript and composer, nothing clipped.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "actions": [
+        "agent::ToggleFocus",
+        2000,
+        {
+          "type": "Make search match tags too"
+        },
+        {
+          "keys": "enter"
+        }
+      ],
+      "wait": 6.0,
+      "settings": {
+        "agent": {
+          "dock": "bottom"
+        }
+      }
+    },
+    {
+      "name": "chat-more-menu",
+      "about": "The chat header's More menu after a reply: Rules, Regenerate Title, Connections, Chat Settings, Sandbox, Full Screen.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "actions": [
+        "agent::ToggleFocus",
+        2000,
+        {
+          "type": "Make search match tags too"
+        },
+        {
+          "keys": "enter"
+        },
+        6000,
+        "agent::ToggleOptionsMenu",
+        800
+      ]
+    },
+    {
+      "name": "chat-history-delete",
+      "about": "History open after one chat, Backspace on its row: the question Delete this chat with Delete and Cancel. One fixed click (the search field).",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "actions": [
+        "agent::ToggleFocus",
+        2000,
+        {
+          "type": "Make search match tags too"
+        },
+        {
+          "keys": "enter"
+        },
+        6000,
+        "agent::ToggleHistory",
+        1000,
+        {
+          "click": [
+            1200,
+            79
+          ]
+        },
+        400,
+        {
+          "keys": "backspace"
+        },
+        600
+      ]
+    },
+    {
+      "name": "activity-bar-badge",
+      "about": "Activity bar with the changed-file count on the Source Control icon: a neutral badge.",
+      "open": [
+        "src/store.rs:32"
+      ],
+      "actions": [
+        "git_panel::ToggleFocus"
+      ],
+      "wait": 2.0,
+      "settings": {
+        "git_panel": {
+          "show_count_badge": true
+        }
+      }
+    },
+    {
+      "name": "activity-bar-manage",
+      "about": "The Manage menu at the foot of the activity bar (one fixed click on the gear): Settings, Keyboard Shortcuts, Themes, Extensions.",
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        {
+          "click": [
+            22,
+            854
+          ]
+        },
+        500
+      ]
+    },
+    {
+      "name": "layout-chat-left",
+      "about": "The chat moved to the left dock by its action: the bar reads Chat, Explorer, Source Control, Outline, then the bottom group.",
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "agent::ToggleFocus",
+        800,
+        "workspace::MoveFocusedPanelToLeftDock",
+        2000
+      ]
+    },
+    {
+      "name": "panel-drag-zones",
+      "about": "A drag held in mid-gesture: the TERMINAL tab pressed and dragged over the left zone. Three outlined drop zones, the left one filled, the chip under the pointer.",
+      "open": [
+        "web/app.ts",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "terminal_panel::ToggleFocus",
+        800,
+        "agent::ToggleFocus",
+        800,
+        "editor::ToggleFocus",
+        500,
+        {
+          "press": [
+            366,
+            574
+          ]
+        },
+        {
+          "drag_to": [
+            160,
+            400
+          ]
+        },
+        300
+      ],
+      "wait": 1.0
+    },
+    {
+      "name": "activity-bar-drag-slot",
+      "about": "The chat moved left, then the Explorer icon dragged over the editor: the empty right group shows as a slot between two dividers.",
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "agent::ToggleFocus",
+        800,
+        "workspace::MoveFocusedPanelToLeftDock",
+        2000,
+        {
+          "press": [
+            22,
+            100
+          ]
+        },
+        {
+          "drag_to": [
+            30,
+            108
+          ]
+        },
+        {
+          "drag_to": [
+            700,
+            300
+          ]
+        },
+        400
+      ]
+    },
+    {
+      "name": "layout-menu",
+      "about": "The Layout menu of the title bar (one fixed click on its fourth button): Classic Layout checked, AI-First Layout, Zen Mode, Centered Layout, Reset Layout.",
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        {
+          "click": [
+            1423,
+            16
+          ]
+        },
+        600
+      ]
+    },
+    {
+      "name": "layout-ai-first",
+      "about": "The AI-first preset: chat open in the left dock, Explorer open in the right dock, editor between.",
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "actions": [
+        "workspace::UseAgenticLayout",
+        2500
+      ]
+    },
+    {
+      "name": "zen",
+      "about": "Zen mode from a window with the Explorer and the terminal open: no activity bar, no status bar, no dock, the editor centred.",
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "terminal_panel::ToggleFocus",
+        800,
+        "workspace::ToggleZenMode",
+        800
+      ]
+    },
+    {
+      "name": "layout-reset",
+      "about": "Reset Layout from a scrambled layout in Zen: Explorer left and open, chat right at 400px, terminal at the bottom, bars back, not centred.",
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "src/store.rs:44"
+      ],
+      "fake_api": true,
+      "settings": {
+        "agent": {
+          "dock": "left",
+          "flexible": true
+        },
+        "project_panel": {
+          "dock": "right"
+        },
+        "terminal": {
+          "dock": "right"
+        },
+        "debugger": {
+          "dock": "left"
+        },
+        "bottom_dock_layout": "full"
+      },
+      "actions": [
+        "agent::ToggleFocus",
+        800,
+        "terminal_panel::ToggleFocus",
+        1500,
+        "workspace::ToggleZenMode",
+        500,
+        "workspace::ResetLayout",
+        2500
+      ]
+    },
+    {
+      "name": "welcome-tab",
+      "about": "The welcome page opened by its command. Crash guard: this scene fails if building the page reads the workspace again.",
+      "project": "none",
+      "actions": [
+        "app::ShowWelcome",
+        1500
+      ]
+    },
+    {
+      "name": "welcome-light",
+      "about": "The welcome page in Unaligned Light: the mark's back square dark, one red button.",
+      "project": "none",
+      "actions": [
+        "pane::CloseActiveItem"
+      ],
+      "settings": {
+        "restore_on_startup": "launchpad",
+        "theme": {
+          "mode": "light",
+          "light": "Unaligned Light",
+          "dark": "Unaligned"
+        }
+      }
+    },
+    {
+      "name": "about-light",
+      "about": "About window in Unaligned Light: version line, the credit to Zed, one primary OK.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "app::About"
+      ],
+      "settings": {
+        "theme": {
+          "mode": "light",
+          "light": "Unaligned Light",
+          "dark": "Unaligned"
+        }
+      }
+    },
+    {
+      "name": "licenses",
+      "about": "The licences page of a development build: product, credit, the GPL line, then the GPL text. No crash without assets/licenses.md.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "app::OpenLicenses",
+        1500
+      ]
+    },
+    {
+      "name": "command-palette-app",
+      "about": "Command palette filtered to app: open. Title Case names under the App namespace, no Zed.",
+      "open": [
+        "src/main.rs"
+      ],
+      "actions": [
+        "command_palette::Toggle",
+        {
+          "type": "app: open"
+        },
+        600
+      ]
+    },
+    {
+      "name": "update-available",
+      "about": "Title bar with the simulated Update Available button (1000x420): outlined, no fill, with its dismiss cell.",
+      "size": "1000x420",
+      "actions": [
+        "collab::SimulateUpdateAvailable",
+        200,
+        "collab::SimulateUpdateAvailable",
+        400
+      ]
+    },
+    {
+      "name": "terminal-ansi",
+      "about": "The 8 ANSI colours normal, bright and dim in the terminal, with a bright-black hint.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "terminal_panel::ToggleFocus",
+        1500,
+        {
+          "type": "sh scripts/ansi.sh"
+        },
+        {
+          "keys": "enter"
+        }
+      ],
+      "wait": 2.0
+    },
+    {
+      "name": "light-full-layout",
+      "about": "Explorer, editor, terminal and chat panel in Unaligned Light.",
+      "open": [
+        "web/app.ts",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "terminal_panel::ToggleFocus",
+        800,
+        "agent::ToggleFocus",
+        800,
+        "editor::ToggleFocus"
+      ],
+      "wait": 2.5,
+      "settings": {
+        "theme": {
+          "mode": "light",
+          "light": "Unaligned Light",
+          "dark": "Unaligned"
+        }
+      }
+    },
+    {
+      "name": "contrast-full-layout",
+      "about": "Explorer, editor, terminal and chat panel in Unaligned Contrast.",
+      "open": [
+        "web/app.ts",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "terminal_panel::ToggleFocus",
+        800,
+        "agent::ToggleFocus",
+        800,
+        "editor::ToggleFocus"
+      ],
+      "wait": 2.5,
+      "settings": {
+        "theme": "Unaligned Contrast"
+      }
+    },
+    {
+      "name": "dusk-full-layout",
+      "about": "Explorer, editor, terminal and chat panel in Unaligned Dusk.",
+      "open": [
+        "web/app.ts",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "terminal_panel::ToggleFocus",
+        800,
+        "agent::ToggleFocus",
+        800,
+        "editor::ToggleFocus"
+      ],
+      "wait": 2.5,
+      "settings": {
+        "theme": "Unaligned Dusk"
+      }
+    },
+    {
+      "name": "midnight-full-layout",
+      "about": "Explorer, editor, terminal and chat panel in Unaligned Midnight: every marker and the Connect button azure, nothing red but git states and keywords.",
+      "open": [
+        "web/app.ts",
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "terminal_panel::ToggleFocus",
+        800,
+        "agent::ToggleFocus",
+        800,
+        "editor::ToggleFocus"
+      ],
+      "wait": 2.5,
+      "settings": {
+        "theme": "Unaligned Midnight"
+      }
+    },
+    {
+      "name": "midnight-git-diff",
+      "about": "The diff next to Source Control in Unaligned Midnight: accent azure, deletions and counts in the status red.",
+      "open": [
+        "src/store.rs:32"
+      ],
+      "actions": [
+        "git_panel::ToggleFocus",
+        500,
+        "git::Diff"
+      ],
+      "wait": 2.5,
+      "settings": {
+        "theme": "Unaligned Midnight"
+      }
+    },
+    {
+      "name": "light-git-diff",
+      "about": "The diff next to Source Control in Unaligned Light: pale fills, code readable on both.",
+      "open": [
+        "src/store.rs:32"
+      ],
+      "actions": [
+        "git_panel::ToggleFocus",
+        500,
+        "git::Diff"
+      ],
+      "wait": 2.5,
+      "settings": {
+        "theme": {
+          "mode": "light",
+          "light": "Unaligned Light",
+          "dark": "Unaligned"
+        }
+      }
+    },
+    {
+      "name": "light-project-search",
+      "about": "Project search in Unaligned Light: matches cream, the active one pink, text readable on both.",
+      "open": [
+        "src/store.rs:44"
+      ],
+      "actions": [
+        "workspace::NewSearch",
+        300,
+        {
+          "type": "task"
+        },
+        {
+          "keys": "enter"
+        }
+      ],
+      "wait": 2.0,
+      "settings": {
+        "theme": {
+          "mode": "light",
+          "light": "Unaligned Light",
+          "dark": "Unaligned"
+        }
+      }
+    },
+    {
+      "name": "theme",
+      "about": "The editor scene, once per bundled theme.",
+      "each_theme": true,
+      "open": [
+        "web/app.ts",
+        "README.md",
+        "src/store.rs:44"
+      ]
+    }
+  ]
+}

@@ -20,7 +20,9 @@ use std::{convert::TryFrom, io, time::Duration};
 use thiserror::Error;
 
 pub const OPEN_ROUTER_API_URL: &str = "https://openrouter.ai/api/v1";
-const OPEN_ROUTER_APP_TITLE: &str = "Zed";
+// What OpenRouter is told about the caller (it shows both on its side).
+const OPEN_ROUTER_APP_TITLE: &str = branding::PRODUCT_NAME;
+const OPEN_ROUTER_APP_REFERER: &str = branding::WEBSITE_URL;
 
 fn extract_retry_after(headers: &http::HeaderMap) -> Option<std::time::Duration> {
     if let Some(reset) = headers.get("X-RateLimit-Reset") {
@@ -497,7 +499,7 @@ fn completion_headers(extra_headers: &CustomHeaders) -> CustomHeaders {
     let mut headers = Vec::with_capacity(extra_headers.iter().len() + 2);
     headers.push((
         http::HeaderName::from_static("http-referer"),
-        http::HeaderValue::from_static("https://zed.dev"),
+        http::HeaderValue::from_static(OPEN_ROUTER_APP_REFERER),
     ));
     headers.push((
         http::HeaderName::from_static("x-title"),
@@ -523,7 +525,7 @@ pub async fn list_models(
         .uri(uri)
         .header("Accept", "application/json")
         .header("Authorization", format!("Bearer {}", api_key))
-        .header("HTTP-Referer", "https://zed.dev")
+        .header("HTTP-Referer", OPEN_ROUTER_APP_REFERER)
         .header("X-Title", OPEN_ROUTER_APP_TITLE)
         .extra_headers(extra_headers)
         .body(AsyncBody::default())
@@ -832,8 +834,8 @@ mod tests {
         assert!(responses[0].choices.is_empty());
         let headers = captured_headers.lock().expect("captured headers lock");
         let headers = headers.as_ref().expect("captured headers");
-        assert_eq!(headers["http-referer"], "https://zed.dev");
-        assert_eq!(headers["x-title"], OPEN_ROUTER_APP_TITLE);
+        assert_eq!(headers["http-referer"], branding::WEBSITE_URL);
+        assert_eq!(headers["x-title"], branding::PRODUCT_NAME);
         assert_eq!(headers["x-custom-header"], "custom-value");
     }
 

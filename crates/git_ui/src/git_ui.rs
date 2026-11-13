@@ -7,6 +7,7 @@ use workspace::{Toast, notifications::NotificationId};
 mod blame_ui;
 pub mod clone;
 
+use app_actions;
 use git::{
     Oid, normalize_branch_name,
     repository::{Branch, CommitDetails, Upstream, UpstreamTracking, UpstreamTrackingStatus},
@@ -21,13 +22,12 @@ use notifications::status_toast::StatusToast;
 use project::git_store::Repository;
 use project_diff::ProjectDiff;
 use time::OffsetDateTime;
-use ui::{ButtonLike, ContextMenu, ElevationIndex, PopoverMenuHandle, TintColor, prelude::*};
+use ui::{ButtonLike, ContextMenu, ElevationIndex, PopoverMenuHandle, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     ModalView, OpenMode, Workspace,
     notifications::{DetachAndPromptErr, NotifyTaskExt},
 };
-use zed_actions;
 
 use crate::{
     commit_view::CommitView,
@@ -119,21 +119,21 @@ pub fn init(cx: &mut App) {
         git_picker::register(workspace);
 
         workspace.register_action(
-            |workspace, action: &zed_actions::CreateWorktree, window, cx| {
+            |workspace, action: &app_actions::CreateWorktree, window, cx| {
                 git_ui_core::worktree_service::handle_create_worktree(
                     workspace, action, window, None, cx,
                 );
             },
         );
         workspace.register_action(
-            |workspace, action: &zed_actions::SwitchWorktree, window, cx| {
+            |workspace, action: &app_actions::SwitchWorktree, window, cx| {
                 git_ui_core::worktree_service::handle_switch_worktree(
                     workspace, action, window, None, cx,
                 );
             },
         );
 
-        workspace.register_action(|workspace, _: &zed_actions::git::Worktree, window, cx| {
+        workspace.register_action(|workspace, _: &app_actions::git::Worktree, window, cx| {
             let focused_dock = workspace.focused_dock_position(window, cx);
             let project = workspace.project().clone();
             let workspace_handle = workspace.weak_handle();
@@ -149,7 +149,7 @@ pub fn init(cx: &mut App) {
         });
 
         workspace.register_action(
-            |workspace, action: &zed_actions::OpenWorktreeInNewWindow, window, cx| {
+            |workspace, action: &app_actions::OpenWorktreeInNewWindow, window, cx| {
                 let path = action.path.clone();
                 let is_remote = !workspace.project().read(cx).is_local();
 
@@ -189,7 +189,7 @@ pub fn init(cx: &mut App) {
         }
         if !project.is_via_collab() {
             workspace.register_action(
-                |workspace, _: &zed_actions::git::CreatePullRequest, window, cx| {
+                |workspace, _: &app_actions::git::CreatePullRequest, window, cx| {
                     if let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) {
                         panel.update(cx, |panel, cx| {
                             panel.create_pull_request(window, cx);
@@ -1027,7 +1027,7 @@ mod remote_button {
     use gpui::{Action, Anchor, AnyView, ClickEvent, FocusHandle};
     use ui::{
         ButtonLike, CommonAnimationExt, ContextMenu, ElevationIndex, PopoverMenu,
-        PopoverMenuHandle, SplitButton, Tooltip, prelude::*,
+        PopoverMenuHandle, SplitButton, SplitButtonStyle, Tooltip, prelude::*,
     };
 
     pub fn render_fetch_button(
@@ -1327,7 +1327,8 @@ mod remote_button {
         )
         .into_any_element();
 
-        SplitButton::new(left, right)
+        // Secondary actions: an outline, never a fill.
+        SplitButton::new(left, right).style(SplitButtonStyle::Outlined)
     }
 }
 
@@ -1344,13 +1345,42 @@ pub(crate) fn render_split_button_chevron_trigger(
 
     ButtonLike::new_rounded_right(id)
         .layer(ElevationIndex::ModalSurface)
-        .selected_style(ButtonStyle::Tinted(TintColor::Accent))
         .width(chevron_button_size)
         .height(chevron_button_size.into())
         .child(Icon::new(chevron_icon).size(IconSize::XSmall))
 }
 
-/// A visual representation of a file's Git status.
+/// Added and deleted line counts as text (`+12 -1`): code font, so the
+/// figures do not jitter, in the status colours for text. A side that is
+/// zero is left out when the other one is not.
+pub(crate) fn diff_stat_text(
+    id: impl Into<ElementId>,
+    added: usize,
+    deleted: usize,
+    cx: &App,
+) -> gpui::Stateful<Div> {
+    let figure = |text: String, color: Color| {
+        Label::new(text)
+            .size(LabelSize::Custom(ui::micro_label_size()))
+            .buffer_font(cx)
+            .color(color)
+    };
+    let show_added = added > 0 || deleted == 0;
+    let show_deleted = deleted > 0;
+
+    h_flex()
+        .id(id.into())
+        .flex_none()
+        .gap_1()
+        .when(show_added, |this| {
+            this.child(figure(format!("+{added}"), Color::Created))
+        })
+        .when(show_deleted, |this| {
+            this.child(figure(format!("-{deleted}"), Color::Deleted))
+        })
+}
+
+/// A file's Git status as a coloured letter (M, A, D, U, C).
 #[derive(IntoElement, RegisterComponent)]
 pub struct GitStatusIcon {
     status: FileStatus,
@@ -1366,29 +1396,27 @@ impl RenderOnce for GitStatusIcon {
     fn render(self, _window: &mut ui::Window, cx: &mut App) -> impl IntoElement {
         let status = self.status;
 
-        let (icon_name, color) = if status.is_conflicted() {
-            (
-                IconName::Warning,
-                cx.theme().colors().version_control_conflict,
-            )
+        // A coloured letter, as in VS Code's source control and explorer. The
+        // status colours are the text tokens (`created`, `modified`, …); the
+        // `version_control.*` ones are tuned for gutter bars.
+        let (letter, color) = if status.is_conflicted() {
+            ("C", Color::Conflict)
         } else if status.is_deleted() {
-            (
-                IconName::SquareMinus,
-                cx.theme().colors().version_control_deleted,
-            )
+            ("D", Color::Deleted)
         } else if status.is_modified() {
-            (
-                IconName::SquareDot,
-                cx.theme().colors().version_control_modified,
-            )
+            ("M", Color::Modified)
+        } else if status.is_untracked() {
+            ("U", Color::Created)
         } else {
-            (
-                IconName::SquarePlus,
-                cx.theme().colors().version_control_added,
-            )
+            ("A", Color::Created)
         };
 
-        Icon::new(icon_name).color(Color::Custom(color))
+        h_flex().flex_none().w(px(12.)).justify_center().child(
+            Label::new(letter)
+                .size(LabelSize::Custom(ui::micro_label_size()))
+                .buffer_font(cx)
+                .color(color),
+        )
     }
 }
 

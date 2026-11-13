@@ -4,6 +4,7 @@ use acp_thread::AgentSessionConfigOptions;
 use agent_client_protocol::v2::schema as acp;
 use agent_servers::AgentServer;
 
+use app_actions::agent::ToggleModelSelector;
 use collections::HashSet;
 use fs::Fs;
 use fuzzy_nucleo::StringMatchCandidate;
@@ -19,7 +20,6 @@ use ui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 use util::ResultExt as _;
-use zed_actions::agent::ToggleModelSelector;
 
 use crate::model_search;
 use crate::ui::documentation_aside_side;
@@ -1736,7 +1736,7 @@ mod tests {
 
     impl AgentServer for TestAgentServer {
         fn logo(&self) -> IconName {
-            IconName::ZedAssistant
+            IconName::AppAssistant
         }
 
         fn agent_id(&self) -> AgentId {

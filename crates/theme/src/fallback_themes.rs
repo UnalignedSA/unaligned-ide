@@ -3,7 +3,7 @@ use std::sync::Arc;
 use gpui::{FontStyle, FontWeight, HighlightStyle, Hsla, WindowBackgroundAppearance, hsla};
 
 use crate::{
-    AccentColors, Appearance, DEFAULT_DARK_THEME, PlayerColors, StatusColors,
+    AccentColors, Appearance, CornerStyle, DEFAULT_DARK_THEME, PlayerColors, StatusColors,
     StatusColorsRefinement, SyntaxTheme, SystemColors, Theme, ThemeColors, ThemeColorsRefinement,
     ThemeFamily, ThemeStyles, default_color_scales,
 };
@@ -104,18 +104,28 @@ pub(crate) fn zed_default_dark() -> Theme {
     };
 
     let player = PlayerColors::dark();
+    let border = hsla(225. / 360., 13. / 100., 12. / 100., 1.);
+    let text_placeholder = hsla(220.0 / 360., 6.6 / 100., 44.5 / 100., 1.0);
+    let text_muted = hsla(218.0 / 360., 7. / 100., 46. / 100., 1.0);
+    let accent_background = player.local().cursor;
     Theme {
         id: "one_dark".to_string(),
         name: DEFAULT_DARK_THEME.into(),
         appearance: Appearance::Dark,
         styles: ThemeStyles {
             window_background_appearance: WindowBackgroundAppearance::Opaque,
+            corners: CornerStyle::Round,
             system: SystemColors::default(),
             accents: AccentColors(Arc::from(vec![
                 blue, orange, purple, teal, red, green, yellow,
             ])),
             colors: ThemeColors {
-                border: hsla(225. / 360., 13. / 100., 12. / 100., 1.),
+                accent_background,
+                accent_hover: ThemeColors::accent_hover_for(accent_background, Appearance::Dark),
+                accent_foreground: ThemeColors::accent_foreground_for(accent_background),
+                border_strong: border,
+                text_faint: text_muted,
+                border,
                 border_variant: hsla(228. / 360., 8. / 100., 25. / 100., 1.),
                 border_focused: hsla(223. / 360., 78. / 100., 65. / 100., 1.),
                 border_selected: hsla(222.6 / 360., 77.5 / 100., 65.1 / 100., 1.0),
@@ -138,8 +148,8 @@ pub(crate) fn zed_default_dark() -> Theme {
                 ghost_element_selected: hsla(224.0 / 360., 11.3 / 100., 26.1 / 100., 1.0),
                 ghost_element_disabled: SystemColors::default().transparent,
                 text: hsla(221. / 360., 11. / 100., 86. / 100., 1.0),
-                text_muted: hsla(218.0 / 360., 7. / 100., 46. / 100., 1.0),
-                text_placeholder: hsla(220.0 / 360., 6.6 / 100., 44.5 / 100., 1.0),
+                text_muted,
+                text_placeholder,
                 text_disabled: hsla(220.0 / 360., 6.6 / 100., 44.5 / 100., 1.0),
                 text_accent: hsla(222.6 / 360., 77.5 / 100., 65.1 / 100., 1.0),
                 icon: hsla(222.9 / 360., 9.9 / 100., 86.1 / 100., 1.0),

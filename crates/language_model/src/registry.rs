@@ -1,7 +1,7 @@
 use crate::{
-    AuthenticateError, LanguageModel, LanguageModelCompletionError, LanguageModelId,
-    LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderState,
-    ZED_CLOUD_PROVIDER_ID, unavailable_error,
+    AuthenticateError, IDE_CLOUD_PROVIDER_ID, LanguageModel, LanguageModelCompletionError,
+    LanguageModelId, LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderState,
+    unavailable_error,
 };
 use collections::{BTreeMap, HashSet};
 use gpui::{App, Context, Entity, EventEmitter, Global, Task, prelude::*};
@@ -102,7 +102,7 @@ impl LanguageModel {
     }
 
     pub fn is_provided_by_zed(&self) -> bool {
-        self.provider_id == ZED_CLOUD_PROVIDER_ID
+        self.provider_id == IDE_CLOUD_PROVIDER_ID
     }
 }
 
@@ -128,6 +128,14 @@ impl LanguageModelRegistry {
 
     pub fn read_global(cx: &App) -> &Self {
         cx.global::<GlobalLanguageModelRegistry>().0.read(cx)
+    }
+
+    /// Like [`Self::read_global`], for code that may run where the registry
+    /// was never installed (a test of one provider): `None` instead of a
+    /// panic.
+    pub fn try_read_global(cx: &App) -> Option<&Self> {
+        cx.try_global::<GlobalLanguageModelRegistry>()
+            .map(|registry| registry.0.read(cx))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -469,7 +477,7 @@ impl LanguageModelRegistry {
 
     pub fn default_model(&self) -> Option<LanguageModel> {
         #[cfg(debug_assertions)]
-        if std::env::var("ZED_SIMULATE_NO_LLM_PROVIDER").is_ok() {
+        if std::env::var("IDE_SIMULATE_NO_LLM_PROVIDER").is_ok() {
             return None;
         }
 
@@ -490,7 +498,7 @@ impl LanguageModelRegistry {
 
     pub fn inline_assistant_model(&self) -> Option<LanguageModel> {
         #[cfg(debug_assertions)]
-        if std::env::var("ZED_SIMULATE_NO_LLM_PROVIDER").is_ok() {
+        if std::env::var("IDE_SIMULATE_NO_LLM_PROVIDER").is_ok() {
             return None;
         }
 
@@ -501,7 +509,7 @@ impl LanguageModelRegistry {
 
     pub fn commit_message_model(&self, cx: &App) -> Option<LanguageModel> {
         #[cfg(debug_assertions)]
-        if std::env::var("ZED_SIMULATE_NO_LLM_PROVIDER").is_ok() {
+        if std::env::var("IDE_SIMULATE_NO_LLM_PROVIDER").is_ok() {
             return None;
         }
 
@@ -513,7 +521,7 @@ impl LanguageModelRegistry {
 
     pub fn thread_summary_model(&self, cx: &App) -> Option<LanguageModel> {
         #[cfg(debug_assertions)]
-        if std::env::var("ZED_SIMULATE_NO_LLM_PROVIDER").is_ok() {
+        if std::env::var("IDE_SIMULATE_NO_LLM_PROVIDER").is_ok() {
             return None;
         }
 
@@ -528,7 +536,7 @@ impl LanguageModelRegistry {
     /// the thread's primary model should handle `None` themselves.
     pub fn compaction_model(&self) -> Option<LanguageModel> {
         #[cfg(debug_assertions)]
-        if std::env::var("ZED_SIMULATE_NO_LLM_PROVIDER").is_ok() {
+        if std::env::var("IDE_SIMULATE_NO_LLM_PROVIDER").is_ok() {
             return None;
         }
 

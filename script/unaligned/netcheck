@@ -1,0 +1,498 @@
+#!/usr/bin/env python3
+"""Network audit: which hosts does the IDE contact? See docs/unaligned/NETWORK.md.
+
+    script/unaligned/netcheck                                    the startup scenario, table and verdict
+    script/unaligned/netcheck --scenario all --expect target     every scenario against the target list
+    script/unaligned/netcheck --scenario startup --allow example.com,*.example.org --deny api.zed.dev
+    script/unaligned/netcheck --scenario startup -- --open src/store.rs   options after -- go to `shot`
+
+Starts script/unaligned/netlog-proxy.py on a free local port, runs one instance of the app through
+script/unaligned/shot with that proxy (setting `proxy`, and the proxy variables of the environment
+for npm and helper processes), then prints one line per contacted host and a verdict.
+
+Scenarios
+    startup     open the sample project, wait 20 s, touch nothing
+    extensions  startup, then open the Extensions page and wait 10 s
+    chat        scene `chat-reply` of scenes.json after the same wait: one Rust file open, the
+                stand-in API (shot --fake-api), then open the chat panel and send one message
+    all         the three, one after the other
+
+The instance runs with the product's defaults for `enable_language_server` and
+`auto_install_extensions` (read from assets/settings/default.json), not with the values `shot`
+uses for pictures. The settings that still differ from the defaults are listed in the output.
+It is always the normal binary (target/debug/unaligned-ide), never the offscreen one, which is built with
+test support and starts no language server. No picture is taken unless --picture is given
+(`shot --no-capture`), so the audit also runs with the screen locked.
+
+Verdict: PASS when every contacted host is allowed, FAIL with the other hosts, ERROR when the
+session could not be run or checked. Exit status 0, 1, 2. Allowed: 127.0.0.1 and localhost, the
+list named by --expect, and --allow. A host named by --deny fails even when a list allows it.
+
+    --expect today    what the fork contacts at the start of the plan
+    --expect target   what it may contact at the end: no Zed host, except the extension registry
+                      in `extensions`, and there only once the Extensions page has been opened
+
+Files of a run, all under .work/: netcheck/<scenario>/{proxy.log,shot.log,settings.json,app/*.log},
+and shots/netcheck-<scenario>.png with --picture. Refuses to start when a variable ending in
+API_KEY is set.
+"""
+import argparse
+import fcntl
+import filecmp
+import fnmatch
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlsplit
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
+WORK = ROOT / ".work"
+DEFAULT_SETTINGS = ROOT / "assets" / "settings" / "default.json"
+
+SCENARIOS = ["startup", "extensions", "chat"]
+
+BUILT_IN = ["127.0.0.1", "localhost"]
+# Language servers, Node, npm packages and the agent registry: third parties the product keeps.
+THIRD_PARTY = [
+    "cdn.agentclientprotocol.com",
+    "registry.npmjs.org",
+    "nodejs.org",
+    "github.com",
+    "api.github.com",
+    "objects.githubusercontent.com",
+    # Measured: where GitHub serves release downloads (rust-analyzer, ruff) and source archives
+    # (vscode-eslint) from today.
+    "release-assets.githubusercontent.com",
+    "codeload.github.com",
+]
+# Zed's extension registry, and the storage its downloads redirect to (measured, not in research 01).
+REGISTRY_HOSTS = ["api.zed.dev", "zed-extensions.nyc3.digitaloceanspaces.com"]
+# Per scenario: (hosts allowed at any time, hosts allowed only once the scenario's steps have begun).
+EXPECT = {
+    "today": lambda scenario: (REGISTRY_HOSTS + THIRD_PARTY, []),
+    "target": lambda scenario: (THIRD_PARTY, REGISTRY_HOSTS if scenario == "extensions" else []),
+}
+
+# The scene of scenes.json that opens the chat panel and sends one message to the stand-in API.
+CHAT_SCENE = "chat-reply"
+
+# `shot` sets these two for its pictures; the audit puts the product's own values back.
+DEFAULTS_RESTORED = ["enable_language_server", "auto_install_extensions"]
+
+
+class CheckError(Exception):
+    pass
+
+
+def say(message=""):
+    print(message, flush=True)
+
+
+def note(message):
+    print(f"netcheck: {message}", file=sys.stderr, flush=True)
+
+
+def parse_jsonc(text):
+    """JSON with // and /* */ comments and trailing commas (the format of default.json)."""
+    out = []
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if char == '"':
+            end = index + 1
+            while text[end] != '"':
+                end += 2 if text[end] == "\\" else 1
+            out.append(text[index : end + 1])
+            index = end + 1
+        elif text.startswith("//", index):
+            end = text.find("\n", index)
+            index = length if end < 0 else end
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            index = length if end < 0 else end + 2
+        else:
+            out.append(char)
+            index += 1
+    # Trailing commas: a comma whose next token closes the object or the array.
+    tokens = []
+    for token in out:
+        if token in "}]" and len(token) == 1:
+            last = len(tokens) - 1
+            while last >= 0 and tokens[last].isspace():
+                last -= 1
+            if last >= 0 and tokens[last] == ",":
+                tokens[last] = " "
+        tokens.append(token)
+    return json.loads("".join(tokens))
+
+
+def leaves(value, path=()):
+    """(path, value) for every value that is not an object."""
+    if isinstance(value, dict) and value:
+        for key, child in value.items():
+            yield from leaves(child, path + (key,))
+    else:
+        yield path, value
+
+
+def lookup(value, path):
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            return None, False
+        value = value[key]
+    return value, True
+
+
+def merge(base, extra):
+    result = dict(base)
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def take_settings(options):
+    """Removes --settings from the options meant for `shot`; returns (other options, settings).
+
+    `shot` keeps only the last --settings it is given: ours would be lost, and the proxy with it.
+    """
+    rest, settings = [], {}
+    options = list(options)
+    while options:
+        option = options.pop(0)
+        if option == "--settings" and options:
+            value = options.pop(0)
+        elif option.startswith("--settings="):
+            value = option.partition("=")[2]
+        else:
+            rest.append(option)
+            continue
+        settings = merge(settings, parse_jsonc(Path(value[1:]).read_text() if value.startswith("@") else value))
+    return rest, settings
+
+
+def host_of(endpoint):
+    """'host:port' or '[v6]:port' -> (host, port)."""
+    host, _, port = endpoint.rpartition(":")
+    return host.strip("[]").lower(), port
+
+
+def seconds(stamp):
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+
+
+def size(count):
+    for unit in ("B", "kB", "MB"):
+        if count < 1000 or unit == "MB":
+            return f"{count:.0f} {unit}" if unit == "B" else f"{count:.1f} {unit}"
+        count /= 1000
+
+
+def read_proxy_log(path):
+    """Contacted hosts in order of first contact, from the lines of netlog-proxy.py."""
+    hosts = {}
+    for line in path.read_text().splitlines():
+        remark = line.startswith("# ")
+        fields = line[2:].split() if remark else line.split()
+        if len(fields) < 3:
+            continue
+        stamp = seconds(fields[0])
+        host, port = host_of(fields[2])
+        new = {"count": 0, "first": stamp, "last": stamp, "sent": 0, "received": 0, "via": [], "failed": 0, "requests": []}
+        entry = hosts.setdefault(host, new)
+        if remark:
+            if fields[1] == "FAILED":
+                entry["failed"] += 1
+            elif fields[1] == "CLOSED":
+                counts = dict(field.split("=", 1) for field in fields[3:] if "=" in field)
+                entry["sent"] += int(counts.get("sent", 0))
+                entry["received"] += int(counts.get("received", 0))
+                entry["last"] = max(entry["last"], seconds(counts["last"]) if "last" in counts else stamp)
+            continue
+        entry["count"] += 1
+        entry["last"] = max(entry["last"], stamp)
+        via = f"CONNECT :{port}" if fields[1] == "CONNECT" else f"HTTP :{port}"
+        if via not in entry["via"]:
+            entry["via"].append(via)
+        if fields[1] != "CONNECT":
+            entry["requests"].append((fields[1], port, fields[3] if len(fields) > 3 else "/"))
+    return hosts
+
+
+def matches(host, patterns):
+    return any(fnmatch.fnmatchcase(host, pattern.lower()) for pattern in patterns)
+
+
+def test_support_build(binary):
+    """True when the binary is the offscreen variant: `build-offscreen` leaves that build, which has
+    test support and looks for no language server, in target/debug/unaligned-ide for a few minutes."""
+    offscreen = WORK / "bin" / "ide-offscreen"
+    try:
+        same_size = offscreen.stat().st_size == Path(binary).stat().st_size
+        return same_size and filecmp.cmp(binary, offscreen, shallow=False)
+    except OSError:
+        return False
+
+
+def stop(process):
+    if process and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def run_scenario(scenario, args, defaults):
+    """Runs one session. Returns (verdict, offending hosts or reason)."""
+    name = f"netcheck-{scenario}"
+    out_dir = WORK / "netcheck" / scenario
+    run_dir = WORK / "run" / name
+    shutil.rmtree(out_dir, ignore_errors=True)
+    shutil.rmtree(run_dir, ignore_errors=True)
+    out_dir.mkdir(parents=True)
+    proxy_log = out_dir / "proxy.log"
+    proxy_log.touch()
+
+    proxy = shot = None
+    launched = finished = None
+    wrong_build = False
+    try:
+        proxy = subprocess.Popen(
+            [sys.executable, "-B", str(HERE / "netlog-proxy.py"), "0", str(proxy_log)], stdout=subprocess.PIPE, text=True
+        )
+        port = proxy.stdout.readline().strip()
+        if not port.isdigit():
+            raise CheckError("the logging proxy did not start")
+        proxy_url = f"http://127.0.0.1:{port}"
+
+        settings = merge({key: defaults[key] for key in DEFAULTS_RESTORED}, args.shot_settings)
+        settings["proxy"] = proxy_url
+        command = [str(HERE / "shot"), name, "--settings", json.dumps(settings), "--keep"]
+        # The normal binary in every case. Without --picture, `shot` takes no picture at all: the
+        # session runs to its end with any screen.
+        command += ["--binary", args.binary] + (["--backend", "screen"] if args.picture else ["--no-capture"])
+        # npm, git, curl and other child processes read the environment, not the setting. An empty
+        # NO_PROXY keeps local addresses visible too (the app's client reads it as well).
+        for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            command += ["--env", f"{variable}={proxy_url}"]
+        command += ["--env", "NO_PROXY=", "--env", "no_proxy="]
+        # The instance has an empty home directory and its project sits under this repository's
+        # rust-toolchain.toml: a rustup on the PATH would download that whole toolchain as soon
+        # as a Rust file is opened, which no real installation does.
+        command += ["--env", "RUSTUP_AUTO_INSTALL=0"]
+        wait = str(args.startup_wait)
+        if scenario == "startup":
+            command += ["--actions", "[]", "--settle", wait]
+        elif scenario == "extensions":
+            command += ["--actions", json.dumps(["app::Extensions"]), "--settle", wait, "--wait", "10"]
+        elif scenario == "chat":
+            # The scene as `shot-all` keeps it working: its file, the stand-in API and its steps.
+            # Only the waits are ours.
+            command += ["--from", CHAT_SCENE, "--settle", wait, "--wait", "10"]
+        command += args.shot_options
+
+        with open(out_dir / "shot.log", "w") as shot_log:
+            shot = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=shot_log, text=True)
+            # `shot` creates output.log just before it starts the app (it may first wait for its turn).
+            while shot.poll() is None:
+                if launched is None and (run_dir / "output.log").exists():
+                    launched = time.time()
+                    note(f"{scenario}: the app is running (proxy on port {port})")
+                    # Looked at now, not earlier: `shot` may have waited minutes for its turn.
+                    wrong_build = test_support_build(args.binary)
+                time.sleep(0.05)
+            finished = time.time()
+            # With --no-capture `shot` prints the run directory, not a picture.
+            picture = shot.stdout.read().strip() if args.picture else ""
+        shot_messages = (out_dir / "shot.log").read_text().strip()
+    finally:
+        stop(shot)
+        stop(proxy)
+
+    # "ok", or one line per step the app could not run (see run_unaligned_dev_actions in crates/ide/src/app.rs).
+    steps_failed = None
+    if (run_dir / "done").exists():
+        steps_failed = [line for line in (run_dir / "done").read_text().splitlines() if line.strip() not in ("", "ok")]
+
+    # What the instance really ran with, and its log, kept next to the proxy log.
+    instance_settings = {}
+    settings_file = run_dir / "data" / "config" / "settings.json"
+    if settings_file.exists():
+        shutil.copy(settings_file, out_dir / "settings.json")
+        try:
+            instance_settings = parse_jsonc(settings_file.read_text())
+        except ValueError:
+            pass
+    # The same two places `shot` looks in: the tree also holds logs of npm and of language servers.
+    for directory in (run_dir / "home" / "Library" / "Logs", run_dir / "data" / "logs"):
+        for log in directory.rglob("*.log"):
+            if log.stat().st_size:
+                (out_dir / "app").mkdir(exist_ok=True)
+                shutil.copy(log, out_dir / "app" / log.name)
+                # What a build with test support writes when a language server is wanted.
+                if "is disabled in tests" in log.read_text(errors="replace"):
+                    wrong_build = True
+    if not args.keep:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    expect = f"expect {args.expect}" if args.expect else "built-in list only"
+    say()
+    say(f"== {scenario} ({expect}) ==")
+    if launched is None:
+        say(shot_messages)
+        hint = " (--picture needs an unlocked screen: run without it)" if args.picture else ""
+        return "ERROR", f"the app was never started{hint}"
+
+    hosts = read_proxy_log(proxy_log)
+    expected, expected_later = EXPECT[args.expect](scenario) if args.expect else ([], [])
+    allowed = BUILT_IN + expected + args.allow
+    rows = [("host", "connections", "first seen", "last active", "sent", "received", "through", "allowed")]
+    offending = []
+    for host, entry in hosts.items():
+        if matches(host, args.deny):
+            verdict = "NO (denied)"
+        elif matches(host, allowed):
+            verdict = "yes"
+        elif matches(host, expected_later):
+            # The steps start after the startup wait: earlier than that, it is a startup contact.
+            verdict = "yes" if entry["first"] - launched >= args.startup_wait else "NO (before the steps)"
+        else:
+            verdict = "NO"
+        if verdict != "yes":
+            offending.append(host)
+        count = str(entry["count"])
+        if entry["failed"]:
+            count += f" ({entry['failed']} unreachable)"
+        times = [f"{max(entry[key] - launched, 0):.1f} s" for key in ("first", "last")]
+        volumes = [size(entry[key]) for key in ("sent", "received")]
+        rows.append((host, count, *times, *volumes, ", ".join(entry["via"]), verdict))
+    if len(rows) == 1:
+        say("no connection was seen by the proxy")
+    else:
+        widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
+        for row in rows:
+            say("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+    total = sum(entry["count"] for entry in hosts.values())
+    say(f"{total} connections to {len(hosts)} hosts in {finished - launched:.0f} s; log: {proxy_log.relative_to(ROOT)}")
+
+    different = []
+    for path, value in leaves(instance_settings):
+        default, found = lookup(defaults, path)
+        if not found or default != value:
+            different.append(".".join(path))
+    if different:
+        say(f"settings of the instance that are not the product's defaults: {', '.join(sorted(different))}")
+
+    if wrong_build:
+        # `build-offscreen` puts its build in target/debug/unaligned-ide for a few minutes. That build has
+        # test support: it is not the product, and it contacts fewer hosts.
+        return "ERROR", f"{Path(args.binary).name} is a build with test support (the offscreen variant), not the product: is build-offscreen running? Run again when it is done"
+    if steps_failed:
+        return "ERROR", "the app could not run these steps: " + "; ".join(steps_failed)
+    if steps_failed is None or (args.picture and shot.returncode != 0):
+        say(shot_messages)
+        return "ERROR", f"`shot` failed (status {shot.returncode}): the session did not run to its end"
+    if picture:
+        say(f"picture of the instance at the end: {Path(picture).relative_to(ROOT)}")
+
+    if scenario == "chat":
+        # Without this the scenario would pass when the message was never sent, or the proxy bypassed.
+        api_url = instance_settings.get("language_models", {}).get("unaligned", {}).get("api_url", "")
+        api = urlsplit(api_url)
+        requests = hosts.get((api.hostname or "").lower(), {}).get("requests", [])
+        if not any(method == "POST" and port == str(api.port) for method, port, _ in requests):
+            return "ERROR", f"the proxy saw no chat request to the stand-in API ({api_url}): message not sent, or proxy bypassed"
+    elif not hosts:
+        note(f"{scenario}: nothing seen. Run --scenario chat once to check that the app still honours the proxy.")
+
+    return ("FAIL", ", ".join(offending)) if offending else ("PASS", "")
+
+
+def main():
+    arguments = sys.argv[1:]
+    shot_options = []
+    if "--" in arguments:
+        split = arguments.index("--")
+        arguments, shot_options = arguments[:split], arguments[split + 1 :]
+
+    def host_list(text):
+        return [host.strip().lower() for host in text.split(",") if host.strip()]
+
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--scenario", choices=SCENARIOS + ["all"], default="startup", help="what the instance does (default startup)")
+    parser.add_argument("--expect", choices=sorted(EXPECT), help="a named list of allowed hosts")
+    parser.add_argument("--allow", type=host_list, action="append", default=[], metavar="HOST,…", help="more allowed hosts; *.example.com matches subdomains (repeatable)")
+    parser.add_argument("--deny", type=host_list, action="append", default=[], metavar="HOST,…", help="hosts that fail even when a list allows them (repeatable)")
+    parser.add_argument("--startup-wait", type=float, default=20, metavar="SECONDS", help="how long the instance is left alone after launch (default 20)")
+    parser.add_argument("--picture", action="store_true", help="also capture the window at the end (.work/shots/netcheck-<scenario>.png); needs an unlocked screen")
+    parser.add_argument("--binary", default=str(ROOT / "target" / "debug" / "unaligned-ide"), help="the app binary (default target/debug/unaligned-ide; not the offscreen one)")
+    parser.add_argument("--keep", action="store_true", help="keep the instance's directory .work/run/netcheck-<scenario>")
+    args = parser.parse_args(arguments)
+    try:
+        args.shot_options, args.shot_settings = take_settings(shot_options)
+    except (OSError, ValueError) as error:
+        parser.error(f"invalid --settings after --: {error}")
+    if not Path(args.binary).exists():
+        parser.error(f"{args.binary} does not exist: run cargo build -p ide --features gpui_platform/runtime_shaders")
+    args.allow = [host for group in args.allow for host in group]
+    args.deny = [host for group in args.deny for host in group]
+
+    # No real key near an audited instance: names only, never values.
+    keys = sorted(key for key in os.environ if key.upper().endswith("API_KEY"))
+    if keys:
+        note(f"refusing to start: {', '.join(keys)} is set in the environment. Unset it (env -u NAME …) and run again.")
+        return 2
+
+    try:
+        defaults = parse_jsonc(DEFAULT_SETTINGS.read_text())
+        missing = [key for key in DEFAULTS_RESTORED if key not in defaults]
+        if missing:
+            raise ValueError(f"no {', '.join(missing)} key")
+    except (OSError, ValueError) as error:
+        note(f"cannot read the product's defaults from {DEFAULT_SETTINGS.relative_to(ROOT)}: {error}")
+        return 2
+
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    (WORK / "netcheck").mkdir(parents=True, exist_ok=True)
+    lock = open(WORK / "netcheck" / ".lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        note("another netcheck is running: waiting for it")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+
+    results = []
+    try:
+        for scenario in SCENARIOS if args.scenario == "all" else [args.scenario]:
+            try:
+                verdict, detail = run_scenario(scenario, args, defaults)
+            except CheckError as error:
+                verdict, detail = "ERROR", str(error)
+            results.append((scenario, verdict, detail))
+            say(f"{verdict} {scenario}" + (f": {detail}" if detail else ""))
+    except KeyboardInterrupt:
+        note("interrupted")
+        return 130
+
+    verdicts = [verdict for _, verdict, _ in results]
+    overall = "ERROR" if "ERROR" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+    if len(results) > 1:
+        say()
+        bad = [f"{scenario} ({detail})" for scenario, verdict, detail in results if verdict != "PASS"]
+        say(f"{overall} all" + (f": {'; '.join(bad)}" if bad else ""))
+    return {"PASS": 0, "FAIL": 1, "ERROR": 2}[overall]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

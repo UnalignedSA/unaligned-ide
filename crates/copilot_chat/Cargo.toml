@@ -19,6 +19,7 @@ test-support = ["gpui/test-support"]
 [dependencies]
 anthropic.workspace = true
 anyhow.workspace = true
+branding.workspace = true
 collections.workspace = true
 credentials_provider.workspace = true
 futures.workspace = true

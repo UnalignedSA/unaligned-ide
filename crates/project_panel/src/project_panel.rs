@@ -3,6 +3,10 @@ mod undo;
 mod utils;
 
 use anyhow::{Context as _, Result};
+use app_actions::{
+    project_panel::{Toggle, ToggleFocus},
+    workspace::OpenWithSystem,
+};
 use client::{ErrorCode, ErrorExt};
 use collections::{BTreeSet, HashMap, hash_map};
 use editor::{
@@ -25,8 +29,8 @@ use gpui::{
     ListHorizontalSizingBehavior, ListSizingBehavior, Modifiers, ModifiersChangedEvent,
     MouseButton, MouseDownEvent, MouseExitEvent, ParentElement, PathPromptOptions, Pixels, Point,
     PromptLevel, Render, ScrollStrategy, Stateful, Styled, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, div, hsla,
-    linear_color_stop, linear_gradient, point, px, size, transparent_white, uniform_list,
+    UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, div, point, px, size,
+    uniform_list,
 };
 use itertools::Itertools;
 use language::DiagnosticSeverity;
@@ -61,9 +65,10 @@ use std::{
 use svg_preview::svg_preview_view::SvgPreviewView;
 use theme_settings::ThemeSettings;
 use ui::{
-    ContextMenu, DecoratedIcon, IconDecoration, IconDecorationKind, IndentGuideColors,
-    IndentGuideLayout, Indicator, KeyBinding, ListItem, ListItemSpacing, ProjectEmptyState,
-    ScrollAxes, ScrollableHandle, Scrollbars, StickyCandidate, Tooltip, WithScrollbar, prelude::*,
+    ContextMenu, DecoratedIcon, EmptyState, IconDecoration, IconDecorationKind, IndentGuideColors,
+    IndentGuideLayout, KeyBinding, ListItem, ListItemSpacing, MarkerSide, PanelHeader, ScrollAxes,
+    ScrollableHandle, Scrollbars, SectionLabel, StickyCandidate, Tooltip, WithScrollbar, metrics,
+    prelude::*, selected_marker, selected_marker_inactive,
 };
 use util::{
     ResultExt, TryFutureExt,
@@ -79,12 +84,9 @@ use workspace::{
     focus_follows_mouse::FocusFollowsMouse as _,
     notifications::{DetachAndPromptErr, NotifyResultExt, NotifyTaskExt},
     open_file_permalink,
+    panel_drag::panel_drag_source,
 };
 use worktree::CreatedEntry;
-use zed_actions::{
-    project_panel::{Toggle, ToggleFocus},
-    workspace::OpenWithSystem,
-};
 
 use crate::{
     project_panel_settings::ProjectPanelScrollbarProxy,
@@ -653,7 +655,22 @@ struct ItemColors {
     hover: Hsla,
     drag_over: Hsla,
     marked: Hsla,
-    focused: Hsla,
+}
+
+/// What a tree row adds on its left: with the list item's own 6px, the first
+/// level of the tree starts on the 12px inset of the panel header.
+fn row_extra_inset() -> Rems {
+    rems_from_px(6_f32)
+}
+
+/// The height of a tree row: the shared row metric, 2px less with the
+/// `standard` entry spacing.
+fn entry_row_height(spacing: ProjectPanelEntrySpacing, cx: &App) -> Rems {
+    let row_height = metrics::row_height(cx);
+    match spacing {
+        ProjectPanelEntrySpacing::Comfortable => row_height,
+        ProjectPanelEntrySpacing::Standard => Rems(row_height.0 - rems_from_px(2_f32).0),
+    }
 }
 
 fn get_item_color(is_sticky: bool, cx: &App) -> ItemColors {
@@ -671,7 +688,6 @@ fn get_item_color(is_sticky: bool, cx: &App) -> ItemColors {
             colors.element_hover
         },
         marked: colors.element_selected,
-        focused: colors.panel_focused_border,
         drag_over: colors.drop_target_background,
     }
 }
@@ -1248,10 +1264,10 @@ impl ProjectPanel {
                                     .action("Download...", Box::new(DownloadFromRemote))
                             })
                             .separator()
-                            .action("Copy Path", Box::new(zed_actions::workspace::CopyPath))
+                            .action("Copy Path", Box::new(app_actions::workspace::CopyPath))
                             .action(
                                 "Copy Relative Path",
-                                Box::new(zed_actions::workspace::CopyRelativePath),
+                                Box::new(app_actions::workspace::CopyRelativePath),
                             )
                             .when(has_git_repo, |menu| {
                                 menu.separator()
@@ -4021,7 +4037,7 @@ impl ProjectPanel {
 
     fn copy_path(
         &mut self,
-        _: &zed_actions::workspace::CopyPath,
+        _: &app_actions::workspace::CopyPath,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4049,7 +4065,7 @@ impl ProjectPanel {
 
     fn copy_relative_path(
         &mut self,
-        _: &zed_actions::workspace::CopyRelativePath,
+        _: &app_actions::workspace::CopyRelativePath,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4249,7 +4265,7 @@ impl ProjectPanel {
                     None => {
                         // File at root, open search with empty filter
                         window.dispatch_action(
-                            Box::new(zed_actions::search::NewSearchInDirectory::default()),
+                            Box::new(app_actions::search::NewSearchInDirectory::default()),
                             cx,
                         );
                         return;
@@ -4268,7 +4284,7 @@ impl ProjectPanel {
                 .display(self.project.read(cx).path_style(cx))
                 .into_owned();
             window.dispatch_action(
-                Box::new(zed_actions::search::NewSearchInDirectory { directory }),
+                Box::new(app_actions::search::NewSearchInDirectory { directory }),
                 cx,
             );
         }
@@ -6150,17 +6166,24 @@ impl ProjectPanel {
         let depth = details.depth;
         let worktree_id = details.worktree_id;
 
-        let bg_color = if is_marked {
+        // A worktree root directory reads as a section header, like a VS Code folder section.
+        let is_root_header = depth == 0 && kind.is_dir() && path.is_empty();
+        let panel_focused = self.contains_focus(window, cx);
+
+        // The selected row is filled edge to edge; the marker on its left tells
+        // whether the panel has the focus.
+        let bg_color = if is_marked || is_active {
             item_colors.marked
         } else {
             item_colors.default
         };
 
-        let bg_hover_color = if is_marked {
+        let bg_hover_color = if is_marked || is_active {
             item_colors.marked
         } else {
             item_colors.hover
         };
+        let row_height = entry_row_height(settings.entry_spacing, cx);
 
         let validation_color_and_message = if show_editor {
             match self
@@ -6177,24 +6200,14 @@ impl ProjectPanel {
             None
         };
 
-        let show_focused_border = !self.mouse_down && is_active && self.contains_focus(window, cx);
-
-        let border_color = if show_focused_border {
-            match validation_color_and_message {
-                Some((color, _)) => color,
-                None => item_colors.focused,
-            }
-        } else {
-            bg_color
-        };
-
-        let border_hover_color = if show_focused_border {
-            match validation_color_and_message {
-                Some((color, _)) => color,
-                None => item_colors.focused,
-            }
-        } else {
-            bg_hover_color
+        // The marker is on the selection. The row revealed for the active file
+        // is marked before it becomes the selection: it carries the marker
+        // until there is one.
+        let show_marker = (is_active || (is_marked && self.selection.is_none())) && !show_editor;
+        let show_focused_marker = show_marker && panel_focused && !self.mouse_down;
+        let editor_border_color = match validation_color_and_message {
+            Some((color, _)) => color,
+            None => cx.theme().colors().text,
         };
 
         let folded_directory_drag_target = self.folded_directory_drag_target;
@@ -6224,10 +6237,12 @@ impl ProjectPanel {
                 false
             }
         };
-        let git_indicator = settings
-            .git_status_indicator
+        // A file carries the letter of its git state; a folder that contains
+        // changes only takes the tint.
+        let git_indicator = (settings.git_status_indicator && !kind.is_dir())
             .then(|| git_status_indicator(details.git_status))
             .flatten();
+        let trailing_label_size = LabelSize::Custom(ui::micro_label_size());
 
         let id: ElementId = if is_sticky {
             SharedString::from(format!("project_panel_sticky_item_{}", entry_id.to_usize())).into()
@@ -6269,20 +6284,21 @@ impl ProjectPanel {
                 },
             )
             .cursor_pointer()
-            .rounded_none()
+            .pl(row_extra_inset())
             .bg(bg_color)
-            .border_1()
-            .border_r_2()
-            .border_color(border_color)
-            .hover(|style| style.bg(bg_hover_color).border_color(border_hover_color))
+            .hover(|style| style.bg(bg_hover_color))
+            .when(show_marker, |this| {
+                this.child(if show_focused_marker {
+                    selected_marker(MarkerSide::Left, cx)
+                } else {
+                    selected_marker_inactive(MarkerSide::Left, cx)
+                })
+            })
             .when(is_sticky, |this| this.block_mouse_except_scroll())
             .when(!is_sticky, |this| {
                 this.when(
                     is_highlighted && folded_directory_drag_target.is_none(),
-                    |this| {
-                        this.border_color(transparent_white())
-                            .bg(item_colors.drag_over)
-                    },
+                    |this| this.bg(item_colors.drag_over),
                 )
                 .when(settings.drag_and_drop, |this| {
                     let path_for_external_paths = path.clone();
@@ -6632,6 +6648,7 @@ impl ProjectPanel {
                         ProjectPanelEntrySpacing::Comfortable => ListItemSpacing::Dense,
                         ProjectPanelEntrySpacing::Standard => ListItemSpacing::ExtraDense,
                     })
+                    .height(row_height)
                     .selectable(false)
                     .when(
                         canonical_path.is_some()
@@ -6657,14 +6674,15 @@ impl ProjectPanel {
                             });
                             this.end_slot::<AnyElement>(
                                 h_flex()
-                                    .gap_1()
+                                    .gap_1p5()
                                     .flex_none()
                                     .pr_3()
                                     .when_some(diagnostic_count, |this, count| {
                                         this.when(count.error_count > 0, |this| {
                                             this.child(
                                                 Label::new(count.capped_error_count())
-                                                    .size(LabelSize::Small)
+                                                    .size(trailing_label_size)
+                                                    .buffer_font(cx)
                                                     .color(Color::Error),
                                             )
                                         })
@@ -6673,25 +6691,21 @@ impl ProjectPanel {
                                             |this| {
                                                 this.child(
                                                     Label::new(count.capped_warning_count())
-                                                        .size(LabelSize::Small)
+                                                        .size(trailing_label_size)
+                                                        .buffer_font(cx)
                                                         .color(Color::Warning),
                                                 )
                                             },
                                         )
                                     })
+                                    // The state letter, in the colour that tints the name.
                                     .when_some(git_indicator, |this, (label, color)| {
-                                        let git_indicator = if kind.is_dir() {
-                                            Indicator::dot()
-                                                .color(Color::Custom(color.color(cx).opacity(0.5)))
-                                                .into_any_element()
-                                        } else {
+                                        this.child(
                                             Label::new(label)
-                                                .size(LabelSize::Small)
-                                                .color(color)
-                                                .into_any_element()
-                                        };
-
-                                        this.child(git_indicator)
+                                                .size(trailing_label_size)
+                                                .buffer_font(cx)
+                                                .color(color),
+                                        )
                                     })
                                     .when_some(symlink_element, |this, el| this.child(el))
                                     .into_any_element(),
@@ -6721,7 +6735,10 @@ impl ProjectPanel {
                             .into_any_element()
                         };
 
-                        let icon_slot = if let Some(icon) = &icon {
+                        let icon_slot = if is_root_header && chevron.is_some() {
+                            // Section headers carry a chevron only.
+                            None
+                        } else if let Some(icon) = &icon {
                             Some(match diagnostic_mark.zip(decoration_color) {
                                 Some((DiagnosticMark::OnIcon(decoration_kind), color)) => {
                                     div().child(decorated(icon.clone(), decoration_kind, color))
@@ -6782,11 +6799,23 @@ impl ProjectPanel {
                         }
                     })
                     .child(if show_editor {
-                        h_flex().h_6().w_full().child(self.filename_editor.clone())
+                        // The look of `ui::InputShell` (sunken ground, 1px line in the text
+                        // colour, or in the validation colour), as tall as the row: the
+                        // shell itself is never lower than 26px.
+                        h_flex().h(row_height).w_full().child(
+                            h_flex()
+                                .h_full()
+                                .w_full()
+                                .px_1()
+                                .rounded_sm()
+                                .bg(cx.theme().colors().editor_background)
+                                .border_1()
+                                .border_color(editor_border_color)
+                                .child(self.filename_editor.clone()),
+                        )
                     } else {
-                        h_flex()
-                            .h_6()
-                            .map(|this| match self.state.ancestors.get(&entry_id) {
+                        h_flex().h(row_height).map(|this| {
+                            match self.state.ancestors.get(&entry_id) {
                                 Some(folded_ancestors) => {
                                     this.children(self.render_folder_elements(
                                         folded_ancestors,
@@ -6805,6 +6834,13 @@ impl ProjectPanel {
                                     ))
                                 }
 
+                                // The project's name is a label, not a git state: it
+                                // never takes a status tint.
+                                None if is_root_header => this.child(
+                                    SectionLabel::new(file_name)
+                                        .color(Color::Default)
+                                        .into_any_element(),
+                                ),
                                 None => this.child(
                                     Label::new(file_name)
                                         .single_line()
@@ -6815,7 +6851,8 @@ impl ProjectPanel {
                                         )
                                         .into_any_element(),
                                 ),
-                            })
+                            }
+                        })
                     })
                     .on_secondary_mouse_down(cx.listener(
                         move |this, event: &MouseDownEvent, window, cx| {
@@ -6845,13 +6882,13 @@ impl ProjectPanel {
                         .occlude()
                         .absolute()
                         .top_full()
-                        .left(px(-1.)) // Used px over rem so that it doesn't change with font size
-                        .right(px(-0.5))
+                        .left_0()
+                        .right_0()
                         .py_1()
                         .px_2()
                         .border_1()
                         .border_color(color)
-                        .bg(cx.theme().colors().background)
+                        .bg(cx.theme().colors().elevated_surface_background)
                         .child(
                             Label::new(message)
                                 .color(Color::from(color))
@@ -6859,6 +6896,92 @@ impl ProjectPanel {
                         ),
                 ))
             })
+    }
+
+    /// The view header: the title on the left, the panel's actions on the right.
+    /// The header is also the handle that drags the panel to another dock.
+    fn render_panel_header(
+        &self,
+        has_worktree: bool,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let focus_handle = self.focus_handle.clone();
+        let can_edit = has_worktree && !self.project.read(cx).is_read_only(cx);
+
+        let action_button = |id: &'static str, icon: IconName, label: &'static str| {
+            IconButton::new(id, icon)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .aria_label(label)
+        };
+
+        let header = PanelHeader::new("Explorer")
+            .id("project-panel-header")
+            .when(can_edit, |this| {
+                this.end_slot(
+                    action_button("explorer-new-file", IconName::Plus, "New File")
+                        .tooltip({
+                            let focus_handle = focus_handle.clone();
+                            move |_, cx| {
+                                Tooltip::for_action_in("New File", &NewFile, &focus_handle, cx)
+                            }
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.focus_handle.focus(window, cx);
+                            this.new_file(&NewFile, window, cx);
+                        })),
+                )
+                .end_slot(
+                    action_button("explorer-new-folder", IconName::FolderAdd, "New Folder")
+                        .tooltip({
+                            let focus_handle = focus_handle.clone();
+                            move |_, cx| {
+                                Tooltip::for_action_in(
+                                    "New Folder",
+                                    &NewDirectory,
+                                    &focus_handle,
+                                    cx,
+                                )
+                            }
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.focus_handle.focus(window, cx);
+                            this.new_directory(&NewDirectory, window, cx);
+                        })),
+                )
+            })
+            .when(has_worktree, |this| {
+                this.end_slot(
+                    action_button(
+                        "explorer-collapse-all",
+                        IconName::ListCollapse,
+                        "Collapse Folders",
+                    )
+                    .tooltip({
+                        let focus_handle = focus_handle.clone();
+                        move |_, cx| {
+                            Tooltip::for_action_in(
+                                "Collapse Folders",
+                                &CollapseAllEntries,
+                                &focus_handle,
+                                cx,
+                            )
+                        }
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.collapse_all_entries(&CollapseAllEntries, window, cx);
+                    })),
+                )
+            });
+
+        panel_drag_source(
+            header,
+            Arc::new(cx.entity()),
+            self.position(window, cx),
+            self.workspace.clone(),
+        )
+        .into_any_element()
     }
 
     fn render_folder_elements(
@@ -7475,20 +7598,16 @@ impl ProjectPanel {
                     cx,
                 )
                 .when(index == last_item_index, |this| {
-                    let shadow_color_top = hsla(0.0, 0.0, 0.0, 0.1);
-                    let shadow_color_bottom = hsla(0.0, 0.0, 0.0, 0.);
-                    let sticky_shadow = div()
-                        .absolute()
-                        .left_0()
-                        .bottom_neg_1p5()
-                        .h_1p5()
-                        .w_full()
-                        .bg(linear_gradient(
-                            0.,
-                            linear_color_stop(shadow_color_top, 1.),
-                            linear_color_stop(shadow_color_bottom, 0.),
-                        ));
-                    this.child(sticky_shadow)
+                    // The pinned rows end on a line, like every header.
+                    this.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .bottom_0()
+                            .h(px(1.))
+                            .w_full()
+                            .bg(cx.theme().colors().border),
+                    )
                 })
                 .into_any()
             })
@@ -7557,6 +7676,7 @@ impl Render for ProjectPanel {
         // version that understands these messages.
         let is_collab = project.is_via_collab();
         let is_local = project.is_local();
+        let header = self.render_panel_header(has_worktree, window, cx);
 
         if has_worktree {
             let item_count = self
@@ -7633,14 +7753,20 @@ impl Render for ProjectPanel {
                     }
                 }));
             }
-            h_flex()
+            v_flex()
                 .id("project-panel")
                 .group("project-panel")
                 .when(panel_settings.drag_and_drop, |this| {
                     this.on_drag_move(cx.listener(handle_drag_move::<ExternalPaths>))
                         .on_drag_move(cx.listener(handle_drag_move::<DraggedSelection>))
                         .on_mouse_exit(cx.listener(|this, _: &MouseExitEvent, window, cx| {
-                            cx.stop_active_drag(window);
+                            // Only the drags this panel follows (its entries,
+                            // files from outside) set a drag position: a panel
+                            // or a tab dragged out of the window over the
+                            // Explorer is not this panel's to cancel.
+                            if this.previous_drag_position.is_some() {
+                                cx.stop_active_drag(window);
+                            }
                             this.clear_drag_state(cx);
                         }))
                         .on_file_drop_exit(cx.listener(|this, _: &FileDropEvent, _window, cx| {
@@ -7726,6 +7852,14 @@ impl Render for ProjectPanel {
                         .on_action(cx.listener(Self::download_from_remote))
                 })
                 .track_focus(&self.focus_handle(cx))
+                .child(header)
+                .child(
+                  h_flex()
+                    .id("project-panel-body")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .relative()
                 .child(
                     v_flex()
                         .child(
@@ -7811,9 +7945,10 @@ impl Render for ProjectPanel {
                                     ))
                                     .with_render_fn(
                                         cx.entity(),
-                                        move |this, params, _, cx| {
-                                            const LEFT_OFFSET: Pixels =
-                                                ui::LIST_ITEM_INDENT_GUIDE_LEFT_OFFSET;
+                                        move |this, params, window, cx| {
+                                            // The guides follow the rows' own inset.
+                                            let left_offset = ui::LIST_ITEM_INDENT_GUIDE_LEFT_OFFSET
+                                                + row_extra_inset().to_pixels(window.rem_size());
                                             const PADDING_Y: Pixels = px(4.);
                                             const HITBOX_OVERDRAW: Pixels = px(3.);
 
@@ -7839,7 +7974,7 @@ impl Render for ProjectPanel {
                                                     let bounds = Bounds::new(
                                                         point(
                                                             layout.offset.x * indent_size
-                                                                + LEFT_OFFSET,
+                                                                + left_offset,
                                                             layout.offset.y * item_height + offset,
                                                         ),
                                                         size(
@@ -7908,9 +8043,11 @@ impl Render for ProjectPanel {
                                         )
                                         .with_render_fn(
                                             cx.entity(),
-                                            move |_, params, _, _| {
-                                                const LEFT_OFFSET: Pixels =
-                                                    ui::LIST_ITEM_INDENT_GUIDE_LEFT_OFFSET;
+                                            move |_, params, window, _| {
+                                                let left_offset =
+                                                    ui::LIST_ITEM_INDENT_GUIDE_LEFT_OFFSET
+                                                        + row_extra_inset()
+                                                            .to_pixels(window.rem_size());
 
                                                 let indent_size = params.indent_size;
                                                 let item_height = params.item_height;
@@ -7922,7 +8059,7 @@ impl Render for ProjectPanel {
                                                         let bounds = Bounds::new(
                                                             point(
                                                                 layout.offset.x * indent_size
-                                                                    + LEFT_OFFSET,
+                                                                    + left_offset,
                                                                 layout.offset.y * item_height,
                                                             ),
                                                             size(
@@ -8133,7 +8270,7 @@ impl Render for ProjectPanel {
                     },
                     window,
                     cx,
-                )
+                ))
                 .children(self.context_menu.as_ref().map(|context_menu| {
                     deferred(
                         anchored()
@@ -8153,29 +8290,40 @@ impl Render for ProjectPanel {
             v_flex()
                 .id("empty-project_panel-wrapper")
                 .size_full()
+                .track_focus(&focus_handle)
+                .child(header)
                 .child(
-                    ProjectEmptyState::new(
-                        "Project Panel",
-                        focus_handle.clone(),
-                        KeyBinding::for_action_in(&workspace::Open::default(), &focus_handle, cx),
-                    )
-                    .on_open_project(move |_, window, cx| {
-                        telemetry::event!("Project Panel Add Project Clicked");
-                        workspace
-                            .update(cx, |_, cx| {
-                                window
-                                    .dispatch_action(workspace::Open::default().boxed_clone(), cx);
-                            })
-                            .log_err();
-                    })
-                    .on_clone_repo(move |_, window, cx| {
-                        telemetry::event!("Project Panel Clone Repo Clicked");
-                        workspace_clone
-                            .update(cx, |_, cx| {
-                                window.dispatch_action(git::Clone.boxed_clone(), cx);
-                            })
-                            .log_err();
-                    }),
+                    EmptyState::new("No folder open")
+                        // The one filled button of this dock.
+                        .primary_action(
+                            Button::primary("open_project", "Open Folder")
+                                .size(ButtonSize::Medium)
+                                .full_width()
+                                .key_binding(KeyBinding::for_action_in(
+                                    &workspace::Open::default(),
+                                    &focus_handle,
+                                    cx,
+                                ))
+                                .on_click(move |_, window, cx| {
+                                    telemetry::event!("Project Panel Add Project Clicked");
+                                    workspace
+                                        .update(cx, |_, cx| {
+                                            window.dispatch_action(
+                                                workspace::Open::default().boxed_clone(),
+                                                cx,
+                                            );
+                                        })
+                                        .log_err();
+                                }),
+                        )
+                        .action("Clone Repository", None, move |_, window, cx| {
+                            telemetry::event!("Project Panel Clone Repo Clicked");
+                            workspace_clone
+                                .update(cx, |_, cx| {
+                                    window.dispatch_action(git::Clone.boxed_clone(), cx);
+                                })
+                                .log_err();
+                        }),
                 )
                 .when(is_local, |div| {
                     div.when(panel_settings.drag_and_drop, |div| {
@@ -8220,10 +8368,12 @@ impl Render for DraggedProjectEntryView {
                     .flex()
                     .gap_1()
                     .items_center()
-                    .py_1()
+                    .py_0p5()
                     .px_2()
                     .rounded_lg()
-                    .bg(cx.theme().colors().background)
+                    .border_1()
+                    .border_color(cx.theme().colors().border_strong)
+                    .bg(cx.theme().colors().elevated_surface_background)
                     .map(|this| {
                         if self.selections.len() > 1 && self.selections.contains(&self.selection) {
                             this.child(Label::new(format!("{} entries", self.selections.len())))
@@ -8283,6 +8433,10 @@ impl Panel for ProjectPanel {
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
         Some("Project Panel")
+    }
+
+    fn title(&self, _window: &Window, _cx: &App) -> SharedString {
+        "Explorer".into()
     }
 
     fn toggle_action(&self) -> Box<dyn Action> {
@@ -8403,7 +8557,7 @@ pub fn par_sort_worktree_entries(
 
 fn git_status_indicator(git_status: GitSummary) -> Option<(&'static str, Color)> {
     if git_status.conflict > 0 {
-        return Some(("!", Color::Conflict));
+        return Some(("C", Color::Conflict));
     }
     if git_status.untracked > 0 {
         return Some(("U", Color::Created));

@@ -1,6 +1,6 @@
-use gpui::{Action, IntoElement, ParentElement, RenderOnce};
-use language_model::{IconOrSvg, LanguageModelRegistry, ZED_CLOUD_PROVIDER_ID};
-use ui::{Divider, List, ListBulletItem, prelude::*};
+use gpui::{IntoElement, ParentElement, RenderOnce};
+use language_model::{IDE_CLOUD_PROVIDER_ID, IconOrSvg, LanguageModelRegistry};
+use ui::{List, ListBulletItem, prelude::*};
 
 pub struct ApiKeysWithProviders {
     configured_providers: Vec<(IconOrSvg, SharedString)>,
@@ -32,7 +32,7 @@ impl ApiKeysWithProviders {
             .visible_providers()
             .iter()
             .filter(|provider| {
-                provider.is_authenticated(cx) && provider.id() != ZED_CLOUD_PROVIDER_ID
+                provider.is_authenticated(cx) && provider.id() != IDE_CLOUD_PROVIDER_ID
             })
             .map(|provider| (provider.icon(), provider.name().0))
             .collect()
@@ -56,53 +56,35 @@ impl Render for ApiKeysWithProviders {
                             .size(IconSize::XSmall)
                             .color(Color::Muted),
                         )
-                        .child(Label::new(name))
+                        .child(Label::new(name).size(LabelSize::Small))
                 });
-        div()
-            .mx_2p5()
-            .p_1()
-            .pb_0()
+        // Flat strip above the message editor: one line on top, no shadow, no inner card.
+        h_flex()
+            .px_3()
+            .py_1p5()
             .gap_2()
-            .rounded_t_lg()
+            .flex_wrap()
             .border_t_1()
-            .border_x_1()
-            .border_color(cx.theme().colors().border.opacity(0.5))
-            .bg(cx.theme().colors().background.alpha(0.5))
-            .shadow(vec![
-                gpui::BoxShadow::new(px(1.), px(-1.), gpui::black().opacity(0.15)).blur_radius(px(3.)),
-            ])
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().panel_background)
             .child(
                 h_flex()
-                    .px_2p5()
-                    .py_1p5()
+                    .min_w_0()
                     .gap_2()
-                    .flex_wrap()
-                    .rounded_t(px(5.))
-                    .overflow_hidden()
-                    .border_t_1()
-                    .border_x_1()
-                    .border_color(cx.theme().colors().border)
-                    .bg(cx.theme().colors().panel_background)
                     .child(
-                        h_flex()
-                            .min_w_0()
-                            .gap_2()
-                            .child(
-                                Icon::new(IconName::Info)
-                                    .size(IconSize::XSmall)
-                                    .color(Color::Muted)
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .child(
-                                        Label::new("Start now using API keys from your environment for the following providers:")
-                                            .color(Color::Muted)
-                                    )
-                            )
+                        Icon::new(IconName::Info)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
                     )
-                    .children(configured_providers_list)
+                    .child(
+                        div().w_full().child(
+                            Label::new("Keys found in your environment are ready to use:")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                    ),
             )
+            .children(configured_providers_list)
     }
 }
 
@@ -120,27 +102,12 @@ impl RenderOnce for ApiKeysWithoutProviders {
         v_flex()
             .mt_2()
             .gap_1()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Label::new("API Keys")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                            .buffer_font(cx),
-                    )
-                    .child(Divider::horizontal()),
-            )
+            .child(crate::section_header("Your own keys", None, cx))
             .child(List::new().child(ListBulletItem::new(
-                "Add your own keys to use AI without signing in.",
+                "Add your own keys to use AI without an account.",
             )))
-            .child(
-                Button::new("configure-providers", "Configure Providers")
-                    .full_width()
-                    .style(ButtonStyle::Outlined)
-                    .on_click(move |_, window, cx| {
-                        window.dispatch_action(zed_actions::agent::OpenSettings.boxed_clone(), cx);
-                    }),
-            )
+            // Never the filled accent: the surface that holds this card has its own
+            // primary action.
+            .child(crate::connect_a_model_button("configure-providers"))
     }
 }

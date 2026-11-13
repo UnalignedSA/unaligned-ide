@@ -421,11 +421,11 @@ impl PaneLeaderDecorator for PaneRenderContext<'_> {
                         }
                     }
                     ParticipantLocation::UnsharedProject => Some(Label::new(format!(
-                        "{} is viewing an unshared Zed project",
+                        "{} is viewing an unshared project",
                         leader.user.username
                     ))),
                     ParticipantLocation::External => Some(Label::new(format!(
-                        "{} is viewing a window outside of Zed",
+                        "{} is viewing a window outside of the app",
                         leader.user.username
                     ))),
                 };
@@ -573,7 +573,6 @@ impl Member {
                         this.bg(cx.theme().colors().background)
                             .border_1()
                             .border_color(cx.theme().colors().border)
-                            .shadow_lg()
                             .overflow_hidden()
                     })
                     .child(

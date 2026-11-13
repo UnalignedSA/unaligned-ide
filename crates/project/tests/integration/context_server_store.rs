@@ -1362,9 +1362,11 @@ fn set_http_context_server_configuration(server_id: &ContextServerId, cx: &mut T
     );
 }
 
-/// A fake HTTP client that serves the OAuth discovery documents (CIMD-capable,
-/// so no dynamic client registration is needed) and routes MCP endpoint POSTs
-/// to `respond_to_mcp_message` by the JSON-RPC message in the request body.
+/// A fake HTTP client that serves the OAuth discovery documents (the server
+/// accepts a client metadata document and has a registration endpoint, so a
+/// way to register exists whether or not the product publishes a document; no
+/// test here goes as far as registering) and routes MCP endpoint POSTs to
+/// `respond_to_mcp_message` by the JSON-RPC message in the request body.
 fn set_fake_mcp_http_client(
     cx: &mut TestAppContext,
     respond_to_mcp_message: impl Fn(&str) -> Result<Response<http_client::AsyncBody>>
@@ -1388,6 +1390,7 @@ fn set_fake_mcp_http_client(
                     "issuer": "https://auth.example.com",
                     "authorization_endpoint": "https://auth.example.com/authorize",
                     "token_endpoint": "https://auth.example.com/token",
+                    "registration_endpoint": "https://auth.example.com/register",
                     "code_challenge_methods_supported": ["S256"],
                     "client_id_metadata_document_supported": true
                 }))
@@ -1614,7 +1617,7 @@ async fn test_multi_worktree_context_server_settings(cx: &mut TestAppContext) {
     fs.insert_tree(
         path!("/project_a"),
         json!({
-            ".zed": {
+            ".unaligned": {
                 "settings.json": serde_json::to_string(&json!({
                     "context_servers": {
                         "server-from-project-a": {
@@ -1631,7 +1634,7 @@ async fn test_multi_worktree_context_server_settings(cx: &mut TestAppContext) {
     fs.insert_tree(
         path!("/project_b"),
         json!({
-            ".zed": {
+            ".unaligned": {
                 "settings.json": serde_json::to_string(&json!({
                     "context_servers": {
                         "server-from-project-b": {
@@ -1712,7 +1715,7 @@ async fn test_multi_worktree_duplicate_server_first_wins(cx: &mut TestAppContext
     fs.insert_tree(
         path!("/project_a"),
         json!({
-            ".zed": {
+            ".unaligned": {
                 "settings.json": serde_json::to_string(&json!({
                     "context_servers": {
                         "shared-server": {
@@ -1729,7 +1732,7 @@ async fn test_multi_worktree_duplicate_server_first_wins(cx: &mut TestAppContext
     fs.insert_tree(
         path!("/project_b"),
         json!({
-            ".zed": {
+            ".unaligned": {
                 "settings.json": serde_json::to_string(&json!({
                     "context_servers": {
                         "shared-server": {

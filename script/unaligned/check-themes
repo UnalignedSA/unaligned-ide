@@ -1,0 +1,786 @@
+#!/usr/bin/env python3
+"""Check the bundled theme files: tokens, colours and contrast.
+
+    script/unaligned/check-themes              every assets/themes/*/*.json
+    script/unaligned/check-themes FILE...      these files only
+    script/unaligned/check-themes -v           also list every ratio of the other bundled themes
+    script/unaligned/check-themes -q           failures and the verdict only
+
+Output: one line per finding, a count line, then PASS or FAIL. Exit status 0 or 1.
+
+    FAIL <theme> <check> <value> < <target>    a ratio under its target
+    FAIL <theme> unset <token>                 a required token left unset (or null)
+    FAIL <theme> color <token> ...             a colour string the app cannot parse
+    FAIL <file> json ...                       a file the app cannot load
+    WARN ...                                   same checks, not counted as failures
+    NOTE ...                                   a deliberate exception (see below)
+
+What is checked
+
+  Every theme
+    - The file is strict JSON. Comments are understood by this script but are a failure for
+      files under assets/themes: the app loads bundled themes with serde_json, which rejects
+      them (the theme would be skipped with one log line). Duplicate keys fail everywhere.
+    - The shape the app needs: family name, author, themes; theme name, appearance, style.
+    - Every colour string parses the way gpui does (#rgb, #rgba, #rrggbb, #rrggbbaa). The app
+      treats a colour it cannot parse as unset, silently.
+    - No two themes share a name (the registry is keyed by name: the later one would win).
+
+  Themes whose family name starts with "Unaligned" (failures)
+    - No unknown key in "style" (the app ignores unknown keys: a typo is an unset token).
+    - No required token left unset or null. Required = every colour and status key of the
+      schema, the new tokens (accent.background, accent.hover, accent.foreground,
+      border.strong, text.faint), "corners": "square", seven accents, a complete local player,
+      and the syntax names of REQUIRED_SYNTAX. Not required: the tokens whose fallback is
+      right (NOT_REQUIRED), the vim.* mode colours and the deprecated aliases.
+    - The contrast targets of the design system (the numbers are the constants below).
+      WCAG 2.1 ratios; a colour with alpha is blended on its real ground first.
+      The grounds are chrome (`background`), editor (`editor.background`) and raised
+      (`elevated_surface.background`).
+
+        text, editor.foreground, terminal foreground              7    on its grounds
+        text.muted, text.faint, text.accent, link_text.hover      4.5  on the three grounds
+        text.placeholder, text.disabled                           3    on the three grounds
+        border.focused, panel and pane focused borders            3
+        error, warning, info, success, created, modified,
+          deleted, conflict, renamed                              4.5  on chrome and editor
+        hint, predictive                                          4.5  on the editor
+        hidden, ignored                                           3    on chrome and editor
+        version_control.added/modified/deleted/conflict           3    on the editor
+        editor.line_number                                        3    (active number 4.5)
+        every syntax colour and every accent                      4.5  on the editor
+        text and every syntax colour                              4.5  on the selection
+        text                                                      4.5  on search matches and
+                                                                       on diff added/deleted fills
+        terminal.ansi.* normal and bright                         4.5  on the terminal ground
+        terminal.ansi.dim_*                                       3
+        accent.foreground                                         4.5  on the fill and its hover
+        editor.active_line.background against the editor          1.05 ("visible")
+        element.selected against the panel                        1.2  ("visible")
+        border / border.strong against their grounds              1.2 / 1.5 (see exception 1)
+
+  Other bundled themes (One, Ayu, Gruvbox): the same ratios as warnings, on the tokens they
+  set: one summary line per theme, every ratio with -v. Unset tokens are not reported.
+
+Deliberate exceptions, printed as NOTE and never counted
+
+  1. Structure lines. `border` (about 1.3:1) and `border.strong` (about 1.7:1) are under the
+     3:1 that WCAG 1.4.11 asks of the outline of a control. The 1px lines between regions are
+     decoration and a brand choice; inputs and outlined buttons use `border.strong`, and the
+     Unaligned Contrast theme is the one that passes in full. The lines must still be there:
+     `border` under 1.2:1 or `border.strong` under 1.5:1 fails.
+  2. The brand red fill with white text. #ffffff on #e5322d is 4.35:1, under the 4.5:1 of
+     body text (about 5.2:1 on its hover #cf2a25, which is darker than the fill). These are the
+     brand's own colours (the site's primary button); labels on the fill are medium weight.
+     Only this exact trio is excepted: any other accent fill must reach 4.5:1 with its
+     foreground, at rest and on hover.
+
+Two targets of the table are applied with a twist, both explained where they are coded:
+comments, hints and predictions on the selection (warning between 3 and 4.5, see
+FAINT_SYNTAX), and the ANSI colour that plays the ground (black on dark themes; white, or
+black in themes that swap them, on light ones) is not measured against it.
+
+Python 3 standard library only.
+"""
+
+import glob
+import json
+import math
+import os
+import re
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BUNDLED_DIR = os.path.join(ROOT, "assets", "themes")
+SCHEMA_SOURCE = os.path.join(ROOT, "crates", "settings_content", "src", "theme.rs")
+
+# Colour keys of `ThemeColorsContent` (crates/settings_content/src/theme.rs), in file order.
+COLOR_KEYS = """
+border border.variant border.focused border.selected border.transparent border.disabled
+border.strong elevated_surface.background surface.background background element.background
+element.hover element.active element.selected element.disabled element.selection_background
+drop_target.background drop_target.border ghost_element.background ghost_element.hover
+ghost_element.active ghost_element.selected ghost_element.disabled text text.muted
+text.placeholder text.disabled text.accent text.faint accent.background accent.hover
+accent.foreground icon icon.muted icon.disabled icon.placeholder icon.accent debugger.accent
+status_bar.background title_bar.background title_bar.inactive_background toolbar.background
+tab_bar.background tab.inactive_background tab.active_background search.match_background
+search.active_match_background panel.background panel.focused_border panel.indent_guide
+panel.indent_guide_hover panel.indent_guide_active panel.overlay_background panel.overlay_hover
+pane.focused_border pane_group.border scrollbar_thumb.background scrollbar.thumb.background
+scrollbar.thumb.hover_background scrollbar.thumb.active_background scrollbar.thumb.border
+scrollbar.track.background scrollbar.track.border minimap.thumb.background
+minimap.thumb.hover_background minimap.thumb.active_background minimap.thumb.border
+editor.foreground editor.code_lens.foreground editor.background editor.gutter.background
+editor.subheader.background editor.active_line.background editor.highlighted_line.background
+editor.debugger_active_line.background editor.line_number editor.active_line_number
+editor.hover_line_number editor.invisible editor.wrap_guide editor.active_wrap_guide
+editor.indent_guide editor.indent_guide_active editor.document_highlight.read_background
+editor.document_highlight.write_background editor.document_highlight.bracket_background
+editor.diff_hunk.added.background editor.diff_hunk.added.hollow_background
+editor.diff_hunk.added.hollow_border editor.diff_hunk.deleted.background
+editor.diff_hunk.deleted.hollow_background editor.diff_hunk.deleted.hollow_border
+terminal.background terminal.foreground terminal.ansi.background terminal.bright_foreground
+terminal.dim_foreground terminal.ansi.black terminal.ansi.bright_black terminal.ansi.dim_black
+terminal.ansi.red terminal.ansi.bright_red terminal.ansi.dim_red terminal.ansi.green
+terminal.ansi.bright_green terminal.ansi.dim_green terminal.ansi.yellow
+terminal.ansi.bright_yellow terminal.ansi.dim_yellow terminal.ansi.blue terminal.ansi.bright_blue
+terminal.ansi.dim_blue terminal.ansi.magenta terminal.ansi.bright_magenta
+terminal.ansi.dim_magenta terminal.ansi.cyan terminal.ansi.bright_cyan terminal.ansi.dim_cyan
+terminal.ansi.white terminal.ansi.bright_white terminal.ansi.dim_white link_text.hover
+version_control.added version_control.deleted version_control.modified version_control.renamed
+version_control.conflict version_control.ignored version_control.word_added
+version_control.word_deleted version_control.conflict_marker.ours
+version_control.conflict_marker.theirs version_control_conflict_ours_background
+version_control_conflict_theirs_background vim.normal.background vim.insert.background
+vim.replace.background vim.visual.background vim.visual_line.background
+vim.visual_block.background vim.yank.background vim.helix_jump_label.foreground
+vim.helix_normal.background vim.helix_select.background vim.normal.foreground
+vim.insert.foreground vim.replace.foreground vim.visual.foreground vim.visual_line.foreground
+vim.visual_block.foreground vim.helix_normal.foreground vim.helix_select.foreground
+""".split()
+
+STATUS_NAMES = (
+    "conflict created deleted error hidden hint ignored info modified predictive renamed "
+    "success unreachable warning"
+).split()
+STATUS_KEYS = [name + suffix for name in STATUS_NAMES for suffix in ("", ".background", ".border")]
+
+# Keys of `ThemeStyleContent` that are not colours.
+STRUCTURE_KEYS = {"background.appearance", "corners", "accents", "players", "syntax"}
+
+# Research 04, section 1.5: the rows whose fallback is right ("Fine"), plus the deprecated
+# aliases. The vim.* mode colours are opt-in and filtered by prefix.
+NOT_REQUIRED = {
+    "pane_group.border",
+    "panel.overlay_background",
+    "panel.overlay_hover",
+    "scrollbar.thumb.active_background",
+    "minimap.thumb.background",
+    "minimap.thumb.hover_background",
+    "minimap.thumb.active_background",
+    "minimap.thumb.border",
+    "editor.diff_hunk.added.background",
+    "editor.diff_hunk.added.hollow_background",
+    "editor.diff_hunk.added.hollow_border",
+    "editor.diff_hunk.deleted.background",
+    "editor.diff_hunk.deleted.hollow_background",
+    "editor.diff_hunk.deleted.hollow_border",
+    "element.selection_background",
+    "editor.code_lens.foreground",
+    "version_control.renamed",
+    "version_control.ignored",
+    # deprecated aliases
+    "scrollbar_thumb.background",
+    "version_control_conflict_ours_background",
+    "version_control_conflict_theirs_background",
+}
+
+REQUIRED_SYNTAX = """
+attribute boolean comment comment.doc constant constructor diff.minus diff.plus embedded emphasis
+emphasis.strong enum function hint keyword label lifetime link_text link_uri module namespace
+number operator predictive preproc primary property punctuation punctuation.bracket
+punctuation.delimiter punctuation.list_marker punctuation.markup punctuation.special selector
+selector.pseudo string string.escape string.regex string.special string.special.symbol tag
+text.literal title type variable variable.parameter variable.special variant
+""".split()
+
+# Comments, hints and predictions are the faint step: 4.5:1 on the editor, by a small margin
+# (4.8 in the default theme). On the selection the table also asks 4.5, which cannot hold
+# together with a selection one can see: a ground that keeps a 4.8 colour at 4.5 is within
+# 1.07:1 of the editor. So for these three names the selection target is a failure under 3 and
+# a warning under 4.5; every other syntax colour must reach 4.5 on the selection.
+FAINT_SYNTAX = {"comment", "hint", "predictive"}
+
+ANSI_HUES = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]
+
+BRAND_FILL = ("#e5322d", "#ffffff", "#cf2a25")  # fill, text on it, hover: exception 2
+
+FONT_STYLES = {"normal", "italic", "oblique"}
+CORNERS = {"square", "soft", "round"}
+WINDOW_BACKGROUNDS = {"opaque", "transparent", "blurred", "mica_backdrop", "mica_alt_backdrop"}
+
+
+# ---------------------------------------------------------------------------------------------
+# Colour arithmetic
+
+
+def parse_color(value):
+    """(r, g, b, a) with channels 0-255 and alpha 0-1, or None. Same grammar as gpui's Rgba."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text.startswith("#"):
+        return None
+    digits = text[1:]
+    if not re.fullmatch(r"[0-9a-fA-F]+", digits):
+        return None
+    if len(digits) in (3, 4):
+        digits = "".join(c * 2 for c in digits)
+    if len(digits) == 6:
+        digits += "ff"
+    if len(digits) != 8:
+        return None
+    r, g, b, a = (int(digits[i : i + 2], 16) for i in (0, 2, 4, 6))
+    return (r, g, b, a / 255.0)
+
+
+def blend(fg, bg):
+    """`fg` painted over the opaque `bg`."""
+    alpha = fg[3]
+    return tuple(fg[i] * alpha + bg[i] * (1.0 - alpha) for i in range(3)) + (1.0,)
+
+
+def luminance(color):
+    def channel(v):
+        v = v / 255.0
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * channel(color[0]) + 0.7152 * channel(color[1]) + 0.0722 * channel(color[2])
+
+
+def contrast(fg, bg):
+    """WCAG 2.1 contrast ratio of `fg` (blended if it has alpha) on the opaque `bg`."""
+    a, b = luminance(blend(fg, bg)), luminance(bg)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+def hex_of(color):
+    return "#%02x%02x%02x" % tuple(int(round(c)) for c in color[:3])
+
+
+def shown(ratio):
+    """Two decimals, rounded down: 4.496 must not print as 4.50 next to "< 4.5"."""
+    return "%.2f" % (math.floor(ratio * 100 + 1e-9) / 100)
+
+
+# ---------------------------------------------------------------------------------------------
+# Reading files
+
+
+def strip_comments(text):
+    """Blank out // and /* */ comments outside strings. Returns (text, number of comments)."""
+    out = []
+    count = 0
+    i = 0
+    in_string = False
+    while i < len(text):
+        c = text[i]
+        if in_string:
+            out.append(c)
+            if c == "\\" and i + 1 < len(text):
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+            i += 1
+        elif c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+        elif text.startswith("//", i):
+            count += 1
+            while i < len(text) and text[i] != "\n":
+                out.append(" ")
+                i += 1
+        elif text.startswith("/*", i):
+            count += 1
+            end = text.find("*/", i + 2)
+            end = len(text) if end < 0 else end + 2
+            out.append("".join(ch if ch == "\n" else " " for ch in text[i:end]))
+            i = end
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), count
+
+
+def no_duplicates(pairs):
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError('duplicate key "%s"' % key)
+        seen[key] = value
+    return seen
+
+
+def no_constants(name):
+    raise ValueError("%s is not JSON" % name)
+
+
+def live_schema_keys():
+    """Keys the Rust schema knows today, so a token added there is not reported as unknown
+    before this script's list is updated. Empty when the source is not readable."""
+    try:
+        with open(SCHEMA_SOURCE, encoding="utf-8") as handle:
+            source = handle.read()
+    except OSError:
+        return set()
+    keys = set()
+    for struct in ("ThemeColorsContent", "StatusColorsContent"):
+        body = re.search(r"pub struct %s \{(.*?)\n\}" % struct, source, re.S)
+        if not body:
+            continue
+        renamed = None
+        for line in body.group(1).splitlines():
+            rename = re.search(r'#\[serde\(rename = "([^"]+)"', line)
+            if rename:
+                renamed = rename.group(1)
+            field = re.search(r"pub ([a-z_0-9]+): Option<ThemeColor>", line)
+            if field:
+                keys.add(renamed or field.group(1))
+                renamed = None
+    return keys
+
+
+# ---------------------------------------------------------------------------------------------
+# Findings
+
+
+class Report:
+    def __init__(self, quiet):
+        self.quiet = quiet
+        self.failures = 0
+        self.warnings = 0
+        self.notes = 0
+
+    def fail(self, subject, message):
+        self.failures += 1
+        print("FAIL %s %s" % (subject, message))
+
+    def warn(self, subject, message, count=1):
+        self.warnings += count
+        if not self.quiet:
+            print("WARN %s %s" % (subject, message))
+
+    def note(self, subject, message):
+        self.notes += 1
+        if not self.quiet:
+            print("NOTE %s %s" % (subject, message))
+
+
+class Theme:
+    """One theme of a family: its tokens resolved to colours, and the checks."""
+
+    def __init__(self, name, appearance, style, strict, report):
+        self.name = name
+        self.style = style
+        self.strict = strict  # an Unaligned family theme: findings are failures
+        self.report = report
+        self.under_target = []  # (ratio / target, message) of a theme that is not strict
+        self.light = appearance == "light"
+        base = (255.0, 255.0, 255.0, 1.0) if self.light else (0.0, 0.0, 0.0, 1.0)
+        self.syntax = style.get("syntax") if isinstance(style.get("syntax"), dict) else {}
+        players = style.get("players")
+        self.player = players[0] if isinstance(players, list) and players and isinstance(players[0], dict) else {}
+
+        # The grounds of DESIGN.md D1, each made opaque on what is under it.
+        self.chrome = self.over(self.color("background"), base)
+        self.editor = self.over(self.color("editor.background"), self.chrome)
+        self.raised = self.over(self.color("elevated_surface.background"), self.chrome)
+        self.gutter = self.over(self.color("editor.gutter.background"), self.editor)
+        self.panel = self.over(self.color("panel.background"), self.chrome)
+        self.terminal = self.over(self.color("terminal.background"), self.editor)
+        self.three = [("chrome", self.chrome), ("editor", self.editor), ("raised", self.raised)]
+
+    def color(self, key):
+        return parse_color(self.style.get(key))
+
+    @staticmethod
+    def over(color, ground):
+        if color is None:
+            return ground
+        if ground is None:
+            return color if color[3] >= 1.0 else None
+        return blend(color, ground)
+
+    # -- reporting
+
+    def problem(self, message):
+        if self.strict:
+            self.report.fail(self.name, message)
+        else:
+            self.report.warn(self.name, message)
+
+    def need(self, label, fg, ground_name, ground, target, soft_floor=None):
+        """`fg` on `ground` must reach `target`. With `soft_floor`: a failure under the floor,
+        a warning between the floor and the target. Returns the ratio, or None if not measured."""
+        if fg is None or ground is None:
+            return None
+        ratio = contrast(fg, ground)
+        if ratio + 1e-9 >= target:
+            return ratio
+        message = "%s on %s %s < %s" % (label, ground_name, shown(ratio), target)
+        if self.strict and (soft_floor is None or ratio + 1e-9 < soft_floor):
+            self.report.fail(self.name, message)
+        elif self.strict:
+            self.report.warn(self.name, message)
+        else:
+            self.under_target.append((ratio / target, message))
+        return ratio
+
+    def flush(self, verbose):
+        """The ratios of a theme that is not strict: all of them, or one line."""
+        if not self.under_target:
+            return
+        if verbose:
+            for _, message in self.under_target:
+                self.report.warn(self.name, message)
+            return
+        worst = min(self.under_target)[1]
+        self.report.warn(
+            self.name,
+            "%d ratio(s) under target, the lowest: %s (-v lists them)" % (len(self.under_target), worst),
+            count=len(self.under_target),
+        )
+
+    # -- checks
+
+    def check_tokens(self, known_keys):
+        style = self.style
+        for key, value in style.items():
+            if key in STRUCTURE_KEYS:
+                continue
+            if key not in known_keys:
+                self.problem("unknown %s (the app ignores it: a misspelt token is an unset token)" % key)
+            elif value is not None and parse_color(value) is None:
+                self.report.fail(self.name, "color %s %s does not parse" % (key, json.dumps(value)))
+
+        corners = style.get("corners")
+        if corners is not None and corners not in CORNERS:
+            self.report.fail(self.name, "corners %s is not one of square, soft, round" % json.dumps(corners))
+        window = style.get("background.appearance")
+        if window is not None and window not in WINDOW_BACKGROUNDS:
+            self.report.fail(self.name, "background.appearance %s is not a known value" % json.dumps(window))
+
+        accents = style.get("accents", [])
+        if not isinstance(accents, list):
+            self.report.fail(self.name, "accents is not a list")
+            accents = []
+        for index, value in enumerate(accents):
+            if value is not None and parse_color(value) is None:
+                self.report.fail(self.name, "color accents[%d] %s does not parse" % (index, json.dumps(value)))
+
+        players = style.get("players", [])
+        if not isinstance(players, list):
+            self.report.fail(self.name, "players is not a list")
+            players = []
+        for index, player in enumerate(players):
+            if not isinstance(player, dict):
+                self.report.fail(self.name, "players[%d] is not an object" % index)
+                continue
+            for part, value in player.items():
+                if value is not None and parse_color(value) is None:
+                    self.report.fail(
+                        self.name, "color players[%d].%s %s does not parse" % (index, part, json.dumps(value))
+                    )
+
+        syntax = style.get("syntax", {})
+        if not isinstance(syntax, dict):
+            self.report.fail(self.name, "syntax is not an object")
+            syntax = {}
+        for name, entry in syntax.items():
+            if not isinstance(entry, dict):
+                self.report.fail(self.name, "syntax.%s is not an object" % name)
+                continue
+            for part in ("color", "background_color"):
+                value = entry.get(part)
+                if value is not None and parse_color(value) is None:
+                    self.report.fail(self.name, "color syntax.%s.%s %s does not parse" % (name, part, json.dumps(value)))
+            font_style = entry.get("font_style")
+            if font_style is not None and font_style not in FONT_STYLES:
+                self.problem("syntax.%s.font_style %s is not normal, italic or oblique" % (name, json.dumps(font_style)))
+            weight = entry.get("font_weight")
+            if weight is not None and (isinstance(weight, bool) or not isinstance(weight, (int, float))):
+                self.problem("syntax.%s.font_weight %s is not a number" % (name, json.dumps(weight)))
+
+    def check_required(self):
+        """Unaligned family only."""
+        style = self.style
+        for key in COLOR_KEYS + STATUS_KEYS:
+            if key in NOT_REQUIRED or key.startswith("vim."):
+                continue
+            if style.get(key) is None:
+                self.report.fail(self.name, "unset %s" % key)
+        if style.get("corners") is None:
+            self.report.fail(self.name, 'unset corners (the Unaligned family is "corners": "square")')
+        elif style.get("corners") != "square":
+            self.report.fail(
+                self.name, 'corners %s is not "square" (the whole Unaligned family is)' % json.dumps(style.get("corners"))
+            )
+        accents = [a for a in style.get("accents", []) if parse_color(a)] if isinstance(style.get("accents"), list) else []
+        if len(accents) < 7:
+            self.report.fail(
+                self.name,
+                "unset accents (%d of 7: function, amber, violet, green, cyan, orange, red)" % len(accents),
+            )
+        for part in ("cursor", "background", "selection"):
+            if parse_color(self.player.get(part)) is None:
+                self.report.fail(self.name, "unset players[0].%s" % part)
+        for name in REQUIRED_SYNTAX:
+            entry = self.syntax.get(name)
+            if not isinstance(entry, dict) or parse_color(entry.get("color")) is None:
+                self.report.fail(self.name, "unset syntax.%s" % name)
+        ansi_ground = self.color("terminal.ansi.background")
+        ground = self.color("terminal.background")
+        if ansi_ground is not None and ground is not None and ansi_ground != ground:
+            self.report.fail(
+                self.name,
+                "terminal.ansi.background %s differs from terminal.background %s"
+                % (style.get("terminal.ansi.background"), style.get("terminal.background")),
+            )
+
+    def check_contrast(self):
+        color = self.color
+        text = color("text")
+
+        # Text levels on the three grounds.
+        for ground_name, ground in self.three:
+            self.need("text", text, ground_name, ground, 7)
+            self.need("text.muted", color("text.muted"), ground_name, ground, 4.5)
+            self.need("text.faint", color("text.faint"), ground_name, ground, 4.5)
+            self.need("text.placeholder", color("text.placeholder"), ground_name, ground, 3)
+            self.need("text.disabled", color("text.disabled"), ground_name, ground, 3)
+            self.need("text.accent", color("text.accent"), ground_name, ground, 4.5)
+            self.need("link_text.hover", color("link_text.hover"), ground_name, ground, 4.5)
+            # Focus ring.
+            self.need("border.focused", color("border.focused"), ground_name, ground, 3)
+        self.need("panel.focused_border", color("panel.focused_border"), "panel", self.panel, 3)
+        self.need("pane.focused_border", color("pane.focused_border"), "editor", self.editor, 3)
+
+        # Status colours are label colours in panels and in the editor.
+        for name in ("error", "warning", "info", "success", "created", "modified", "deleted", "conflict", "renamed"):
+            for ground_name, ground in self.three[:2]:
+                self.need(name, color(name), ground_name, ground, 4.5)
+        for name in ("hint", "predictive"):  # inlay hints, edit predictions: read like comments
+            self.need(name, color(name), "editor", self.editor, 4.5)
+        for name in ("hidden", "ignored"):  # the placeholder step
+            for ground_name, ground in self.three[:2]:
+                self.need(name, color(name), ground_name, ground, 3)
+        # Gutter and scrollbar marks are graphics (WCAG 1.4.11).
+        for name in ("added", "modified", "deleted", "conflict"):
+            self.need("version_control." + name, color("version_control." + name), "editor", self.editor, 3)
+
+        # Editor.
+        self.need("editor.foreground", color("editor.foreground"), "editor", self.editor, 7)
+        self.need("editor.line_number", color("editor.line_number"), "gutter", self.gutter, 3)
+        active_line = self.over(color("editor.active_line.background"), self.editor)
+        self.need("editor.active_line_number", color("editor.active_line_number"), "active line", active_line, 4.5)
+        if color("editor.active_line.background") is not None:
+            # "Visible": the current line must not melt into the editor.
+            self.need("editor.active_line.background", active_line, "editor", self.editor, 1.05)
+
+        # Syntax on the editor, on the selection, and plain text on the fills laid over code.
+        selection = color("element.selection_background") or parse_color(self.player.get("selection"))
+        selection = self.over(selection, self.editor) if selection is not None else None
+        self.need("text", text, "selection", selection, 4.5)
+        for name, entry in self.syntax.items():
+            fg = parse_color(entry.get("color")) if isinstance(entry, dict) else None
+            self.need("syntax." + name, fg, "editor", self.editor, 4.5)
+            self.need("syntax." + name, fg, "selection", selection, 4.5, 3 if name in FAINT_SYNTAX else None)
+        accents = self.style.get("accents")
+        for index, value in enumerate(accents if isinstance(accents, list) else []):
+            # Rainbow brackets are code text.
+            self.need("accents[%d]" % index, parse_color(value), "editor", self.editor, 4.5)
+
+        for key in ("search.match_background", "search.active_match_background"):
+            if color(key) is not None:
+                self.need("text", text, key, self.over(color(key), self.editor), 4.5)
+        for side in ("added", "deleted"):
+            fill = color("editor.diff_hunk.%s.background" % side)
+            if fill is None:
+                marker = color("version_control." + side)
+                if marker is not None:  # the app's fallback: the marker at 12% (dark) or 16% (light)
+                    fill = marker[:3] + (0.16 if self.light else 0.12,)
+            if fill is not None:
+                self.need("text", text, "diff %s fill" % side, self.over(fill, self.editor), 4.5)
+
+        # Terminal. The neutral that plays the ground is not measured against it: of black and
+        # white, the one nearer to the terminal ground, with its step further into the ground
+        # (black and dim black on a dark theme; white and bright white on a light one, or black
+        # and dim black in light themes that swap the two). Bright black is what shells print
+        # hints in: on a dark theme it is measured like the others.
+        self.need("terminal.foreground", color("terminal.foreground"), "terminal", self.terminal, 7)
+        self.need("terminal.bright_foreground", color("terminal.bright_foreground"), "terminal", self.terminal, 7)
+        self.need("terminal.dim_foreground", color("terminal.dim_foreground"), "terminal", self.terminal, 4.5)
+        black, white = color("terminal.ansi.black"), color("terminal.ansi.white")
+        if black is not None and white is not None and self.terminal is not None:
+            black_is_ground = contrast(black, self.terminal) <= contrast(white, self.terminal)
+        else:
+            black_is_ground = not self.light
+        skipped = {"black", "dim_black"} if black_is_ground else {"white", "bright_white"}
+        for hue in ANSI_HUES:
+            for prefix, target in (("", 4.5), ("bright_", 4.5), ("dim_", 3)):
+                if prefix + hue in skipped:
+                    continue
+                key = "terminal.ansi." + prefix + hue
+                self.need(key, color(key), "terminal", self.terminal, target)
+
+        # A selected row must differ from its panel (the 2px marker carries the rest).
+        selected = color("element.selected")
+        if selected is not None:
+            self.need("element.selected", self.over(selected, self.panel), "panel", self.panel, 1.2)
+
+        self.check_accent_fill()
+        self.check_lines()
+
+    def check_accent_fill(self):
+        fill = self.color("accent.background") or parse_color(self.player.get("cursor"))
+        if fill is None:
+            return
+        fill = self.over(fill, self.chrome)
+        foreground = self.color("accent.foreground")
+        if foreground is None:  # the app's fallback: black or white, whichever contrasts more
+            black, white = (0.0, 0.0, 0.0, 1.0), (255.0, 255.0, 255.0, 1.0)
+            foreground = black if contrast(black, fill) >= contrast(white, fill) else white
+        hover = self.color("accent.hover")
+        hover = self.over(hover, self.chrome) if hover is not None else None
+
+        trio = (hex_of(fill), hex_of(foreground), hex_of(hover) if hover is not None else BRAND_FILL[2])
+        if trio == BRAND_FILL:
+            # Exception 2 (see the top of the file).
+            # Only the fill at rest is under the target: the hover is darker than the fill.
+            message = "accent fill: %s on %s %s < 4.5 (deliberate: the brand red with white text)" % (
+                trio[1],
+                trio[0],
+                shown(contrast(foreground, fill)),
+            )
+            if hover is not None:
+                message += "; on hover %s %s" % (trio[2], shown(contrast(foreground, hover)))
+            self.report.note(self.name, message)
+            return
+        self.need("accent.foreground", foreground, "accent.background", fill, 4.5)
+        self.need("accent.foreground", foreground, "accent.hover", hover, 4.5)
+
+    def check_lines(self):
+        # Exception 1 (see the top of the file): under 3:1 is a note, under the floor a failure.
+        border = self.color("border")
+        strong = self.color("border.strong") or border
+        measured = []
+        for key, line, floor, grounds in (("border", border, 1.2, self.three[:2]), ("border.strong", strong, 1.5, self.three)):
+            if line is None:
+                continue
+            lowest = None
+            for ground_name, ground in grounds:
+                ratio = contrast(line, ground)
+                if ratio + 1e-9 < floor:
+                    message = "%s on %s %s < %s" % (key, ground_name, shown(ratio), floor)
+                    if self.strict:
+                        self.report.fail(self.name, message)
+                    else:
+                        self.under_target.append((ratio / floor, message))
+                lowest = ratio if lowest is None else min(lowest, ratio)
+            if lowest is not None and lowest < 3:
+                measured.append("%s %s" % (key, shown(lowest)))
+        if measured and self.strict:
+            self.report.note(
+                self.name,
+                "lines: %s < 3.0 (deliberate: 1px structure lines; inputs use border.strong)" % ", ".join(measured),
+            )
+
+
+# ---------------------------------------------------------------------------------------------
+
+
+def check_file(path, known_keys, seen_names, report, verbose):
+    shown_path = os.path.relpath(path, ROOT) if os.path.abspath(path).startswith(ROOT + os.sep) else path
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = handle.read()
+    except (OSError, UnicodeDecodeError) as error:
+        report.fail(shown_path, "json cannot be read: %s" % error)
+        return 0
+
+    text, comments = strip_comments(raw)
+    bundled = os.path.abspath(path).startswith(BUNDLED_DIR + os.sep)
+    if comments and bundled:
+        report.fail(shown_path, "json has %d comment(s): bundled themes are loaded with a strict parser" % comments)
+    try:
+        family = json.loads(text, object_pairs_hook=no_duplicates, parse_constant=no_constants)
+    except ValueError as error:
+        report.fail(shown_path, "json %s" % error)
+        return 0
+
+    if not isinstance(family, dict):
+        report.fail(shown_path, "json the top level is not an object")
+        return 0
+    for key in ("name", "author"):
+        if not isinstance(family.get(key), str):
+            report.fail(shown_path, 'json "%s" is missing or not a string (the app would skip the file)' % key)
+    themes = family.get("themes")
+    if not isinstance(themes, list) or not themes:
+        report.fail(shown_path, 'json "themes" is missing or empty')
+        return 0
+    if "$schema" in family and isinstance(family["$schema"], str) and "zed.dev" in family["$schema"]:
+        message = '"$schema" points at zed.dev'
+        if str(family.get("name", "")).startswith("Unaligned"):
+            report.fail(shown_path, "json " + message)
+        else:
+            report.warn(shown_path, "json " + message)
+
+    strict = str(family.get("name", "")).startswith("Unaligned")
+    count = 0
+    for index, entry in enumerate(themes):
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            report.fail(shown_path, "json themes[%d] has no name" % index)
+            continue
+        name = entry["name"]
+        count += 1
+        if name in seen_names:
+            report.fail(name, "duplicate name, also in %s" % seen_names[name])
+        seen_names[name] = shown_path
+        appearance = entry.get("appearance")
+        if appearance not in ("light", "dark"):
+            report.fail(name, 'appearance %s is not "light" or "dark"' % json.dumps(appearance))
+        style = entry.get("style")
+        if not isinstance(style, dict):
+            report.fail(name, "style is missing or not an object")
+            continue
+        theme = Theme(name, appearance, style, strict, report)
+        theme.check_tokens(known_keys)
+        if strict:
+            theme.check_required()
+        theme.check_contrast()
+        theme.flush(verbose)
+    return count
+
+
+def main(argv):
+    arguments = argv[1:]
+    if "-h" in arguments or "--help" in arguments:
+        print(__doc__)
+        return 0
+    quiet = False
+    verbose = False
+    files = []
+    for argument in arguments:
+        if argument in ("-q", "--quiet"):
+            quiet = True
+        elif argument in ("-v", "--verbose"):
+            verbose = True
+        elif argument.startswith("-"):
+            print("check-themes: unknown option %s (see --help)" % argument, file=sys.stderr)
+            return 2
+        else:
+            files.append(argument)
+    if not files:
+        files = sorted(glob.glob(os.path.join(BUNDLED_DIR, "*", "*.json")))
+
+    report = Report(quiet)
+    if not files:
+        report.fail(os.path.relpath(BUNDLED_DIR, ROOT), "json no theme file found")
+    known_keys = set(COLOR_KEYS) | set(STATUS_KEYS) | live_schema_keys()
+    seen_names = {}
+    themes = sum(check_file(path, known_keys, seen_names, report, verbose) for path in files)
+
+    print(
+        "%d theme(s) in %d file(s): %d failure(s), %d warning(s), %d note(s)"
+        % (themes, len(files), report.failures, report.warnings, report.notes)
+    )
+    print("FAIL" if report.failures else "PASS")
+    return 1 if report.failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

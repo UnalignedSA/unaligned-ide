@@ -1,8 +1,10 @@
 pub mod active_file_name;
+pub mod activity_bar;
 pub mod dock;
 pub mod history_manager;
 pub mod invalid_item_view;
 pub mod item;
+pub mod layout_presets;
 mod modal_layer;
 mod multi_workspace;
 #[cfg(test)]
@@ -10,6 +12,7 @@ mod multi_workspace_tests;
 pub mod notifications;
 pub mod pane;
 pub mod pane_group;
+pub mod panel_drag;
 pub mod path_list {
     pub use util::path_list::{PathList, SerializedPathList};
 }
@@ -48,7 +51,7 @@ use client::{
     proto::{self, ErrorCode, PanelId, PeerId},
 };
 use collections::{HashMap, HashSet, TypeIdHashMap, hash_map};
-use dock::{Dock, DockPosition, PanelButtons, PanelHandle, RESIZE_HANDLE_SIZE};
+use dock::{Dock, DockPosition, PanelHandle, RESIZE_HANDLE_SIZE};
 use fs::Fs;
 use futures::{
     Future, FutureExt, StreamExt,
@@ -118,6 +121,7 @@ use settings::{
     update_settings_file,
 };
 
+use app_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 use sqlez::{
     bindable::{Bind, Column, StaticColumnCount},
     statement::Statement,
@@ -162,7 +166,6 @@ pub use workspace_settings::{
     RestoreOnStartupBehavior, StatusBarSettings, TabBarSettings, WorkspaceSettings,
     closing_last_window_quits_app, observe_accessible_mode,
 };
-use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 
 use crate::{dock::PanelSizeState, item::ItemBufferKind, notifications::NotificationId};
 use crate::{
@@ -310,15 +313,15 @@ fn render_window_title_format(
     segments.join(separator)
 }
 
-static ZED_WINDOW_SIZE: LazyLock<Option<Size<Pixels>>> = LazyLock::new(|| {
-    env::var("ZED_WINDOW_SIZE")
+static IDE_WINDOW_SIZE: LazyLock<Option<Size<Pixels>>> = LazyLock::new(|| {
+    env::var("IDE_WINDOW_SIZE")
         .ok()
         .as_deref()
         .and_then(parse_pixel_size_env_var)
 });
 
-static ZED_WINDOW_POSITION: LazyLock<Option<Point<Pixels>>> = LazyLock::new(|| {
-    env::var("ZED_WINDOW_POSITION")
+static IDE_WINDOW_POSITION: LazyLock<Option<Point<Pixels>>> = LazyLock::new(|| {
+    env::var("IDE_WINDOW_POSITION")
         .ok()
         .as_deref()
         .and_then(parse_pixel_position_env_var)
@@ -427,6 +430,12 @@ actions!(
         FollowNextCollaborator,
         /// Moves the focused panel to the next position.
         MoveFocusedPanelToNextPosition,
+        /// Moves the focused panel to the left dock, where it stays open and focused.
+        MoveFocusedPanelToLeftDock,
+        /// Moves the focused panel to the right dock, where it stays open and focused.
+        MoveFocusedPanelToRightDock,
+        /// Moves the focused panel to the bottom dock, where it stays open and focused.
+        MoveFocusedPanelToBottomDock,
         /// Creates a new file.
         NewFile,
         /// Creates a new file in a vertical split.
@@ -1047,6 +1056,7 @@ pub fn init(app_state: Arc<AppState>, cx: &mut App) {
     component::init();
     theme_preview::init(cx);
     toast_layer::init(cx);
+    layout_presets::init(cx);
     history_manager::init(app_state.fs.clone(), cx);
 
     cx.on_app_quit(flush_windows_serialization_on_quit).detach();
@@ -1669,6 +1679,7 @@ pub struct Workspace {
     last_active_center_pane: Option<WeakEntity<Pane>>,
     last_active_view_id: Option<proto::ViewId>,
     status_bar: Entity<StatusBar>,
+    activity_bar: Entity<activity_bar::ActivityBar>,
     pub(crate) modal_layer: Entity<ModalLayer>,
     toast_layer: Entity<ToastLayer>,
     titlebar_item: Option<AnyView>,
@@ -1733,6 +1744,20 @@ pub struct Workspace {
     restoring_workspace: Rc<Cell<bool>>,
     restoring_from: Rc<RefCell<Option<SerializedWorkspace>>>,
     keeps_saved_state_while_restoring: bool,
+    /// Set while a panel is dragged to another dock (see `panel_drag`): the
+    /// drop zones are drawn, and Escape cancels the drag.
+    panel_drag: Option<panel_drag::ActivePanelDrag>,
+    /// Set while the sash of a dock is dragged.
+    dock_resize: Option<DockResize>,
+    /// The docks' open state and the centering as last stored outside of Zen
+    /// mode, which is what is stored again while Zen mode hides them.
+    layout_before_zen: RefCell<Option<(DockStructure, bool)>>,
+    /// Panels `move_panel_to_dock` is moving, with the dock they are going to.
+    /// The dock they leave reads this when the move happens, so that they
+    /// arrive open and focused even if they were hidden.
+    panels_to_reveal_on_arrival: Vec<(EntityId, DockPosition)>,
+    /// `Some` while Zen mode is on. Nothing sets it yet.
+    pub(crate) zen: Option<layout_presets::ZenState>,
 }
 
 impl EventEmitter<Event> for Workspace {}
@@ -2051,21 +2076,22 @@ impl Workspace {
         let left_dock = Dock::new(DockPosition::Left, modal_layer.clone(), window, cx);
         let bottom_dock = Dock::new(DockPosition::Bottom, modal_layer.clone(), window, cx);
         let right_dock = Dock::new(DockPosition::Right, modal_layer.clone(), window, cx);
-        let left_dock_buttons = cx.new(|cx| PanelButtons::new(left_dock.clone(), cx));
-        let bottom_dock_buttons = cx.new(|cx| PanelButtons::new(bottom_dock.clone(), cx));
-        let right_dock_buttons = cx.new(|cx| PanelButtons::new(right_dock.clone(), cx));
+        // Every panel is picked from the activity bar, whichever dock it is in.
+        let activity_bar = cx.new(|cx| {
+            activity_bar::ActivityBar::new(
+                weak_handle.clone(),
+                left_dock.clone(),
+                right_dock.clone(),
+                bottom_dock.clone(),
+                cx,
+            )
+        });
         let multi_workspace = window
             .root::<MultiWorkspace>()
             .flatten()
             .map(|mw| mw.downgrade());
-        let status_bar = cx.new(|cx| {
-            let mut status_bar =
-                StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx);
-            status_bar.add_left_item(left_dock_buttons, window, cx);
-            status_bar.add_right_item(right_dock_buttons, window, cx);
-            status_bar.add_right_item(bottom_dock_buttons, window, cx);
-            status_bar
-        });
+        let status_bar =
+            cx.new(|cx| StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx));
 
         let session_id = app_state.session.read(cx).id().to_owned();
 
@@ -2179,6 +2205,7 @@ impl Workspace {
             last_active_center_pane: Some(center_pane.downgrade()),
             last_active_view_id: None,
             status_bar,
+            activity_bar,
             modal_layer,
             toast_layer,
             titlebar_item: None,
@@ -2240,7 +2267,17 @@ impl Workspace {
             restoring_workspace: Rc::new(Cell::new(false)),
             restoring_from: Rc::default(),
             keeps_saved_state_while_restoring: false,
+            panel_drag: None,
+            dock_resize: None,
+            layout_before_zen: RefCell::new(None),
+            panels_to_reveal_on_arrival: Vec::new(),
+            zen: None,
         }
+    }
+
+    /// Whether Zen mode is on: the activity bar and the status bar are hidden.
+    pub fn zen_mode(&self) -> bool {
+        self.zen.is_some()
     }
 
     pub fn new_local(
@@ -6306,11 +6343,9 @@ impl Workspace {
             let Some(panel_size) = self.dock_size(&dock, window, cx) else {
                 return;
             };
-            match dock.position() {
-                DockPosition::Left => self.resize_left_dock(panel_size + amount, window, cx),
-                DockPosition::Bottom => self.resize_bottom_dock(panel_size + amount, window, cx),
-                DockPosition::Right => self.resize_right_dock(panel_size + amount, window, cx),
-            }
+            let position = dock.position();
+            let size = self.limit_dock_size(position, panel_size, panel_size + amount, window, cx);
+            self.resize_dock(position, size, window, cx);
         } else {
             self.center
                 .resize(&self.active_pane, axis, amount, &self.bounds, cx);
@@ -7261,17 +7296,19 @@ impl Workspace {
         if self.notifications.is_empty() {
             None
         } else {
+            // Stacked in the bottom right corner, above the status bar.
             Some(
                 div()
                     .absolute()
-                    .right_3()
-                    .bottom_3()
+                    .right_2()
+                    .bottom_2()
                     .w_112()
+                    .max_w_full()
                     .h_full()
                     .flex()
                     .flex_col()
                     .justify_end()
-                    .gap_2()
+                    .gap_1p5()
                     .children(
                         self.notifications
                             .iter()
@@ -7464,7 +7501,7 @@ impl Workspace {
 
             let Some(task) = task else {
                 anyhow::bail!(
-                    "failed to construct view from leader (maybe from a different version of zed?)"
+                    "failed to construct view from leader (maybe from a different version of the app?)"
                 );
             };
 
@@ -8081,12 +8118,25 @@ impl Workspace {
             }
         }
 
+        /// The docks' state and whether the layout is centred, as the next
+        /// start should restore them.
         fn build_serialized_docks(
             this: &Workspace,
             window: &mut Window,
             cx: &mut App,
-        ) -> DockStructure {
-            this.capture_dock_state(window, cx)
+        ) -> (DockStructure, bool) {
+            let docks = this.capture_dock_state(window, cx);
+            let centered_layout = this.centered_layout;
+            if this.zen.is_none() {
+                *this.layout_before_zen.borrow_mut() = Some((docks.clone(), centered_layout));
+                return (docks, centered_layout);
+            }
+            // Zen mode closes the docks and centres the editor for as long as
+            // it lasts: what is stored is the window as it was before.
+            this.layout_before_zen
+                .borrow()
+                .clone()
+                .unwrap_or((docks, centered_layout))
         }
 
         match self.workspace_location(cx) {
@@ -8111,7 +8161,7 @@ impl Workspace {
                     .unwrap_or_default();
 
                 let mut center_group = build_serialized_pane_group(&self.center.root, window, cx);
-                let mut docks = build_serialized_docks(self, window, cx);
+                let (mut docks, centered_layout) = build_serialized_docks(self, window, cx);
                 if let Some(restoring_from) = self.restoring_from.borrow().clone() {
                     if self.restoring_workspace.get() {
                         center_group = restoring_from
@@ -8143,7 +8193,7 @@ impl Workspace {
                     window_bounds,
                     display: Default::default(),
                     docks,
-                    centered_layout: self.centered_layout,
+                    centered_layout,
                     session_id: self.session_id.clone(),
                     bookmarks,
                     breakpoints,
@@ -8166,7 +8216,7 @@ impl Workspace {
             }
             WorkspaceLocation::None => {
                 // Save dock state for empty non-local workspaces
-                let docks = build_serialized_docks(self, window, cx);
+                let (docks, _) = build_serialized_docks(self, window, cx);
                 let kvp = db::kvp::KeyValueStore::global(cx);
                 cx.background_spawn(async move {
                     persistence::write_default_dock_state(&kvp, docks)
@@ -8542,6 +8592,9 @@ impl Workspace {
             .on_action(cx.listener(Self::activate_pane_at_index))
             .on_action(cx.listener(Self::move_item_to_pane_at_index))
             .on_action(cx.listener(Self::move_focused_panel_to_next_position))
+            .on_action(cx.listener(Self::move_focused_panel_to_left_dock))
+            .on_action(cx.listener(Self::move_focused_panel_to_right_dock))
+            .on_action(cx.listener(Self::move_focused_panel_to_bottom_dock))
             .on_action(cx.listener(Self::reopen_last_picker))
             .on_action(cx.listener(Self::toggle_edit_predictions_all_files))
             .on_action(cx.listener(Self::toggle_theme_mode))
@@ -9443,46 +9496,223 @@ impl Workspace {
     }
 
     fn resize_left_dock(&mut self, new_size: Pixels, window: &mut Window, cx: &mut App) {
-        let workspace_width = self.bounds.size.width;
-        let mut size = new_size.min(workspace_width - RESIZE_HANDLE_SIZE);
-
-        self.right_dock.read_with(cx, |right_dock, cx| {
-            let right_dock_size = right_dock
-                .stored_active_panel_size(window, cx)
-                .unwrap_or(Pixels::ZERO);
-            if right_dock_size + size > workspace_width {
-                size = workspace_width - right_dock_size
-            }
-        });
-
-        let flex_grow = self.dock_flex_for_size(DockPosition::Left, size, window, cx);
-        self.left_dock.update(cx, |left_dock, cx| {
-            left_dock.resize_panel_sizes(Some(size), flex_grow, window, cx);
-        });
+        self.resize_dock_to(DockPosition::Left, new_size, true, window, cx);
     }
 
     fn resize_right_dock(&mut self, new_size: Pixels, window: &mut Window, cx: &mut App) {
-        let workspace_width = self.bounds.size.width;
-        let mut size = new_size.min(workspace_width - RESIZE_HANDLE_SIZE);
-        self.left_dock.read_with(cx, |left_dock, cx| {
-            let left_dock_size = left_dock
-                .stored_active_panel_size(window, cx)
-                .unwrap_or(Pixels::ZERO);
-            if left_dock_size + size > workspace_width {
-                size = workspace_width - left_dock_size
-            }
-        });
-        let flex_grow = self.dock_flex_for_size(DockPosition::Right, size, window, cx);
-        self.right_dock.update(cx, |right_dock, cx| {
-            right_dock.resize_panel_sizes(Some(size), flex_grow, window, cx);
-        });
+        self.resize_dock_to(DockPosition::Right, new_size, true, window, cx);
     }
 
     fn resize_bottom_dock(&mut self, new_size: Pixels, window: &mut Window, cx: &mut App) {
-        let size = new_size.min(self.bounds.bottom() - RESIZE_HANDLE_SIZE - self.bounds.top());
-        self.bottom_dock.update(cx, |bottom_dock, cx| {
-            bottom_dock.resize_panel_sizes(Some(size), None, window, cx);
+        self.resize_dock_to(DockPosition::Bottom, new_size, true, window, cx);
+    }
+
+    /// Gives the dock at `position` the size `new_size`, kept inside the
+    /// workspace. With `persist` off the size is not stored: a sash drag
+    /// stores it once, when it ends.
+    fn resize_dock_to(
+        &mut self,
+        position: DockPosition,
+        new_size: Pixels,
+        persist: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let (size, flex_grow) = match position {
+            DockPosition::Left | DockPosition::Right => {
+                let workspace_width = self.bounds.size.width;
+                let mut size = new_size.min(workspace_width - RESIZE_HANDLE_SIZE);
+                let opposite_dock = match position {
+                    DockPosition::Left => &self.right_dock,
+                    _ => &self.left_dock,
+                };
+                let opposite_dock_size = opposite_dock
+                    .read(cx)
+                    .stored_active_panel_size(window, cx)
+                    .unwrap_or(Pixels::ZERO);
+                if opposite_dock_size + size > workspace_width {
+                    size = workspace_width - opposite_dock_size
+                }
+                (size, self.dock_flex_for_size(position, size, window, cx))
+            }
+            DockPosition::Bottom => (
+                new_size.min(self.bounds.bottom() - RESIZE_HANDLE_SIZE - self.bounds.top()),
+                None,
+            ),
+        };
+        self.dock_at_position(position).update(cx, |dock, cx| {
+            if persist {
+                dock.resize_panel_sizes(Some(size), flex_grow, window, cx);
+            } else {
+                dock.resize_panel_sizes_while_dragging(Some(size), flex_grow, window, cx);
+            }
         });
+    }
+
+    /// The smallest and the largest size the user can give the dock at
+    /// `position`, with a sash or with the resize actions: never under the
+    /// shown panel's minimum, and never so large that the editor is left with
+    /// less than its own minimum beside the opposite dock as it is now.
+    pub(crate) fn dock_size_limits(
+        &self,
+        position: DockPosition,
+        window: &Window,
+        cx: &App,
+    ) -> (Pixels, Pixels) {
+        let panel_min_size = self
+            .dock_at_position(position)
+            .read(cx)
+            .active_panel()
+            .and_then(|panel| panel.min_size(window, cx))
+            .unwrap_or(Pixels::ZERO);
+        match position {
+            DockPosition::Left | DockPosition::Right => {
+                let opposite_dock = match position {
+                    DockPosition::Left => &self.right_dock,
+                    _ => &self.left_dock,
+                }
+                .read(cx);
+                let opposite_dock_size = opposite_dock
+                    .visible_panel()
+                    .and_then(|_| self.dock_size(opposite_dock, window, cx))
+                    .unwrap_or(Pixels::ZERO);
+                let min = panel_min_size.max(MIN_SIDE_DOCK_DRAG_WIDTH);
+                // Whole pixels, as sizes are stored: rounding up would take the
+                // editor's last pixel.
+                let max = (self.bounds.size.width - opposite_dock_size - MIN_CENTER_WIDTH_ON_DRAG)
+                    .floor();
+                (min, max.max(min))
+            }
+            DockPosition::Bottom => {
+                let min = panel_min_size.max(MIN_BOTTOM_DOCK_DRAG_HEIGHT);
+                let max = (self.bounds.size.height - MIN_CENTER_HEIGHT_ON_DRAG).floor();
+                (min, max.max(min))
+            }
+        }
+    }
+
+    /// `requested` brought inside `dock_size_limits`. A dock that is already
+    /// outside of them (a size from an older session, a window made smaller)
+    /// is never pushed further out, and never jumps: it can only move towards
+    /// the limits.
+    fn limit_dock_size(
+        &self,
+        position: DockPosition,
+        current: Pixels,
+        requested: Pixels,
+        window: &Window,
+        cx: &App,
+    ) -> Pixels {
+        let (min, max) = self.dock_size_limits(position, window, cx);
+        requested.clamp(min.min(current), max.max(current).max(min.min(current)))
+    }
+
+    /// One mouse move of a sash drag: the dock follows the pointer inside its
+    /// limits. A side dock dragged under half of its minimum closes, and opens
+    /// again if the pointer comes back before the button is released.
+    fn drag_dock_sash(
+        &mut self,
+        position: DockPosition,
+        pointer: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let bounds = self.bounds;
+        let requested = match position {
+            DockPosition::Left => pointer.x - bounds.left(),
+            DockPosition::Right => bounds.right() - pointer.x,
+            DockPosition::Bottom => bounds.bottom() - pointer.y,
+        };
+        let dock = self.dock_at_position(position).clone();
+        if self
+            .dock_resize
+            .as_ref()
+            .is_none_or(|resize| resize.position != position)
+        {
+            self.dock_resize = Some(DockResize {
+                position,
+                size_state_before: dock.read(cx).active_panel_size().unwrap_or_default(),
+                closed_by_snap: false,
+            });
+        }
+        let Some(resize) = self.dock_resize.as_ref() else {
+            return;
+        };
+        let size_state_before = resize.size_state_before;
+        let closed_by_snap = resize.closed_by_snap;
+
+        let (min, _) = self.dock_size_limits(position, window, cx);
+        if position.axis() == Axis::Horizontal && requested < min / 2. {
+            if !closed_by_snap {
+                let focus_center = dock.focus_handle(cx).contains_focused(window, cx);
+                dock.update(cx, |dock, cx| {
+                    // Opening it again gives the size it had before the drag,
+                    // not the minimum the drag went through.
+                    dock.resize_panel_sizes_while_dragging(
+                        size_state_before.size,
+                        size_state_before.flex,
+                        window,
+                        cx,
+                    );
+                    dock.set_open(false, window, cx);
+                });
+                if focus_center {
+                    self.active_pane
+                        .update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
+                }
+                if let Some(resize) = self.dock_resize.as_mut() {
+                    resize.closed_by_snap = true;
+                }
+                cx.notify();
+            }
+            return;
+        }
+
+        if closed_by_snap {
+            dock.update(cx, |dock, cx| dock.set_open(true, window, cx));
+            if let Some(resize) = self.dock_resize.as_mut() {
+                resize.closed_by_snap = false;
+            }
+        }
+        let current = self
+            .dock_size(dock.read(cx), window, cx)
+            .unwrap_or(requested);
+        let size = self.limit_dock_size(position, current, requested, window, cx);
+        self.resize_dock_to(position, size, false, window, cx);
+    }
+
+    /// Stores the sizes once the sash drag is over, however it ended. Called
+    /// at the start of every render: a drag that ends refreshes the window.
+    fn end_dock_resize_if_over(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dock_resize.is_none() || cx.has_active_drag() {
+            return;
+        }
+        let Some(resize) = self.dock_resize.take() else {
+            return;
+        };
+        self.previous_dock_drag_coordinates = None;
+        cx.defer_in(window, move |workspace, window, cx| {
+            workspace
+                .dock_at_position(resize.position)
+                .clone()
+                .update(cx, |dock, cx| dock.persist_resized_panels(cx));
+            workspace.serialize_workspace(window, cx);
+        });
+    }
+
+    /// Called when the workspace changes size: no dock keeps a stored size
+    /// that would leave the editor less than its minimum.
+    fn clamp_docks_to_bounds(&mut self, window: &Window, cx: &mut App) {
+        for position in [
+            DockPosition::Left,
+            DockPosition::Right,
+            DockPosition::Bottom,
+        ] {
+            let (_, max) = self.dock_size_limits(position, window, cx);
+            self.dock_at_position(position).update(cx, |dock, cx| {
+                dock.clamp_panel_size(max + RESIZE_HANDLE_SIZE, window, cx)
+            });
+        }
     }
 
     fn toggle_edit_predictions_all_files(
@@ -9823,8 +10053,8 @@ fn leader_border_for_pane(
 }
 
 fn window_bounds_env_override() -> Option<Bounds<Pixels>> {
-    ZED_WINDOW_POSITION
-        .zip(*ZED_WINDOW_SIZE)
+    IDE_WINDOW_POSITION
+        .zip(*IDE_WINDOW_SIZE)
         .map(|(position, size)| Bounds {
             origin: position,
             size,
@@ -10109,7 +10339,9 @@ fn adjust_active_dock_size_by_px(
     let Some(panel_size) = workspace.dock_size(&dock, window, cx) else {
         return;
     };
-    workspace.resize_dock(dock.position(), panel_size + px, window, cx);
+    let position = dock.position();
+    let size = workspace.limit_dock_size(position, panel_size, panel_size + px, window, cx);
+    workspace.resize_dock(position, size, window, cx);
 }
 
 fn adjust_open_docks_size_by_px(
@@ -10126,15 +10358,16 @@ fn adjust_open_docks_size_by_px(
             if dock.is_open() {
                 let dock_pos = dock.position();
                 let panel_size = workspace.dock_size(&dock, window, cx)?;
-                Some((dock_pos, panel_size + px))
+                Some((dock_pos, panel_size, panel_size + px))
             } else {
                 None
             }
         })
         .collect::<Vec<_>>();
 
-    for (position, new_size) in docks {
-        workspace.resize_dock(position, new_size, window, cx);
+    for (position, panel_size, new_size) in docks {
+        let size = workspace.limit_dock_size(position, panel_size, new_size, window, cx);
+        workspace.resize_dock(position, size, window, cx);
     }
 }
 
@@ -10147,11 +10380,27 @@ impl Focusable for Workspace {
 #[derive(Clone)]
 struct DraggedDock(DockPosition);
 
+/// What the workspace remembers while the sash of a dock is dragged.
+struct DockResize {
+    position: DockPosition,
+    /// The size of the dock's panel when the drag started: a dock closed by
+    /// dragging its sash to the edge opens again at that size.
+    size_state_before: dock::PanelSizeState,
+    /// Whether the drag has closed the dock (it went under half the minimum).
+    closed_by_snap: bool,
+}
+
 impl Render for DraggedDock {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
     }
 }
+
+/// Bounds applied while a dock's sash is dragged, and by the resize actions.
+const MIN_SIDE_DOCK_DRAG_WIDTH: Pixels = px(170.);
+const MIN_BOTTOM_DOCK_DRAG_HEIGHT: Pixels = px(80.);
+const MIN_CENTER_WIDTH_ON_DRAG: Pixels = px(240.);
+const MIN_CENTER_HEIGHT_ON_DRAG: Pixels = px(120.);
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -10159,6 +10408,10 @@ impl Render for Workspace {
         if FIRST_PAINT.swap(false, std::sync::atomic::Ordering::Relaxed) {
             log::info!("Rendered first frame");
         }
+
+        self.end_panel_drag_if_over(cx);
+        self.end_dock_resize_if_over(window, cx);
+        let zen_mode = self.zen_mode();
 
         let pad_center_pane = self.centered_layout
             && self.center.panes().len() == 1
@@ -10269,103 +10522,77 @@ impl Render for Workspace {
                     .size_full()
                     .relative()
                     .flex_1()
+                    // Without it the column is at least as tall as the activity bar's
+                    // icons, and in a low window the status bar ends below the window's
+                    // bottom edge: the bar scrolls its panels instead.
+                    .min_h_0()
                     .flex()
                     .flex_col()
                     .child(
-                        div()
-                            .id("workspace")
-                            .bg(colors.background)
-                            .relative()
+                        h_flex()
                             .flex_1()
                             .w_full()
-                            .flex()
-                            .flex_col()
-                            .overflow_hidden()
-                            .border_t_1()
-                            .border_b_1()
-                            .border_color(colors.border)
-                            .child({
-                                let this = cx.entity();
-                                canvas(
-                                    move |bounds, window, cx| {
-                                        this.update(cx, |this, cx| {
-                                            let bounds_changed = this.bounds != bounds;
-                                            this.bounds = bounds;
+                            .min_h_0()
+                            .items_stretch()
+                            .when(!zen_mode, |this| this.child(self.activity_bar.clone()))
+                            .child(
+                                div()
+                                    .id("workspace")
+                                    .bg(colors.background)
+                                    .relative()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden()
+                                    // No line of its own above or below: the
+                                    // title bar closes itself with one and the
+                                    // status bar opens with one. A second one
+                                    // here made both 2px thick.
+                                    .child({
+                                        let this = cx.entity();
+                                        canvas(
+                                            move |bounds, window, cx| {
+                                                this.update(cx, |this, cx| {
+                                                    let bounds_changed = this.bounds != bounds;
+                                                    this.bounds = bounds;
 
-                                            if bounds_changed {
-                                                this.left_dock.update(cx, |dock, cx| {
-                                                    dock.clamp_panel_size(
-                                                        bounds.size.width,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                });
+                                                    if bounds_changed {
+                                                        this.clamp_docks_to_bounds(window, cx);
+                                                    }
+                                                })
+                                            },
+                                            |_, _, _, _| {},
+                                        )
+                                        .absolute()
+                                        .size_full()
+                                    })
+                                    .when(self.zoomed.is_none(), |this| {
+                                        this.on_drag_move(cx.listener(
+                                            move |workspace,
+                                                  e: &DragMoveEvent<DraggedDock>,
+                                                  window,
+                                                  cx| {
+                                                if workspace.previous_dock_drag_coordinates
+                                                    != Some(e.event.position)
+                                                {
+                                                    workspace.previous_dock_drag_coordinates =
+                                                        Some(e.event.position);
 
-                                                this.right_dock.update(cx, |dock, cx| {
-                                                    dock.clamp_panel_size(
-                                                        bounds.size.width,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                });
-
-                                                this.bottom_dock.update(cx, |dock, cx| {
-                                                    dock.clamp_panel_size(
-                                                        bounds.size.height,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                });
-                                            }
-                                        })
-                                    },
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .size_full()
-                            })
-                            .when(self.zoomed.is_none(), |this| {
-                                this.on_drag_move(cx.listener(
-                                    move |workspace, e: &DragMoveEvent<DraggedDock>, window, cx| {
-                                        if workspace.previous_dock_drag_coordinates
-                                            != Some(e.event.position)
-                                        {
-                                            workspace.previous_dock_drag_coordinates =
-                                                Some(e.event.position);
-
-                                            match e.drag(cx).0 {
-                                                DockPosition::Left => {
-                                                    workspace.resize_left_dock(
-                                                        e.event.position.x
-                                                            - workspace.bounds.left(),
+                                                    let position = e.drag(cx).0;
+                                                    workspace.drag_dock_sash(
+                                                        position,
+                                                        e.event.position,
                                                         window,
                                                         cx,
                                                     );
                                                 }
-                                                DockPosition::Right => {
-                                                    workspace.resize_right_dock(
-                                                        workspace.bounds.right()
-                                                            - e.event.position.x,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
-                                                DockPosition::Bottom => {
-                                                    workspace.resize_bottom_dock(
-                                                        workspace.bounds.bottom()
-                                                            - e.event.position.y,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
-                                            };
-                                            workspace.serialize_workspace(window, cx);
-                                        }
-                                    },
-                                ))
-                            })
-                            .child({
-                                match bottom_dock_layout {
+                                            },
+                                        ))
+                                    })
+                                    .child({
+                                        match bottom_dock_layout {
                                     BottomDockLayout::Full => div()
                                         .flex()
                                         .flex_col()
@@ -10605,59 +10832,102 @@ impl Render for Workspace {
                                             cx,
                                         )),
                                 }
-                            })
-                            .children(self.zoomed.as_ref().and_then(|view| {
-                                let zoomed_view = view.upgrade()?;
-                                let zoomed_element = match zoomed_paddings {
-                                    (None, None) => zoomed_view.into_any_element(),
-                                    (left, right) => h_flex()
-                                        .size_full()
-                                        .when_some(left, |this, padding| {
-                                            this.child(padding.border_r_1().debug_selector(|| {
-                                                "zoomed_centered_layout_left_padding".into()
-                                            }))
-                                        })
-                                        .child(
-                                            div()
+                                    })
+                                    .children(self.zoomed.as_ref().and_then(|view| {
+                                        let zoomed_view = view.upgrade()?;
+                                        let zoomed_element = match zoomed_paddings {
+                                            (None, None) => zoomed_view.into_any_element(),
+                                            (left, right) => h_flex()
                                                 .size_full()
-                                                .debug_selector(|| {
-                                                    "zoomed_centered_layout_content".into()
+                                                .when_some(left, |this, padding| {
+                                                    this.child(padding.border_r_1().debug_selector(
+                                                        || {
+                                                            "zoomed_centered_layout_left_padding"
+                                                                .into()
+                                                        },
+                                                    ))
                                                 })
-                                                .child(zoomed_view),
-                                        )
-                                        .when_some(right, |this, padding| {
-                                            this.child(padding.border_l_1().debug_selector(|| {
-                                                "zoomed_centered_layout_right_padding".into()
-                                            }))
+                                                .child(
+                                                    div()
+                                                        .size_full()
+                                                        .debug_selector(|| {
+                                                            "zoomed_centered_layout_content".into()
+                                                        })
+                                                        .child(zoomed_view),
+                                                )
+                                                .when_some(right, |this, padding| {
+                                                    this.child(padding.border_l_1().debug_selector(
+                                                        || {
+                                                            "zoomed_centered_layout_right_padding"
+                                                                .into()
+                                                        },
+                                                    ))
+                                                })
+                                                .into_any_element(),
+                                        };
+                                        // A maximized bottom panel keeps the dock's
+                                        // header, so it can be restored or switched.
+                                        let zoomed_element = if self.zoomed_position
+                                            == Some(DockPosition::Bottom)
+                                        {
+                                            let header = self.bottom_dock.update(cx, |dock, cx| {
+                                                dock.render_header(window, cx)
+                                            });
+                                            v_flex()
+                                                .size_full()
+                                                .children(header)
+                                                .child(
+                                                    div()
+                                                        .w_full()
+                                                        .flex_1()
+                                                        .min_h_0()
+                                                        .child(zoomed_element),
+                                                )
+                                                .into_any_element()
+                                        } else {
+                                            zoomed_element
+                                        };
+                                        let overlay = div()
+                                            .occlude()
+                                            .absolute()
+                                            .overflow_hidden()
+                                            .border_color(colors.border)
+                                            .bg(colors.background)
+                                            .child(zoomed_element)
+                                            .inset_0();
+
+                                        if !WorkspaceSettings::get_global(cx).zoomed_padding {
+                                            return Some(overlay);
+                                        }
+
+                                        Some(match self.zoomed_position {
+                                            Some(DockPosition::Left) => {
+                                                overlay.right_2().border_r_1()
+                                            }
+                                            Some(DockPosition::Right) => {
+                                                overlay.left_2().border_l_1()
+                                            }
+                                            // No gap above a maximized bottom
+                                            // panel: its header takes the place
+                                            // of the editor's tab bar, and a
+                                            // strip of that bar left above it
+                                            // reads as a glitch.
+                                            Some(DockPosition::Bottom) => overlay,
+                                            None => overlay
+                                                .top_2()
+                                                .bottom_2()
+                                                .left_2()
+                                                .right_2()
+                                                .border_1(),
                                         })
-                                        .into_any_element(),
-                                };
-                                let overlay = div()
-                                    .occlude()
-                                    .absolute()
-                                    .overflow_hidden()
-                                    .border_color(colors.border)
-                                    .bg(colors.background)
-                                    .child(zoomed_element)
-                                    .inset_0()
-                                    .shadow_lg();
-
-                                if !WorkspaceSettings::get_global(cx).zoomed_padding {
-                                    return Some(overlay);
-                                }
-
-                                Some(match self.zoomed_position {
-                                    Some(DockPosition::Left) => overlay.right_2().border_r_1(),
-                                    Some(DockPosition::Right) => overlay.left_2().border_l_1(),
-                                    Some(DockPosition::Bottom) => overlay.top_2().border_t_1(),
-                                    None => {
-                                        overlay.top_2().bottom_2().left_2().right_2().border_1()
-                                    }
-                                })
-                            }))
-                            .children(self.render_notifications(window, cx)),
+                                    }))
+                                    .children(self.render_notifications(window, cx))
+                                    // Last, so the zones are above everything a
+                                    // panel can be dropped over.
+                                    .children(self.render_panel_drop_zones(window, cx)),
+                            ),
                     )
-                    .when(self.status_bar_visible(cx), |parent| {
+                    .when(self.status_bar_visible(cx) && !zen_mode, |parent| {
                         parent.child(self.status_bar.clone())
                     })
                     .child(self.toast_layer.clone()),
@@ -11064,7 +11334,7 @@ actions!(
         /// Use `collab_panel::OpenSelectedChannelNotes` to open the channel notes for the selected
         /// channel in the collab panel.
         ///
-        /// If you want to open a specific channel, use `zed::OpenZedUrl` with a channel notes URL -
+        /// If you want to open a specific channel, use `app::OpenAppUrl` with a channel notes URL -
         /// can be copied via "Copy link to section" in the context menu of the channel notes
         /// buffer. These URLs look like `https://zed.dev/channel/channel-name-CHANNEL_ID/notes`.
         OpenChannelNotes,
@@ -11092,11 +11362,11 @@ pub struct OpenChannelNotesById {
 }
 
 actions!(
-    zed,
+    app,
     [
-        /// Opens the Zed log file.
+        /// Opens the log file.
         OpenLog,
-        /// Reveals the Zed log file in the system file manager.
+        /// Reveals the log file in the system file manager.
         RevealLogInFileManager
     ]
 );
@@ -11350,7 +11620,7 @@ pub fn join_channel(
                         let detail: SharedString = match err.error_code() {
                             ErrorCode::SignedOut => "Please sign in to continue.".into(),
                             ErrorCode::UpgradeRequired => concat!(
-                                "Your are running an unsupported version of Zed. ",
+                                "You are running an unsupported version. ",
                                 "Please update to continue."
                             )
                             .into(),
@@ -11407,7 +11677,7 @@ pub async fn get_any_active_multi_workspace(
         })
         .await?;
     }
-    activate_any_workspace_window(&mut cx).context("could not open zed")
+    activate_any_workspace_window(&mut cx).context("could not open a window")
 }
 
 pub fn activate_any_workspace_window(cx: &mut AsyncApp) -> Option<WindowHandle<MultiWorkspace>> {
@@ -13784,7 +14054,13 @@ mod tests {
             });
         });
         cx.executor().run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("Zed — root1, root2"));
+        // Unaligned default: `${appName}` is the product's name from the
+        // branding crate (through the release channel), not "Zed".
+        let app_name = ReleaseChannel::Stable.display_name();
+        assert_eq!(
+            cx.window_title().as_deref(),
+            Some(format!("{app_name} — root1, root2").as_str())
+        );
 
         let item = cx.new(|cx| {
             TestItem::new(cx).with_project_items(&[TestProjectItem::new_in_worktree(
@@ -13801,7 +14077,7 @@ mod tests {
         let expected_file_path = path!("/root1/src/one.txt");
         assert_eq!(
             cx.window_title().as_deref(),
-            Some(format!("Zed — root1, root2 — one — {expected_file_path}").as_str())
+            Some(format!("{app_name} — root1, root2 — one — {expected_file_path}").as_str())
         );
     }
 
@@ -16660,6 +16936,10 @@ mod tests {
             let center_column_count = workspace.center.full_height_column_count();
             assert_eq!(center_column_count, 2);
 
+            // A frame was drawn since the width was chosen above, which
+            // measured the real area: the window without the activity bar.
+            workspace.bounds.size.width = px(1920.);
+
             let dock = workspace.right_dock().read(cx);
             assert_eq!(workspace.dock_size(&dock, window, cx).unwrap(), px(640.));
 
@@ -16701,6 +16981,362 @@ mod tests {
                     None
                 );
             });
+        });
+    }
+
+    /// A workspace about 900px wide with one 300px panel open in each side
+    /// dock. Returns the bounds of the workspace area, which the docks and the
+    /// editor share.
+    async fn workspace_with_two_side_docks(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        Entity<Workspace>,
+        Entity<TestPanel>,
+        Entity<TestPanel>,
+        &mut VisualTestContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        // The activity bar takes 44px of the window.
+        cx.simulate_resize(size(px(944.), px(700.)));
+        cx.run_until_parked();
+        let (left_panel, right_panel) = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_random_database_id();
+            let left_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let right_panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 200, cx));
+            workspace.add_panel(left_panel.clone(), window, cx);
+            workspace.add_panel(right_panel.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            (left_panel, right_panel)
+        });
+        cx.run_until_parked();
+        (workspace, left_panel, right_panel, cx)
+    }
+
+    fn workspace_bounds(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Bounds<Pixels> {
+        workspace.read_with(cx, |workspace, _| workspace.bounds)
+    }
+
+    fn dock_size_at(
+        workspace: &Entity<Workspace>,
+        position: DockPosition,
+        cx: &mut VisualTestContext,
+    ) -> Option<Pixels> {
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .dock_at_position(position)
+                .read(cx)
+                .stored_active_panel_size(window, cx)
+        })
+    }
+
+    fn sash_mouse_move(position: Point<Pixels>, cx: &mut VisualTestContext) {
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position,
+            pressed_button: Some(gpui::MouseButton::Left),
+            modifiers: Modifiers::default(),
+        });
+        cx.run_until_parked();
+    }
+
+    /// Presses on the sash of a dock and moves far enough for the drag to
+    /// start. The button stays down.
+    fn press_sash(selector: &'static str, cx: &mut VisualTestContext) {
+        let sash = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("no element with the selector {selector}"));
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: sash.center(),
+            button: gpui::MouseButton::Left,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.run_until_parked();
+        sash_mouse_move(sash.center() + point(px(1.), px(1.)), cx);
+        sash_mouse_move(sash.center() + point(px(2.), px(2.)), cx);
+    }
+
+    fn release_sash(position: Point<Pixels>, cx: &mut VisualTestContext) {
+        cx.simulate_event(gpui::MouseUpEvent {
+            position,
+            button: gpui::MouseButton::Left,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn test_dock_resize_limits_leave_room_for_the_editor(cx: &mut gpui::TestAppContext) {
+        let (workspace, _left_panel, _right_panel, cx) = workspace_with_two_side_docks(cx).await;
+        let bounds = workspace_bounds(&workspace, cx);
+        let width = bounds.size.width;
+        assert!(
+            width >= px(850.) && width <= px(944.),
+            "the workspace should be about 900px wide, not {width:?}"
+        );
+        let y = bounds.center().y;
+
+        // Both docks open at 300px: each may grow until the editor is left
+        // with 240px.
+        let widest = (width - px(300.) - MIN_CENTER_WIDTH_ON_DRAG).floor();
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(
+                workspace.dock_size_limits(DockPosition::Right, window, cx),
+                (MIN_SIDE_DOCK_DRAG_WIDTH, widest)
+            );
+            assert_eq!(
+                workspace.dock_size_limits(DockPosition::Left, window, cx),
+                (MIN_SIDE_DOCK_DRAG_WIDTH, widest)
+            );
+        });
+
+        // The right sash dragged far to the left stops there.
+        press_sash("DOCK-SASH-RIGHT", cx);
+        sash_mouse_move(point(bounds.left() + px(60.), y), cx);
+        assert_eq!(
+            dock_size_at(&workspace, DockPosition::Right, cx),
+            Some(widest)
+        );
+        release_sash(point(bounds.left() + px(60.), y), cx);
+        assert_eq!(
+            dock_size_at(&workspace, DockPosition::Right, cx),
+            Some(widest)
+        );
+
+        // The left dock has no room left to grow, with the sash or the keys.
+        press_sash("DOCK-SASH-LEFT", cx);
+        sash_mouse_move(point(bounds.left() + px(500.), y), cx);
+        release_sash(point(bounds.left() + px(500.), y), cx);
+        assert_eq!(
+            dock_size_at(&workspace, DockPosition::Left, cx),
+            Some(px(300.))
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            adjust_open_docks_size_by_px(px(100.), workspace, window, cx);
+        });
+        assert_eq!(
+            dock_size_at(&workspace, DockPosition::Left, cx),
+            Some(px(300.))
+        );
+        assert_eq!(
+            dock_size_at(&workspace, DockPosition::Right, cx),
+            Some(widest)
+        );
+
+        // Shrinking with the keys stops at the minimum width.
+        workspace.update_in(cx, |workspace, window, cx| {
+            adjust_open_docks_size_by_px(px(-500.), workspace, window, cx);
+        });
+        assert_eq!(
+            dock_size_at(&workspace, DockPosition::Left, cx),
+            Some(MIN_SIDE_DOCK_DRAG_WIDTH)
+        );
+        assert_eq!(
+            dock_size_at(&workspace, DockPosition::Right, cx),
+            Some(MIN_SIDE_DOCK_DRAG_WIDTH)
+        );
+
+        // A window made narrower takes the docks with it: the editor keeps
+        // its 240px, and no dock goes under its minimum.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.resize_left_dock(px(300.), window, cx);
+            workspace.resize_right_dock(px(300.), window, cx);
+        });
+        cx.simulate_resize(size(px(744.), px(700.)));
+        cx.run_until_parked();
+        let width = workspace_bounds(&workspace, cx).size.width;
+        let left = dock_size_at(&workspace, DockPosition::Left, cx).unwrap();
+        let right = dock_size_at(&workspace, DockPosition::Right, cx).unwrap();
+        assert!(left >= MIN_SIDE_DOCK_DRAG_WIDTH && right >= MIN_SIDE_DOCK_DRAG_WIDTH);
+        assert!(
+            width - left - right >= MIN_CENTER_WIDTH_ON_DRAG,
+            "left {left:?} and right {right:?} leave the editor too little of {width:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_dock_sash_respects_panel_minimum_and_snaps_closed(cx: &mut gpui::TestAppContext) {
+        let (workspace, left_panel, _right_panel, cx) = workspace_with_two_side_docks(cx).await;
+        left_panel.update(cx, |panel, cx| {
+            panel.min_size = Some(px(200.));
+            cx.notify();
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.resize_left_dock(px(320.), window, cx);
+        });
+        cx.run_until_parked();
+        let bounds = workspace_bounds(&workspace, cx);
+        let at = |x: f32| point(bounds.left() + px(x), bounds.center().y);
+        let is_open = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open())
+        };
+
+        // Under the panel's own minimum, above half of it: the sash stops.
+        press_sash("DOCK-SASH-LEFT", cx);
+        sash_mouse_move(at(150.), cx);
+        assert!(is_open(&workspace, cx));
+        assert_eq!(
+            dock_size_at(&workspace, DockPosition::Left, cx),
+            Some(px(200.))
+        );
+
+        // Under half of the minimum: the dock closes.
+        sash_mouse_move(at(90.), cx);
+        assert!(!is_open(&workspace, cx));
+
+        // The pointer comes back before the button is released: the dock
+        // opens again and follows the pointer.
+        sash_mouse_move(at(250.), cx);
+        assert!(is_open(&workspace, cx));
+        assert_eq!(
+            dock_size_at(&workspace, DockPosition::Left, cx),
+            Some(px(250.))
+        );
+
+        // Released while closed: opening the dock again gives the width it
+        // had before the drag, which is also what is stored.
+        sash_mouse_move(at(20.), cx);
+        release_sash(at(20.), cx);
+        assert!(!is_open(&workspace, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            dock_size_at(&workspace, DockPosition::Left, cx),
+            Some(px(320.))
+        );
+        let persisted = workspace.read_with(cx, |workspace, cx| {
+            workspace.persisted_panel_size_state(TestPanel::panel_key(), cx)
+        });
+        assert_eq!(persisted.and_then(|state| state.size), Some(px(320.)));
+
+        // The bottom dock has no snap: it stops at its minimum height.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Bottom, 300, cx));
+            workspace.add_panel(panel, window, cx);
+            workspace.toggle_dock(DockPosition::Bottom, window, cx);
+        });
+        cx.run_until_parked();
+        let bounds = workspace_bounds(&workspace, cx);
+        let near_bottom_edge = point(bounds.center().x, bounds.bottom() - px(5.));
+        press_sash("DOCK-SASH-BOTTOM", cx);
+        sash_mouse_move(near_bottom_edge, cx);
+        release_sash(near_bottom_edge, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let bottom_dock = workspace.bottom_dock().read(cx);
+            assert!(bottom_dock.is_open());
+            assert_eq!(
+                bottom_dock.stored_active_panel_size(window, cx),
+                Some(MIN_BOTTOM_DOCK_DRAG_HEIGHT)
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_dock_sash_drag_stores_the_size_once(cx: &mut gpui::TestAppContext) {
+        let (workspace, _left_panel, _right_panel, cx) = workspace_with_two_side_docks(cx).await;
+        let bounds = workspace_bounds(&workspace, cx);
+        let at = |x: f32| point(bounds.left() + px(x), bounds.center().y);
+        let persisted_width = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .persisted_panel_size_state(TestPanel::panel_key(), cx)
+                    .and_then(|state| state.size)
+            })
+        };
+
+        // Mouse moves resize the dock without writing anything.
+        press_sash("DOCK-SASH-LEFT", cx);
+        sash_mouse_move(at(250.), cx);
+        sash_mouse_move(at(260.), cx);
+        assert_eq!(
+            dock_size_at(&workspace, DockPosition::Left, cx),
+            Some(px(260.))
+        );
+        assert_eq!(persisted_width(&workspace, cx), None);
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.left_dock().read(cx).has_unpersisted_panel_sizes());
+            assert!(workspace.dock_resize.is_some());
+        });
+
+        // Releasing the button writes the last size.
+        release_sash(at(260.), cx);
+        assert_eq!(persisted_width(&workspace, cx), Some(px(260.)));
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.left_dock().read(cx).has_unpersisted_panel_sizes());
+            assert!(workspace.dock_resize.is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_bottom_dock_tab_fills_the_header(cx: &mut gpui::TestAppContext) {
+        let (workspace, _left_panel, _right_panel, cx) = workspace_with_two_side_docks(cx).await;
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Bottom, 300, cx));
+            workspace.add_panel(panel, window, cx);
+            workspace.toggle_dock(DockPosition::Bottom, window, cx);
+        });
+        cx.run_until_parked();
+
+        // The tab is as high as the header above its 1px line, so the marker
+        // of the selected tab sits on that line instead of floating over it.
+        let tab = cx
+            .debug_bounds("PANEL-TAB-0")
+            .expect("the bottom dock should show a tab for its panel");
+        let header_height = cx
+            .update(|window, cx| ui::metrics::panel_header_height(cx).to_pixels(window.rem_size()));
+        // Within a pixel: the layout snaps to device pixels.
+        let difference = tab.size.height - (header_height - px(1.));
+        assert!(
+            difference.abs() < px(1.),
+            "the tab is {:?} high in a {header_height:?} header",
+            tab.size.height
+        );
+    }
+
+    #[gpui::test]
+    async fn test_only_the_bottom_dock_renders_a_header(cx: &mut gpui::TestAppContext) {
+        let (workspace, _left_panel, _right_panel, cx) = workspace_with_two_side_docks(cx).await;
+        workspace.update_in(cx, |workspace, window, cx| {
+            // Empty, the bottom dock has nothing to put in a header.
+            let bottom_dock = workspace.bottom_dock().clone();
+            assert!(
+                bottom_dock
+                    .update(cx, |dock, cx| dock.render_header(window, cx))
+                    .is_none()
+            );
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Bottom, 300, cx));
+            workspace.add_panel(panel, window, cx);
+            workspace.toggle_dock(DockPosition::Bottom, window, cx);
+
+            assert!(
+                bottom_dock
+                    .update(cx, |dock, cx| dock.render_header(window, cx))
+                    .is_some()
+            );
+            // The panels of the side docks draw their own header.
+            for dock in [
+                workspace.left_dock().clone(),
+                workspace.right_dock().clone(),
+            ] {
+                assert!(dock.read(cx).is_open());
+                assert!(
+                    dock.update(cx, |dock, cx| dock.render_header(window, cx))
+                        .is_none()
+                );
+            }
         });
     }
 
@@ -17158,14 +17794,19 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
+        // The width the assertions are computed from. Every frame measures the
+        // real area again (the window without the activity bar), which is not
+        // a multiple of three, so each step below starts by setting it back.
+        const WORKSPACE_WIDTH: Pixels = px(900.);
         workspace.update(cx, |workspace, _cx| {
-            workspace.bounds.size.width = px(900.);
+            workspace.bounds.size.width = WORKSPACE_WIDTH;
         });
 
         // Step 1: Add a tab to the center pane then open a flexible panel in the left
         // dock. With one full-width center pane the default ratio is 0.5, so the panel
         // and the center pane each take half the workspace width.
         workspace.update_in(cx, |workspace, window, cx| {
+            workspace.bounds.size.width = WORKSPACE_WIDTH;
             let item = cx.new(|cx| {
                 TestItem::new(cx).with_project_items(&[TestProjectItem::new(1, "one.txt", cx)])
             });
@@ -17191,6 +17832,7 @@ mod tests {
         // average center column, so with two center columns it should take one third of
         // the workspace width.
         workspace.update_in(cx, |workspace, window, cx| {
+            workspace.bounds.size.width = WORKSPACE_WIDTH;
             workspace.split_pane(
                 workspace.active_pane().clone(),
                 SplitDirection::Right,
@@ -17213,6 +17855,7 @@ mod tests {
         // Step 3: Split the active center pane vertically (top/bottom). Vertical splits do
         // not change the number of center columns, so the flexible panel width stays the same.
         workspace.update_in(cx, |workspace, window, cx| {
+            workspace.bounds.size.width = WORKSPACE_WIDTH;
             workspace.split_pane(
                 workspace.active_pane().clone(),
                 SplitDirection::Down,
@@ -17236,6 +17879,7 @@ mod tests {
         // size reduces the available width, so the flexible left panel keeps matching one
         // average center column within the remaining space.
         workspace.update_in(cx, |workspace, window, cx| {
+            workspace.bounds.size.width = WORKSPACE_WIDTH;
             let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 200, cx));
             workspace.add_panel(panel, window, cx);
             workspace.toggle_dock(DockPosition::Right, window, cx);
@@ -17262,6 +17906,7 @@ mod tests {
         // column-equivalent flex sizing and the workspace width is divided among
         // left-flex, two center columns, and right-flex.
         workspace.update_in(cx, |workspace, window, cx| {
+            workspace.bounds.size.width = WORKSPACE_WIDTH;
             let right_dock = workspace.right_dock().clone();
             let right_panel = right_dock
                 .read(cx)
@@ -20142,9 +20787,9 @@ mod tests {
 
     #[gpui::test]
     async fn test_toggle_theme_mode_persists_and_updates_active_theme(cx: &mut TestAppContext) {
+        use app_actions::theme::ToggleMode;
         use settings::{ThemeName, ThemeSelection};
         use theme::SystemAppearance;
-        use zed_actions::theme::ToggleMode;
 
         init_test(cx);
 
@@ -20188,12 +20833,15 @@ mod tests {
         // this assertion checks theme changed from static to dynamic.
         let settings_text = SettingsStore::load_settings(&settings_fs).await.unwrap();
         let parsed: serde_json::Value = settings::parse_json_with_comments(&settings_text).unwrap();
+        // Unaligned default: a static theme is replaced by the product's own
+        // light and dark pair ("Unaligned Light" and "Unaligned"), where
+        // upstream fell back on One Light and One Dark.
         assert_eq!(
             parsed["theme"],
             serde_json::json!({
                 "mode": "system",
-                "light": "One Light",
-                "dark": "One Dark"
+                "light": settings::DEFAULT_LIGHT_THEME,
+                "dark": settings::DEFAULT_DARK_THEME
             })
         );
 
@@ -21369,8 +22017,16 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    async fn test_panel_buttons_work_while_dock_is_zoomed(cx: &mut gpui::TestAppContext) {
+    /// A window with two panels in the bottom dock, the first one shown and
+    /// maximized: `(workspace, zoomed panel, sibling panel)`.
+    async fn workspace_with_zoomed_bottom_panel(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        Entity<Workspace>,
+        Entity<TestPanel>,
+        Entity<SecondTestPanel>,
+        &mut VisualTestContext,
+    ) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         let project = Project::test(fs, [], cx).await;
@@ -21400,11 +22056,22 @@ mod tests {
         workspace.read_with(cx, |workspace, _| {
             assert_eq!(workspace.zoomed_position, Some(DockPosition::Bottom));
         });
+        (workspace, zoomed_panel, sibling_panel, cx)
+    }
 
-        let sibling_button = cx
-            .debug_bounds("ICON-Terminal")
-            .expect("sibling panel button should be rendered in the status bar");
-        cx.simulate_click(sibling_button.center(), Modifiers::none());
+    #[gpui::test]
+    async fn test_panel_buttons_work_while_dock_is_zoomed(cx: &mut gpui::TestAppContext) {
+        let (workspace, _zoomed_panel, sibling_panel, cx) =
+            workspace_with_zoomed_bottom_panel(cx).await;
+
+        // Every panel is switched from the activity bar, which stays next to a
+        // maximized panel. A zoomed panel is not rendered inside its dock, so
+        // the icon has to dispatch its action from the zoomed panel instead of
+        // from the dock, whose focus handle is not in the frame.
+        let sibling_icon = cx
+            .debug_bounds("PANEL-BUTTON-SecondTestPanel")
+            .expect("the sibling panel should have an icon in the activity bar");
+        cx.simulate_click(sibling_icon.center(), Modifiers::none());
         cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, cx| {
             let dock = workspace.bottom_dock().read(cx);
@@ -21427,10 +22094,56 @@ mod tests {
             assert_eq!(workspace.zoomed_position, Some(DockPosition::Bottom));
         });
 
-        let close_button = cx
-            .debug_bounds("ICON-Terminal")
-            .expect("active panel button should be rendered in the status bar");
-        cx.simulate_click(close_button.center(), Modifiers::none());
+        // The icon of the panel that is shown hides it, maximized or not.
+        let sibling_icon = cx
+            .debug_bounds("PANEL-BUTTON-SecondTestPanel")
+            .expect("the icon should still be in the activity bar");
+        cx.simulate_click(sibling_icon.center(), Modifiers::none());
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.bottom_dock().read(cx).is_open());
+            assert_eq!(workspace.zoomed_position, None);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_panel_tabs_work_while_dock_is_zoomed(cx: &mut gpui::TestAppContext) {
+        let (workspace, _zoomed_panel, sibling_panel, cx) =
+            workspace_with_zoomed_bottom_panel(cx).await;
+
+        // The bottom dock also has its tab strip, which the workspace draws
+        // above the zoomed panel. Tabs are in activation order: the zoomed
+        // panel first, then its sibling.
+        let sibling_tab = cx
+            .debug_bounds("PANEL-TAB-1")
+            .expect("sibling panel tab should be rendered above the zoomed panel");
+        cx.simulate_click(sibling_tab.center(), Modifiers::none());
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let dock = workspace.bottom_dock().read(cx);
+            assert!(dock.is_open());
+            assert_eq!(
+                dock.active_panel().map(|panel| panel.panel_id()),
+                Some(sibling_panel.entity_id()),
+            );
+            assert!(
+                sibling_panel
+                    .read(cx)
+                    .focus_handle(cx)
+                    .contains_focused(window, cx)
+            );
+        });
+
+        sibling_panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomIn));
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.zoomed_position, Some(DockPosition::Bottom));
+        });
+
+        let hide_button = cx
+            .debug_bounds("ICON-Close")
+            .expect("the tab strip's hide button should be rendered above the zoomed panel");
+        cx.simulate_click(hide_button.center(), Modifiers::none());
         cx.run_until_parked();
         workspace.read_with(cx, |workspace, cx| {
             assert!(!workspace.bottom_dock().read(cx).is_open());

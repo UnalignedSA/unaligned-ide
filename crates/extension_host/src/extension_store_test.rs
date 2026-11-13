@@ -4377,3 +4377,168 @@ impl Extension for FakeExtension {
         anyhow::bail!("not supported by FakeExtension")
     }
 }
+
+#[test]
+fn test_registry_urls_are_built_from_one_base() {
+    assert_eq!(
+        crate::registry_base_url_from(None),
+        branding::EXTENSIONS_API_URL.trim_end_matches('/')
+    );
+    assert_eq!(
+        crate::registry_base_url_from(Some("  ".into())),
+        branding::EXTENSIONS_API_URL.trim_end_matches('/')
+    );
+    assert_eq!(
+        crate::registry_base_url_from(Some("http://127.0.0.1:9/".into())),
+        "http://127.0.0.1:9"
+    );
+
+    let url = crate::registry_url_from(
+        "http://127.0.0.1:9",
+        "/extensions",
+        &[("max_schema_version", "1"), ("filter", "a b")],
+    )
+    .unwrap();
+    assert_eq!(
+        url.as_str(),
+        "http://127.0.0.1:9/extensions?max_schema_version=1&filter=a+b"
+    );
+    let url =
+        crate::registry_url_from("https://registry.example", "/extensions/html/download", &[])
+            .unwrap();
+    assert_eq!(
+        url.as_str(),
+        "https://registry.example/extensions/html/download?"
+    );
+}
+
+fn create_extension_store_recording_requests(
+    fs: Arc<FakeFs>,
+    cx: &mut TestAppContext,
+) -> (Entity<ExtensionStore>, Arc<Mutex<Vec<String>>>) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let http_client = FakeHttpClient::create({
+        let requests = requests.clone();
+        move |request| {
+            let uri = request.uri().to_string();
+            requests.lock().push(uri.clone());
+            async move {
+                // A download would go on to unpack an archive on the real
+                // file system: these tests only look at what was requested.
+                anyhow::ensure!(!uri.contains("/download"), "no archive in this test");
+                Ok(Response::builder()
+                    .status(200)
+                    .body(r#"{"data":[]}"#.to_string().into())
+                    .unwrap())
+            }
+        }
+    });
+
+    let store = cx.new(|cx| {
+        ExtensionStore::new(
+            PathBuf::from("/extensions"),
+            None,
+            Arc::new(ExtensionHostProxy::new()),
+            fs,
+            http_client.clone(),
+            http_client,
+            None,
+            NodeRuntime::unavailable(),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(RELOAD_DEBOUNCE_DURATION);
+    cx.run_until_parked();
+
+    (store, requests)
+}
+
+#[gpui::test]
+async fn test_registry_is_not_contacted_at_startup(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    insert_remote_relevant_extension(&fs, "foo").await;
+    let (store, requests) = create_extension_store_recording_requests(fs, cx);
+
+    store.read_with(cx, |store, _| {
+        assert!(store.installed_extensions().contains_key("foo"));
+        assert!(store.has_registry_extensions());
+    });
+
+    // Upstream asked the registry for updates as soon as the index was loaded.
+    cx.executor().advance_clock(Duration::from_secs(60 * 60));
+    cx.run_until_parked();
+    assert_eq!(*requests.lock(), Vec::<String>::new());
+
+    // The Extensions page and the daily check are the two callers of this.
+    store.update(cx, |store, cx| store.sync_with_registry(cx));
+    cx.run_until_parked();
+    let requests = requests.lock().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let updates_url = format!("{}/extensions/updates?", crate::registry_base_url());
+    assert!(
+        requests[0].starts_with(&updates_url) && requests[0].ends_with("&ids=foo"),
+        "{requests:?}"
+    );
+}
+
+#[gpui::test]
+async fn test_update_check_sends_nothing_without_registry_extensions(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let (store, requests) = create_extension_store_recording_requests(fs, cx);
+
+    store.read_with(cx, |store, _| assert!(!store.has_registry_extensions()));
+    store.update(cx, |store, cx| store.sync_with_registry(cx));
+    cx.run_until_parked();
+    assert_eq!(*requests.lock(), Vec::<String>::new());
+}
+
+#[gpui::test]
+async fn test_auto_install_extension_on_demand(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let (store, requests) = create_extension_store_recording_requests(fs, cx);
+
+    store.read_with(cx, |store, cx| {
+        assert_eq!(
+            store.pending_auto_install_extensions(cx),
+            [Arc::<str>::from("html")],
+            "the default settings list `html`"
+        );
+    });
+
+    // An extension that the settings do not list is never installed this way.
+    let started = store.update(cx, |store, cx| store.auto_install_extension("emmet", cx));
+    assert!(!started);
+    cx.run_until_parked();
+    assert_eq!(*requests.lock(), Vec::<String>::new());
+
+    let (started, started_again) = store.update(cx, |store, cx| {
+        (
+            store.auto_install_extension("html", cx),
+            store.auto_install_extension("html", cx),
+        )
+    });
+    assert!(started);
+    assert!(!started_again, "one installation at a time");
+    cx.run_until_parked();
+    let requests = requests.lock().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let download_url = format!("{}/extensions/html/download?", crate::registry_base_url());
+    assert!(requests[0].starts_with(&download_url), "{requests:?}");
+
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|settings, cx| {
+            settings.update_user_settings(cx, |content| {
+                content
+                    .extension
+                    .auto_install_extensions
+                    .insert("html".into(), false);
+            });
+        });
+    });
+    let started = store.update(cx, |store, cx| store.auto_install_extension("html", cx));
+    assert!(!started, "switched off in the settings");
+}

@@ -1,0 +1,521 @@
+#!/usr/bin/env python3
+"""Screenshot of the IDE in a named state. See docs/unaligned/SCREENSHOTS.md.
+
+    script/unaligned/shot <name> [options]      one screenshot -> .work/shots/<name>.png
+    script/unaligned/shot <name> --from <scene> [options]   a scene under another name, modified
+    script/unaligned/shot <name> --no-capture [options]     run the steps, take no picture -> .work/run/<name>
+    script/unaligned/shot --list                scenes of script/unaligned/scenes.json
+    script/unaligned/shot --list-actions [text] action names the app knows (filtered)
+
+<name> is a scene of scenes.json (options then override it) or any new name for a one-off shot.
+The script starts its own instance with its own data directory under .work/run/<name>, drives it
+through the debug-only UNALIGNED_DEV_ACTIONS hook, captures that window only, and stops it.
+
+Short form of --actions, steps separated by ';' (a JSON array of steps works too):
+    500                      wait 500 ms
+    pane::SplitRight         action              pane::ActivateItem 2     action with a JSON argument
+    keys: cmd-p              in-app keystrokes   type: some text          in-app text input
+    click: 300,200           in-app mouse, window points (also right_click:, hover:)
+    press: 326,574           start of a drag: left button down, held across the following steps
+    drag_to: 160,400         move there with the button held (the app does it in several moves,
+                             so one step is enough to start the drag and reach the target)
+    release: 160,400         left button up, the drop; `release` alone drops where the pointer is.
+                             Without it the picture shows the drag in progress
+"""
+import argparse
+import copy
+import fcntl
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+HERE = Path(__file__).resolve().parent
+WORK = ROOT / ".work"
+SCENES_FILE = HERE / "scenes.json"
+NORMAL_BINARY = ROOT / "target" / "debug" / "unaligned-ide"
+OFFSCREEN_BINARY = WORK / "bin" / "ide-offscreen"
+
+# Applied to every instance, under the scene's own settings: nothing here is a product default.
+BASE_SETTINGS = {
+    # No language server or extension download: faster, and the same picture every time.
+    "enable_language_server": False,
+    "auto_install_extensions": {"html": False},
+    # The sample project is ours: skip the "Unrecognized Project" prompt (scene `restricted-mode` shows it).
+    "session": {"trust_all_worktrees": True},
+    # A blinking cursor would make two runs differ.
+    "cursor_blink": False,
+    # The agent's "finished" notification is a window of its own, shown when the app is not the
+    # active application (a locked screen): it would be photographed instead of the main window.
+    "agent": {"notify_when_agent_waiting": "never"},
+    # A plain shell: no login banner, and a prompt without the owner's user and machine names.
+    "terminal": {
+        "shell": {"with_arguments": {"program": "/bin/zsh", "args": ["-f"]}},
+        "env": {"PS1": "%1~ %# "},
+    },
+}
+
+# Never let a real key reach an instance whose window is photographed (charter, rule 7).
+SECRET_ENV = re.compile(r"(API_KEY|_TOKEN|SECRET|PASSWORD)$")
+
+
+class ShotError(Exception):
+    pass
+
+
+def log(message):
+    print(f"shot: {message}", file=sys.stderr, flush=True)
+
+
+def merge(base, extra):
+    result = copy.deepcopy(base)
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def bundled_themes():
+    themes = []
+    for path in sorted((ROOT / "assets" / "themes").glob("*/*.json")):
+        for theme in json.loads(path.read_text()).get("themes", []):
+            themes.append((theme["name"], theme.get("appearance", "dark")))
+    return themes
+
+
+def load_scenes():
+    """Scenes by name, in file order. A scene with "each_theme" becomes one scene per bundled theme."""
+    if not SCENES_FILE.exists():
+        return {}
+    data = json.loads(SCENES_FILE.read_text())
+    defaults = data.get("defaults", {})
+    scenes = {}
+    for scene in data["scenes"]:
+        scene = merge(defaults, scene)
+        if scene.pop("each_theme", False):
+            for theme, appearance in bundled_themes():
+                themed = merge(scene, {"settings": {"theme": {"mode": appearance, "light": theme, "dark": theme}}})
+                themed["name"] = f"{scene['name']}-{slug(theme)}"
+                themed["about"] = f"{scene.get('about', '')} Theme: {theme}.".strip()
+                scenes[themed["name"]] = themed
+        else:
+            scenes[scene["name"]] = scene
+    return scenes
+
+
+def parse_actions(text):
+    """A JSON array of steps, or the short form: steps separated by ';'.
+
+    500                      wait 500 ms
+    pane::SplitRight         action
+    pane::ActivateItem 2     action with a JSON argument
+    keys: cmd-p              in-app keystrokes        type: some text     in-app text input
+    click: 300,200           in-app mouse (also right_click:, hover:), window pixels
+    press: 326,574           left button down, held: start of a drag
+    drag_to: 160,400         move there with the button held
+    release: 160,400         left button up: the drop (`release` alone: where the pointer is)
+    """
+    text = text.strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        return json.loads(text)
+    steps = []
+    for part in text.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if part.isdigit():
+            steps.append(int(part))
+            continue
+        if part in ("release", "release:"):
+            steps.append({"release": []})
+            continue
+        special = re.match(r"(keys|type|click|right_click|hover|press|drag_to|release)\s*:(?!:)\s*(.*)$", part, re.S)
+        if special:
+            kind, value = special.groups()
+            if kind in ("keys", "type"):
+                steps.append({kind: value})
+            else:
+                steps.append({kind: [float(number) for number in value.split(",")]})
+            continue
+        name, _, argument = part.partition(" ")
+        steps.append([name, json.loads(argument)] if argument.strip() else name)
+    return steps
+
+
+def wintool():
+    """Compiles wintool.swift on first use (and again when it changes)."""
+    source = HERE / "wintool.swift"
+    binary = WORK / "bin" / "wintool"
+    if not binary.exists() or binary.stat().st_mtime < source.stat().st_mtime:
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["swiftc", "-O", "-o", str(binary), str(source)], check=True)
+    return str(binary)
+
+
+def list_windows(pid):
+    output = subprocess.run([wintool(), "list", str(pid)], capture_output=True, text=True).stdout
+    return json.loads(output) if output.strip() else []
+
+
+def check_image(path):
+    """Returns (width, height). Raises when the picture is one flat colour."""
+    result = subprocess.run([wintool(), "check", str(path)], capture_output=True, text=True)
+    if result.returncode not in (0, 1):
+        raise ShotError(f"cannot read the capture {path}: {result.stderr.strip()}")
+    width, height, colours, share = result.stdout.split()
+    if result.returncode == 1:
+        raise ShotError(
+            f"the capture is blank ({colours} colours, {float(share):.1%} of one colour): "
+            "the window was not rendered. Is the screen locked or asleep?"
+        )
+    return int(width), int(height)
+
+
+def screen_locked():
+    return subprocess.run([wintool(), "locked"], capture_output=True, text=True).stdout.strip() == "locked"
+
+
+def tail(path, lines=25):
+    """The last lines of a file, or of the newest *.log under the given directories."""
+    if isinstance(path, list):
+        logs = [log for directory in path for log in directory.rglob("*.log") if log.stat().st_size]
+        if not logs:
+            return "(no log)"
+        path = max(logs, key=lambda log: log.stat().st_mtime)
+    try:
+        return "\n".join(Path(path).read_text(errors="replace").splitlines()[-lines:])
+    except OSError:
+        return "(no log)"
+
+
+def head_of_panic(path):
+    """The panic message and the first frames inside this repository, from the app's output."""
+    try:
+        lines = Path(path).read_text(errors="replace").splitlines()
+    except OSError:
+        return "(no output)"
+    for index, line in enumerate(lines):
+        if "panicked at" in line:
+            frames = [frame.strip() for frame in lines[index + 2 :] if "at ./crates/" in frame and "/gpui/" not in frame]
+            return "\n".join(lines[index : index + 2] + ["  " + frame for frame in frames[:6]])
+    return "\n".join(lines[-15:])
+
+
+def stop(process):
+    """Stops the instance this script started, and only that one (it has its own process group)."""
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        except ProcessLookupError:
+            pass
+
+
+def take(scene, args):
+    name = scene["name"]
+    width, height = (int(number) for number in re.split(r"[x,]", scene.get("size", "1440x900")))
+    run_dir = WORK / "run" / name
+    out = Path(scene.get("out") or WORK / "shots" / f"{name}.png").resolve()
+
+    # No picture at all (network audit, a state to inspect in the run directory): the normal binary
+    # whatever the screen does, no lock test, no "screenshot" step, nothing captured.
+    no_capture = bool(scene.get("no_capture"))
+
+    # auto: capture the window when the screen can be captured, else let the app render the picture.
+    backend = "none" if no_capture else scene.get("backend", "auto")
+    locked = backend not in ("offscreen", "none") and screen_locked()
+    if backend == "screen" and locked:
+        raise ShotError("the screen is locked: a window capture would be blank. Use --backend offscreen.")
+    if backend == "auto":
+        backend = "offscreen" if locked else "screen"
+        if locked:
+            log("the screen is locked: using the offscreen backend")
+
+    binary = Path(scene.get("binary") or (OFFSCREEN_BINARY if backend == "offscreen" else NORMAL_BINARY))
+    if not binary.exists() and backend in ("screen", "none"):
+        raise ShotError(f"{binary} does not exist: run cargo build -p ide --features gpui_platform/runtime_shaders")
+    if backend == "offscreen" and not scene.get("binary"):
+        # The offscreen binary is a second build of the same sources: refuse to photograph an old one.
+        stamp = OFFSCREEN_BINARY.with_suffix(".stamp")
+        built_for = stamp.read_text().strip() if stamp.exists() else None
+        current = str(int(NORMAL_BINARY.stat().st_mtime)) if NORMAL_BINARY.exists() else None
+        if not binary.exists() or built_for != current:
+            state = "is missing" if not binary.exists() else "is older than target/debug/unaligned-ide"
+            raise ShotError(f"the offscreen binary {state}: run script/unaligned/build-offscreen, then retry")
+
+    shutil.rmtree(run_dir, ignore_errors=True)
+    data_dir = run_dir / "data"
+    (data_dir / "config").mkdir(parents=True)
+    if not no_capture:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.unlink(missing_ok=True)
+
+    process = fake_api = output = None
+    failed = True
+    try:
+        # Each instance gets its own copy of the project: nothing a scene does can leak into the next.
+        project = scene.get("project", "sample")
+        arguments = []
+        if project != "none":
+            if project == "sample":
+                made = subprocess.run([str(HERE / "make-sample")], check=True, capture_output=True, text=True)
+                source = Path(made.stdout.strip())
+            else:
+                source = Path(project).resolve()
+            project_dir = run_dir / source.name
+            shutil.copytree(source, project_dir, symlinks=True)
+            arguments.append(str(project_dir))
+            for path in scene.get("open", []):
+                arguments.append(path if os.path.isabs(path) else str(project_dir / path))
+        elif scene.get("open"):
+            raise ShotError("files to open need a project")
+
+        settings = merge(BASE_SETTINGS, scene.get("settings", {}))
+        environment = {key: value for key, value in os.environ.items() if not SECRET_ENV.search(key)}
+        if scene.get("fake_api") or scene.get("fake_api_key"):
+            # A local stand-in for the Unaligned API: the AI screens in their connected state, with no real key.
+            command = [str(HERE / "fake-api"), "0", str(run_dir / "fake-api.log")]
+            fake_api = subprocess.Popen(command, stdout=subprocess.PIPE, text=True)
+            port = fake_api.stdout.readline().strip()
+            settings = merge(settings, {"language_models": {"unaligned": {"api_url": f"http://127.0.0.1:{port}"}}})
+            # "none": the provider points at the stand-in but has no key (connection screen, error states).
+            key = scene.get("fake_api_key", "sk-unal-screenshot")
+            if key != "none":
+                environment["UNALIGNED_API_KEY"] = key
+        (data_dir / "config" / "settings.json").write_text(json.dumps(settings, indent=2))
+        if scene.get("keymap"):
+            (data_dir / "config" / "keymap.json").write_text(json.dumps(scene["keymap"], indent=2))
+
+        done_file = run_dir / "done"
+        # After the settle time, the pointer is moved out of the window: the app starts with the
+        # real pointer position, which would light up whatever happens to be under it.
+        settle = int(float(scene.get("settle", 2.5)) * 1000)
+        steps = [settle, {"hover": [-10, -10]}] + list(scene.get("actions", []))
+        steps.append(int(float(scene.get("wait", 1.0)) * 1000))
+        if backend == "offscreen":
+            steps.append({"screenshot": str(out)})
+
+        # A home directory of its own: on macOS the app writes its log and looks for global
+        # configuration under $HOME whatever --user-data-dir says. Shell and git start clean too.
+        (run_dir / "home").mkdir()
+        environment.update(
+            HOME=str(run_dir / "home"),
+            UNALIGNED_DEV_ACTIONS=json.dumps(steps),
+            UNALIGNED_DEV_DONE_FILE=str(done_file),
+            IDE_WINDOW_SIZE=f"{width},{height}",
+            IDE_WINDOW_POSITION=scene.get("position", "40,40"),
+        )
+        # The home is empty and the project copy sits under this repository's rust-toolchain.toml:
+        # with language servers on and a Rust file open, a rustup on the PATH would download the
+        # whole pinned toolchain into the instance's home. A scene's "env" can still override it.
+        environment.setdefault("RUSTUP_AUTO_INSTALL", "0")
+        for assignment in scene.get("env", []):
+            key, _, value = assignment.partition("=")
+            environment[key] = value
+
+        # The app's log, wherever this build puts it and whatever it is called.
+        app_log = [run_dir / "home" / "Library" / "Logs", data_dir / "logs"]
+        output = open(run_dir / "output.log", "w")
+        process = subprocess.Popen(
+            [str(binary), "--user-data-dir", str(data_dir)] + arguments,
+            env=environment,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        action_time = sum(step for step in steps if isinstance(step, int)) / 1000 + 0.2 * len(steps)
+        deadline = time.time() + float(scene.get("timeout", 60)) + action_time
+        while not done_file.exists():
+            if process.poll() is not None:
+                raise ShotError(
+                    f"the app exited with status {process.returncode} before the scene was ready "
+                    f"(a crash: see the panic below, or rerun with --keep-failed).\n"
+                    f"{head_of_panic(run_dir / 'output.log')}\n{tail(app_log, 8)}"
+                )
+            if time.time() > deadline:
+                what = "the actions never finished" if list_windows(process.pid) else "the window never appeared"
+                raise ShotError(f"{what} (timeout).\n{tail(run_dir / 'output.log')}\n{tail(app_log)}")
+            time.sleep(0.2)
+
+        problems = done_file.read_text().strip()
+        action_errors = [] if problems == "ok" else problems.splitlines()
+
+        if no_capture:
+            if action_errors:
+                raise ShotError("some steps failed:\n  " + "\n  ".join(action_errors))
+            failed = False
+            return run_dir, None, None
+
+        # The front window of the instance: the main one, or whatever a step opened over it (settings, about).
+        windows = list_windows(process.pid)
+        visible = [window for window in windows if window["onscreen"]]
+        if scene.get("window", "front") == "largest":
+            visible.sort(key=lambda window: -window["width"] * window["height"])
+        window = visible[0] if visible else None
+
+        if backend == "screen":
+            if not window:
+                raise ShotError("the app has no window on screen (other Space, minimised or hidden?)")
+            capture = subprocess.run(
+                ["screencapture", "-x", "-o", "-l", str(window["id"]), str(out)], capture_output=True, text=True
+            )
+            if capture.returncode != 0 or not out.exists():
+                raise ShotError(f"screencapture failed: {capture.stderr.strip() or 'no file written'}")
+        elif not out.exists():
+            raise ShotError("the app did not write the picture:\n  " + "\n  ".join(action_errors))
+
+        pixel_width, pixel_height = check_image(out)
+        # Points of the window in the picture: a window of the instance, or the requested size, that
+        # the picture matches at a whole display scale (2 on a Retina display). Else left as it is.
+        if backend == "screen":
+            sizes = [(int(window["width"]), int(window["height"]))]
+        else:
+            sizes = [(width, height)] + [(int(other["width"]), int(other["height"])) for other in windows]
+        logical_width, logical_height = pixel_width, pixel_height
+        for scale in (1, 2, 3):
+            match = [size for size in sizes if (size[0] * scale, size[1] * scale) == (pixel_width, pixel_height)]
+            if match:
+                logical_width, logical_height = match[0]
+                break
+        if not scene.get("retina") and pixel_width > logical_width:
+            resize = ["sips", "-z", str(logical_height), str(logical_width), str(out)]
+            subprocess.run(resize, check=True, capture_output=True)
+            pixel_width, pixel_height = logical_width, logical_height
+        if (logical_width, logical_height) != (width, height):
+            log(f"the picture is of a {logical_width}x{logical_height} window, not the {width}x{height} main one")
+
+        if action_errors:
+            raise ShotError(
+                "some steps failed (the picture was still written, for debugging):\n  "
+                + "\n  ".join(action_errors)
+                + f"\n  {out}"
+            )
+        failed = False
+        return out, pixel_width, pixel_height
+    finally:
+        if process:
+            stop(process)
+        if fake_api:
+            fake_api.kill()
+            fake_api.wait()
+        if output:
+            output.close()
+        # The run directory is the whole result of a run without capture: it is kept.
+        if not (scene.get("keep") or (no_capture and not failed) or (failed and args.keep_failed)):
+            shutil.rmtree(run_dir, ignore_errors=True)
+        elif failed:
+            log(f"run directory kept: {run_dir}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("name", nargs="?", help="scene name, or a new name for a one-off shot")
+    parser.add_argument("--from", dest="base", metavar="SCENE", help="start from this scene of scenes.json, under the new name")
+    parser.add_argument("--actions", help="steps: JSON array or short form 'a; 300; b {json}; keys: cmd-p; type: text; click: x,y' (mouse steps: click, right_click, hover, and press, drag_to, release for a drag)")
+    parser.add_argument("--open", action="append", metavar="PATH[:LINE[:COL]]", help="file to open, relative to the project (repeatable)")
+    parser.add_argument("--size", metavar="WxH", help="window size in points (default 1440x900)")
+    parser.add_argument("--position", metavar="X,Y", help="window position on the main display (default 40,40)")
+    parser.add_argument("--settings", metavar="JSON|@FILE", help="merged into the instance's settings.json before launch")
+    parser.add_argument("--keymap", metavar="JSON|@FILE", help="written as the instance's keymap.json")
+    parser.add_argument("--project", metavar="DIR|sample|none", help="project to open (default: the generated sample; none = no project)")
+    parser.add_argument("--settle", type=float, metavar="SECONDS", help="wait before the first step (default 2.5)")
+    parser.add_argument("--wait", type=float, metavar="SECONDS", help="wait after the last step, before the capture (default 1)")
+    parser.add_argument("--timeout", type=float, metavar="SECONDS", help="how long the window may take to appear (default 60)")
+    parser.add_argument("--window", choices=["front", "largest"], help="which window of the instance to capture (default front)")
+    parser.add_argument("--backend", choices=["auto", "screen", "offscreen"], help="screen: capture the window; offscreen: the app renders the picture itself (works with a locked screen, needs build-offscreen); auto (default): screen, or offscreen when the screen is locked")
+    parser.add_argument("--binary", help="app binary (default target/debug/unaligned-ide)")
+    parser.add_argument("--no-capture", action="store_true", default=None, help="run the scene and its steps but take no picture: always the normal binary, works with a locked screen, keeps .work/run/<name> and prints that path")
+    parser.add_argument("--fake-api", action="store_true", default=None, help="connect the instance to a local stand-in for the Unaligned API (no real key)")
+    parser.add_argument("--fake-api-key", metavar="TEXT|none", help="with the stand-in API: the key the instance starts with (default sk-unal-screenshot), or none for no key. Implies --fake-api")
+    parser.add_argument("--env", action="append", metavar="KEY=VALUE", help="extra environment for the instance (repeatable)")
+    parser.add_argument("--out", metavar="PNG", help="output file (default .work/shots/<name>.png)")
+    parser.add_argument("--retina", action="store_true", default=None, help="keep the display's pixel size (default: one pixel per point)")
+    parser.add_argument("--keep", action="store_true", default=None, help="keep .work/run/<name> (settings, logs, project copy)")
+    parser.add_argument("--keep-failed", action="store_true", help="keep .work/run/<name> when the shot fails")
+    parser.add_argument("--list", action="store_true", help="list the scenes")
+    parser.add_argument("--list-actions", nargs="?", const="", metavar="TEXT", help="list action names containing TEXT")
+    args = parser.parse_args()
+
+    scenes = load_scenes()
+    if args.list:
+        for scene in scenes.values():
+            print(f"{scene['name']:<28} {scene.get('about', '')}")
+        return 0
+    if args.list_actions is not None:
+        dump = subprocess.run([str(NORMAL_BINARY), "--dump-all-actions"], capture_output=True, text=True, check=True)
+        for action in json.loads(dump.stdout)["actions"]:
+            if args.list_actions.lower() in action["name"].lower():
+                print(action["name"] + ("   (takes arguments)" if action.get("schema") else ""))
+        return 0
+    if not args.name:
+        parser.error("a scene name is required")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", args.name) or args.name.startswith("."):
+        parser.error("the name may only contain letters, digits, '.', '_' and '-'")
+
+    if args.base and args.base not in scenes:
+        parser.error(f"--from: no scene named {args.base} (see --list)")
+    scene = copy.deepcopy(scenes.get(args.base or args.name, {}))
+    scene["name"] = args.name
+
+    def json_option(value):
+        return json.loads(Path(value[1:]).read_text() if value.startswith("@") else value)
+
+    try:
+        if args.actions is not None:
+            scene["actions"] = parse_actions(args.actions)
+        if args.settings:
+            scene["settings"] = merge(scene.get("settings", {}), json_option(args.settings))
+        if args.keymap:
+            scene["keymap"] = json_option(args.keymap)
+    except (ValueError, OSError) as error:
+        parser.error(f"invalid JSON option: {error}")
+    for key in ("open", "size", "position", "project", "settle", "wait", "timeout", "window", "backend", "binary", "env", "out", "retina", "keep", "fake_api", "fake_api_key", "no_capture"):
+        value = getattr(args, key)
+        if value is not None:
+            scene[key] = value
+
+    # A terminated shot still stops its instance (the `finally` in take), and shots take turns:
+    # agents may call this at the same time, but two instances on screen would cover each other.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    (WORK / "run").mkdir(parents=True, exist_ok=True)
+    queue = open(WORK / "run" / ".queue", "w")
+    try:
+        fcntl.flock(queue, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("another shot is running: waiting for it")
+        fcntl.flock(queue, fcntl.LOCK_EX)
+
+    try:
+        out, width, height = take(scene, args)
+    except ShotError as error:
+        print(f"shot: FAILED {args.name}: {error}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print(f"shot: interrupted {args.name}", file=sys.stderr)
+        return 130
+    log(f"{args.name}: {width}x{height}" if width else f"{args.name}: steps done, no picture")
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

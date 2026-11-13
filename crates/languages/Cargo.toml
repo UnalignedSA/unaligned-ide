@@ -27,6 +27,7 @@ async-compression.workspace = true
 async-fs.workspace = true
 async-tar.workspace = true
 async-trait.workspace = true
+branding.workspace = true
 chrono.workspace = true
 collections.workspace = true
 futures.workspace = true

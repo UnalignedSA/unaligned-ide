@@ -35,9 +35,9 @@ use theme::ActiveTheme;
 use theme_settings::ThemeSettings;
 use ui::{
     Avatar, AvatarAvailabilityIndicator, CollabNotification, ContextMenu, CopyButton,
-    DecoratedIcon, Disclosure, DockSide, Facepile, HighlightedLabel, IconButtonShape,
-    IconDecoration, IconDecorationKind, IndentGuideColors, Indicator, ListHeader, ListItem,
-    ScrollAxes, Scrollbars, Tab, TintColor, Tooltip, WithScrollbar, prelude::*, tooltip_container,
+    DecoratedIcon, Disclosure, Facepile, HighlightedLabel, IconButtonShape, IconDecoration,
+    IconDecorationKind, IndentGuideColors, Indicator, ListHeader, ListItem, ScrollAxes, Scrollbars,
+    TintColor, Tooltip, WithScrollbar, prelude::*, tooltip_container,
 };
 use util::{ResultExt, TryFutureExt, maybe};
 use workspace::{
@@ -56,7 +56,8 @@ const COLLABORATION_PANEL_KEY: &str = "CollaborationPanel";
 const TOAST_DURATION: Duration = Duration::from_secs(5);
 
 fn panel_row_height() -> Rems {
-    rems_from_px(26_f32)
+    // VS Code list density, with room for an avatar.
+    rems_from_px(24_f32)
 }
 
 actions!(
@@ -1164,20 +1165,12 @@ impl CollabPanel {
         ))
     }
 
-    fn dock_side(&self, cx: &App) -> DockSide {
-        match CollaborationPanelSettings::get_global(cx).dock {
-            DockPosition::Right => DockSide::Right,
-            _ => DockSide::Left,
-        }
-    }
-
     fn render_call_participant(
         &self,
         user: &Arc<User>,
         peer_id: Option<PeerId>,
         is_pending: bool,
         role: proto::ChannelRole,
-        is_selected: bool,
         cx: &mut Context<Self>,
     ) -> ListItem {
         let user_id = user.legacy_id;
@@ -1214,8 +1207,6 @@ impl CollabPanel {
         ListItem::new(user.username.clone())
             .start_slot(Avatar::new(user.avatar_uri.clone()))
             .child(render_participant_name_and_handle(user))
-            .focused(is_selected)
-            .dock(self.dock_side(cx))
             .end_slot(end_slot)
             .tooltip(Tooltip::text("Click to Follow"))
             .when_some(peer_id, |el, peer_id| {
@@ -1250,7 +1241,6 @@ impl CollabPanel {
         worktree_root_names: &[String],
         host_user_id: u64,
         is_last: bool,
-        is_selected: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1263,8 +1253,6 @@ impl CollabPanel {
 
         ListItem::new(project_id as usize)
             .height(panel_row_height())
-            .focused(is_selected)
-            .dock(self.dock_side(cx))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.workspace
                     .update(cx, |workspace, cx| {
@@ -1297,7 +1285,6 @@ impl CollabPanel {
         &self,
         peer_id: Option<PeerId>,
         is_last: bool,
-        is_selected: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1305,8 +1292,6 @@ impl CollabPanel {
 
         ListItem::new(("screen", id))
             .height(panel_row_height())
-            .focused(is_selected)
-            .dock(self.dock_side(cx))
             .start_slot(
                 h_flex()
                     .gap_1p5()
@@ -1344,7 +1329,6 @@ impl CollabPanel {
     fn render_channel_notes(
         &self,
         channel_id: ChannelId,
-        is_selected: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1353,8 +1337,6 @@ impl CollabPanel {
 
         ListItem::new("channel-notes")
             .height(panel_row_height())
-            .focused(is_selected)
-            .dock(self.dock_side(cx))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.open_channel_notes(channel_id, window, cx);
             }))
@@ -2691,15 +2673,52 @@ impl CollabPanel {
     }
 
     fn render_disabled_by_organization(&mut self, _cx: &mut Context<Self>) -> Div {
-        v_flex()
-            .p_4()
-            .gap_4()
-            .size_full()
-            .text_center()
-            .justify_center()
-            .child(Label::new(
-                "Collaboration is disabled for this organization.",
-            ))
+        v_flex().px_3().pt_1().size_full().child(
+            Label::new("Collaboration is disabled for this organization.")
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
+    }
+
+    /// The view header: title on the left, the panel's actions as ghost buttons on the right.
+    fn render_panel_header(&self, show_actions: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .h(px(35.))
+            .w_full()
+            .flex_none()
+            .pl_3()
+            .pr_1p5()
+            .justify_between()
+            .child(
+                Label::new("COLLABORATION")
+                    .size(LabelSize::XSmall)
+                    .buffer_font(cx)
+                    .color(Color::Placeholder),
+            )
+            .when(show_actions, |this| {
+                this.child(
+                    h_flex()
+                        .gap_0p5()
+                        .child(
+                            IconButton::new("header-add-contact", IconName::Person)
+                                .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
+                                .tooltip(Tooltip::text("Search for New Contact"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_contact_finder(window, cx)
+                                })),
+                        )
+                        .child(
+                            IconButton::new("header-add-channel", IconName::Plus)
+                                .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
+                                .tooltip(Tooltip::text("Create Channel"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.new_root_channel(window, cx)
+                                })),
+                        ),
+                )
+            })
     }
 
     fn render_signed_out(&mut self, cx: &mut Context<Self>) -> Div {
@@ -2730,19 +2749,23 @@ impl CollabPanel {
             )
         };
 
+        // Empty state at the top of the view: short text, one primary action.
         v_flex()
-            .p_4()
-            .gap_1()
+            .px_3()
+            .pt_1()
+            .gap_2()
             .size_full()
-            .text_center()
-            .justify_center()
-            .items_center()
-            .child(Label::new(collab_blurb).color(Color::Muted))
+            .child(
+                Label::new(collab_blurb)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
             .child(
                 Button::new(button_id, button_label)
                     .label_size(LabelSize::Small)
-                    .start_icon(Icon::new(button_icon).color(Color::Muted))
-                    .style(ButtonStyle::Outlined)
+                    .start_icon(Icon::new(button_icon))
+                    .style(ButtonStyle::Tinted(TintColor::Accent))
+                    .full_width()
                     .disabled(is_busy)
                     .on_click(cx.listener(|this, _, window, cx| {
                         let client = this.client.clone();
@@ -2770,10 +2793,10 @@ impl CollabPanel {
         let is_selected =
             self.selection == Some(ix) && self.focus_handle.contains_focused(window, cx);
 
-        match entry {
+        let element = match entry {
             ListEntry::Header(section) => {
                 let is_collapsed = self.collapsed_sections.contains(&section);
-                self.render_header(section, is_selected, is_collapsed, cx)
+                self.render_header(section, is_collapsed, cx)
                     .into_any_element()
             }
             ListEntry::Contact { contact, calling } => {
@@ -2781,14 +2804,12 @@ impl CollabPanel {
                 self.render_contact(&contact, calling, is_selected, cx)
                     .into_any_element()
             }
-            ListEntry::ContactPlaceholder => self
-                .render_contact_placeholder(is_selected, cx)
-                .into_any_element(),
+            ListEntry::ContactPlaceholder => self.render_contact_placeholder(cx).into_any_element(),
             ListEntry::IncomingRequest(user) => self
-                .render_contact_request(&user, true, is_selected, cx)
+                .render_contact_request(&user, true, cx)
                 .into_any_element(),
             ListEntry::OutgoingRequest(user) => self
-                .render_contact_request(&user, false, is_selected, cx)
+                .render_contact_request(&user, false, cx)
                 .into_any_element(),
             ListEntry::Channel {
                 channel,
@@ -2811,16 +2832,16 @@ impl CollabPanel {
             ListEntry::ChannelEditor { depth } => self
                 .render_channel_editor(depth, window, cx)
                 .into_any_element(),
-            ListEntry::ChannelInvite(channel) => self
-                .render_channel_invite(&channel, is_selected, cx)
-                .into_any_element(),
+            ListEntry::ChannelInvite(channel) => {
+                self.render_channel_invite(&channel, cx).into_any_element()
+            }
             ListEntry::CallParticipant {
                 user,
                 peer_id,
                 is_pending,
                 role,
             } => self
-                .render_call_participant(&user, peer_id, is_pending, role, is_selected, cx)
+                .render_call_participant(&user, peer_id, is_pending, role, cx)
                 .into_any_element(),
             ListEntry::ParticipantProject {
                 project_id,
@@ -2833,18 +2854,38 @@ impl CollabPanel {
                     &worktree_root_names,
                     host_user_id,
                     is_last,
-                    is_selected,
                     window,
                     cx,
                 )
                 .into_any_element(),
             ListEntry::ParticipantScreen { peer_id, is_last } => self
-                .render_participant_screen(peer_id, is_last, is_selected, window, cx)
+                .render_participant_screen(peer_id, is_last, window, cx)
                 .into_any_element(),
             ListEntry::ChannelNotes { channel_id } => self
-                .render_channel_notes(channel_id, is_selected, window, cx)
+                .render_channel_notes(channel_id, window, cx)
                 .into_any_element(),
-        }
+        };
+
+        // The keyboard selection: a full-width fill with the 2px accent bar on its left edge.
+        div()
+            .relative()
+            .w_full()
+            .when(is_selected, |this| {
+                this.bg(cx.theme().colors().element_selected)
+            })
+            .child(element)
+            .when(is_selected, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.))
+                        .bg(cx.theme().colors().text_accent),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_signed_in(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -2854,26 +2895,44 @@ impl CollabPanel {
 
         let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
 
+        let filter_focused = self.filter_editor.focus_handle(cx).is_focused(window);
+        let colors = cx.theme().colors();
+
         v_flex()
             .size_full()
-            .gap_1()
+            // Filter: a sunken input whose line takes the text colour on focus.
             .child(
                 h_flex()
-                    .p_2()
-                    .h(Tab::container_height(cx))
+                    .flex_none()
+                    .mx_2()
+                    .mb_1p5()
+                    .h(px(26.))
+                    .pl_1p5()
+                    .pr_0p5()
                     .gap_1p5()
-                    .border_b_1()
-                    .border_color(cx.theme().colors().border)
+                    .bg(colors.editor_background)
+                    .border_1()
+                    .border_color(if filter_focused {
+                        colors.text
+                    } else {
+                        colors.border
+                    })
                     .child(
                         Icon::new(IconName::MagnifyingGlass)
-                            .size(IconSize::Small)
+                            .size(IconSize::XSmall)
                             .color(Color::Muted),
                     )
-                    .child(self.render_filter_input(&self.filter_editor, cx))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.render_filter_input(&self.filter_editor, cx)),
+                    )
                     .when(has_query, |this| {
-                        this.pr_2p5().child(
+                        this.child(
                             IconButton::new("clear_filter", IconName::Close)
-                                .shape(IconButtonShape::Square)
+                                .icon_size(IconSize::XSmall)
+                                .icon_color(Color::Muted)
                                 .tooltip(Tooltip::text("Clear Filter"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.reset_filter_editor_text(window, cx);
@@ -2955,7 +3014,6 @@ impl CollabPanel {
     fn render_header(
         &self,
         section: Section,
-        is_selected: bool,
         is_collapsed: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -3029,7 +3087,8 @@ impl CollabPanel {
                         .toggle_state(is_auto_watching)
                         .selected_style(match auto_watch_state {
                             AutoWatch::Paused => ButtonStyle::Tinted(TintColor::Warning),
-                            _ => ButtonStyle::Tinted(TintColor::Accent),
+                            // The accent fill is reserved for the primary action.
+                            _ => ButtonStyle::Subtle,
                         })
                         .when(!is_auto_watching, |this| {
                             this.visible_on_hover("section-header")
@@ -3113,9 +3172,7 @@ impl CollabPanel {
                         }))
                 })
                 .inset(true)
-                .end_slot::<AnyElement>(button)
-                .focused(is_selected)
-                .dock(self.dock_side(cx)),
+                .end_slot::<AnyElement>(button),
         )
     }
 
@@ -3143,8 +3200,6 @@ impl CollabPanel {
             .indent_level(1)
             .indent_step_size(px(20.))
             .toggle_state(context_menu_open_via_row)
-            .focused(is_selected)
-            .dock(self.dock_side(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -3240,7 +3295,6 @@ impl CollabPanel {
         &self,
         user: &Arc<User>,
         is_incoming: bool,
-        is_selected: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let username = user.username.clone();
@@ -3282,8 +3336,6 @@ impl CollabPanel {
         ListItem::new(username.clone())
             .indent_level(1)
             .indent_step_size(px(20.))
-            .focused(is_selected)
-            .dock(self.dock_side(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -3294,12 +3346,7 @@ impl CollabPanel {
             .start_slot(Avatar::new(user.avatar_uri.clone()))
     }
 
-    fn render_channel_invite(
-        &self,
-        channel: &Arc<Channel>,
-        is_selected: bool,
-        cx: &mut Context<Self>,
-    ) -> ListItem {
+    fn render_channel_invite(&self, channel: &Arc<Channel>, cx: &mut Context<Self>) -> ListItem {
         let channel_id = channel.id;
         let response_is_pending = self
             .channel_store
@@ -3327,8 +3374,6 @@ impl CollabPanel {
         ];
 
         ListItem::new(("channel-invite", channel.id.0 as usize))
-            .focused(is_selected)
-            .dock(self.dock_side(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -3343,12 +3388,10 @@ impl CollabPanel {
             )
     }
 
-    fn render_contact_placeholder(&self, is_selected: bool, cx: &mut Context<Self>) -> ListItem {
+    fn render_contact_placeholder(&self, cx: &mut Context<Self>) -> ListItem {
         ListItem::new("contact-placeholder")
             .child(Icon::new(IconName::Plus))
             .child(Label::new("Add a Contact"))
-            .focused(is_selected)
-            .dock(self.dock_side(cx))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_contact_finder(window, cx)))
     }
 
@@ -3531,8 +3574,6 @@ impl CollabPanel {
                     .indent_level(depth)
                     .indent_step_size(px(20.))
                     .toggle_state(is_active)
-                    .focused(is_selected)
-                    .dock(self.dock_side(cx))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if is_active {
                             this.open_channel_notes(channel_id, window, cx)
@@ -3911,6 +3952,12 @@ impl Render for CollabPanel {
             .on_action(cx.listener(CollabPanel::move_channel_down))
             .track_focus(&self.focus_handle)
             .size_full()
+            .child(
+                self.render_panel_header(
+                    is_signed_in_view_visible && !is_collaboration_disabled,
+                    cx,
+                ),
+            )
             .child(if is_collaboration_disabled {
                 self.render_disabled_by_organization(cx)
             } else if is_signed_in_view_visible {

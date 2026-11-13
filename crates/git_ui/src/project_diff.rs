@@ -6,12 +6,13 @@ use crate::{
     unstaged_diff::UnstagedDiff,
 };
 use anyhow::{Context as _, Result};
+use app_actions::git as git_actions;
 use buffer_diff::DiffHunkSecondaryStatus;
 use editor::{
     DefaultDiffHunkRenderer, Editor, EditorEvent, SplittableEditor,
     actions::{GoToHunk, GoToPreviousHunk, SendReviewToAgent},
 };
-use git::{Commit, StageAll, StageAndNext, ToggleStaged, UnstageAll, UnstageAndNext};
+use git::{StageAll, StageAndNext, ToggleStaged, UnstageAll, UnstageAndNext};
 use gpui::{
     Action, App, AppContext as _, Entity, EventEmitter, FocusHandle, Focusable, Render,
     Subscription, Task, WeakEntity, actions,
@@ -30,14 +31,13 @@ use serde::Deserialize;
 use settings::GitDiffBaseSetting;
 use std::any::{Any, TypeId};
 use std::sync::Arc;
-use ui::{DiffStat, Divider, Tooltip, prelude::*};
+use ui::{Divider, Tooltip, prelude::*};
 use workspace::{
     ItemNavHistory, SerializableItem, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
     Workspace,
     item::{Item, ItemEvent, ItemHandle, SaveOptions},
     searchable::SearchableItemHandle,
 };
-use zed_actions::git as git_actions;
 
 actions!(
     git,
@@ -830,10 +830,11 @@ impl Render for ProjectDiffToolbar {
             .flex_wrap()
             .justify_between()
             .when(!is_multibuffer_empty, |this| {
-                this.child(DiffStat::new(
+                this.child(crate::diff_stat_text(
                     "project-diff-stat",
                     additions as usize,
                     deletions as usize,
+                    cx,
                 ))
                 .child(Divider::vertical().ml_1())
             })
@@ -948,18 +949,7 @@ impl Render for ProjectDiffToolbar {
                     )
                 },
             )
-            .child(Divider::vertical())
-            .child(
-                Button::new("commit", "Commit")
-                    .tooltip(Tooltip::for_action_title_in(
-                        "Commit",
-                        &Commit,
-                        &focus_handle,
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.dispatch_action(&Commit, window, cx);
-                    })),
-            )
+            // No Commit here: the one Commit button is the panel's primary action.
             .when(review_count > 0, |el| {
                 el.child(Divider::vertical()).child(
                     render_send_review_to_agent_button(review_count, &focus_handle).on_click(
@@ -981,7 +971,7 @@ pub(crate) fn render_send_review_to_agent_button(
         format!("Send Review to Agent ({})", review_count),
     )
     .start_icon(
-        Icon::new(IconName::ZedAssistant)
+        Icon::new(IconName::AppAssistant)
             .size(IconSize::Small)
             .color(Color::Muted),
     )
@@ -1022,6 +1012,10 @@ mod tests {
             cx.update_global::<SettingsStore, _>(|store, cx| {
                 store.update_user_settings(cx, |settings| {
                     settings.editor.diff_view_style = Some(DiffViewStyle::Unified);
+                    // Unaligned default is "staging"; the expected file
+                    // order of this suite is upstream's "status" grouping.
+                    settings.git_panel.get_or_insert_default().group_by =
+                        Some(settings::GitPanelGroupBy::Status);
                 });
             });
             theme_settings::init(theme::LoadThemes::JustBase, cx);
@@ -1030,7 +1024,7 @@ mod tests {
         });
     }
 
-    use zed_actions::git as git_actions;
+    use app_actions::git as git_actions;
 
     use crate::branch_diff::BranchDiff;
     use crate::project_diff::{self, ProjectDiff};

@@ -25,10 +25,12 @@ use editor::actions::OpenExcerpts;
 use sandbox::{SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
 
 use crate::completion_provider::{AvailableSkill, PromptLocalCommand, pluralize};
+use crate::connect_form::{ConnectForm, ConnectFormEvent};
+use crate::connections::{self, Backing, ConnectionKind};
 use crate::message_editor::SharedSessionCapabilities;
 use crate::ui::{
     SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip, TerminalSandboxWarning,
-    TerminalToolHeader,
+    TerminalToolHeader, WorkingIndicator,
 };
 use crate::unicode_confusables;
 
@@ -40,14 +42,15 @@ use heapless::Vec as ArrayVec;
 use itertools::Itertools;
 use language_model::{
     FastModeConfirmation, LanguageModel, LanguageModelEffortLevel, LanguageModelId,
-    LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry, Speed,
+    LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry,
+    ProviderConnectionStatus, ProviderSettingsView, Speed,
 };
+use language_models::provider::unaligned::{KEY_REFUSED_REASON, UnalignedLanguageModelProvider};
 use notifications::status_toast::StatusToast;
 use project::ResolvedPath;
 use settings::{update_settings_file, update_settings_file_with_completion};
 use ui::{
-    ButtonLike, CalloutBorderPosition, Checkbox, SpinnerLabel, SpinnerVariant, SplitButton,
-    SplitButtonStyle, Tab, ToggleState,
+    ButtonLike, CalloutBorderPosition, Checkbox, SplitButton, SplitButtonStyle, Tab, ToggleState,
 };
 use url::Url;
 use util::markdown::source_position_from_fragment;
@@ -69,6 +72,94 @@ pub(super) fn subagent_label(thread: &AcpThread) -> SharedString {
         .and_then(|association| association.title.clone())
         .or_else(|| thread.title())
         .unwrap_or_else(|| "Subagent".into())
+}
+
+/// Whether a message from a chat would reach a model, for the built-in agent.
+/// An external agent manages its own connection and is always `External`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ChatReadiness {
+    /// The chat belongs to an external agent.
+    External,
+    /// No model is connected at all: the panel is the connection screen.
+    NotConnected,
+    /// A key is stored and the model list has not arrived yet.
+    LoadingModels { provider: SharedString },
+    /// Connected, and there is no model to talk to: `reason` says why.
+    NoModels { reason: SharedString },
+    /// Models are available, the chat has none selected.
+    NoModelSelected,
+    /// A model is selected, but its provider reports a problem (a refused
+    /// key, a server that cannot be reached): `reason` is its own sentence.
+    NeedsAttention {
+        provider_id: LanguageModelProviderId,
+        provider: SharedString,
+        reason: SharedString,
+    },
+    /// A message goes to `model`. `detail` is what the provider says about
+    /// the connection (a balance); `checking` while it has not answered yet.
+    Ready {
+        model: SharedString,
+        provider: SharedString,
+        detail: Option<SharedString>,
+        checking: bool,
+    },
+}
+
+impl ChatReadiness {
+    /// Whether the composer has anywhere to send to. When it does not, it is
+    /// not shown: a composer that cannot send is a dead end.
+    /// The provider answered that it does not accept the stored key. One
+    /// card says so everywhere ("<provider> refused this key." · Replace Key
+    /// · Open Connections), before a message is sent and after.
+    pub(crate) fn key_refused(&self) -> bool {
+        matches!(self, Self::NeedsAttention { reason, .. } if reason.as_ref() == KEY_REFUSED_REASON)
+    }
+
+    pub(crate) fn can_send(&self) -> bool {
+        match self {
+            Self::NotConnected | Self::LoadingModels { .. } | Self::NoModels { .. } => false,
+            Self::External
+            | Self::NoModelSelected
+            | Self::NeedsAttention { .. }
+            | Self::Ready { .. } => true,
+        }
+    }
+}
+
+/// How a provider is connected, which decides what fixes a refused credential.
+enum ConnectionMeans {
+    ApiKey,
+    SignIn { title: SharedString },
+    Other,
+}
+
+/// One starting point offered by the empty chat.
+enum EmptyStateSuggestion {
+    /// Puts `text` in the composer.
+    Prompt {
+        label: SharedString,
+        text: SharedString,
+    },
+    /// Nothing is open: the only useful start is opening a folder.
+    OpenFolder,
+}
+
+impl EmptyStateSuggestion {
+    fn label(&self) -> SharedString {
+        match self {
+            Self::Prompt { label, .. } => label.clone(),
+            Self::OpenFolder => "Open a folder to work on".into(),
+        }
+    }
+}
+
+/// A balance in US dollars as the insufficient-credit card prints it.
+fn format_balance(balance: f64) -> String {
+    if balance > 0.0 && balance < 0.01 {
+        "under $0.01".to_string()
+    } else {
+        format!("${balance:.2}")
+    }
 }
 
 /// Most agents echo an accepted prompt almost immediately, so the in-flight status row
@@ -279,46 +370,6 @@ impl ThreadFeedbackState {
 
         editor.read(cx).focus_handle(cx).focus(window, cx);
         editor
-    }
-}
-
-struct GeneratingSpinner {
-    variant: SpinnerVariant,
-}
-
-impl GeneratingSpinner {
-    fn new(variant: SpinnerVariant) -> Self {
-        Self { variant }
-    }
-}
-
-impl Render for GeneratingSpinner {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        SpinnerLabel::with_variant(self.variant).size(LabelSize::Small)
-    }
-}
-
-#[derive(IntoElement)]
-struct GeneratingSpinnerElement {
-    variant: SpinnerVariant,
-}
-
-impl GeneratingSpinnerElement {
-    fn new(variant: SpinnerVariant) -> Self {
-        Self { variant }
-    }
-}
-
-impl RenderOnce for GeneratingSpinnerElement {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let id = match self.variant {
-            SpinnerVariant::Dots => "generating-spinner-view",
-            SpinnerVariant::Sand => "confirmation-spinner-view",
-            _ => "spinner-view",
-        };
-        window.with_id(id, |window| {
-            window.use_state(cx, |_, _| GeneratingSpinner::new(self.variant))
-        })
     }
 }
 
@@ -753,6 +804,13 @@ pub struct ThreadView {
     pub permission_dropdown_handle: PopoverMenuHandle<ContextMenu>,
     pub thread_retry_status: Option<RetryStatus>,
     pub(super) thread_error: Option<ThreadError>,
+    /// The provider of the model that was selected when `thread_error` was
+    /// recorded. Errors only carry a display name: every decision about
+    /// "which provider" is taken on this id.
+    thread_error_provider: Option<LanguageModelProviderId>,
+    /// Asks the provider for the balance again after it refused a request for
+    /// lack of credit, so the card prints the current figure.
+    _balance_refresh_task: Option<Task<()>>,
     pub thread_error_markdown: Option<Entity<Markdown>>,
     pub token_limit_callout_dismissed: bool,
     pub last_token_limit_telemetry: Option<acp_thread::TokenUsageRatio>,
@@ -771,6 +829,9 @@ pub struct ThreadView {
     pub plan_expanded: bool,
     pub queue_expanded: bool,
     pub editor_expanded: bool,
+    /// How many lines the composer may grow to before it scrolls: 40% of the
+    /// window, measured when the composer is drawn. `None` until then.
+    composer_max_lines: Option<usize>,
     pub should_be_following: bool,
     pub editing_message: Option<usize>,
     pub message_queue: MessageQueue,
@@ -785,6 +846,15 @@ pub struct ThreadView {
     _draft_resolve_task: Option<Task<()>>,
     _sandbox_status_refresh_task: Option<Task<()>>,
     pub hovered_edited_file_buttons: Option<usize>,
+    /// The API key form, built the first time it is shown.
+    connect_form: Option<Entity<ConnectForm>>,
+    /// The user asked to replace a rejected key; the form shows until done.
+    reenter_api_key: bool,
+    /// Whether the provider answered about its balance after the last error:
+    /// the insufficient-credit card prints a figure only when it is current.
+    balance_is_fresh: bool,
+    /// Whether the composer's "…" row (follow, speed) is open.
+    composer_options_expanded: bool,
     pub current_submission: Option<SubmissionId>,
     revealed_unsettled_submissions: HashSet<SubmissionId>,
     submission_reveal_tasks: HashMap<SubmissionId, Task<()>>,
@@ -825,6 +895,11 @@ impl ThreadView {
     pub(crate) fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
         if self.parent_session_id.is_some() {
             self.focus_handle.clone()
+        } else if let Some(form) = &self.connect_form
+            && (self.needs_connection(cx) || form.read(cx).is_checking())
+        {
+            // The composer is not shown while nothing is connected.
+            form.focus_handle(cx)
         } else {
             self.active_editor(cx).focus_handle(cx)
         }
@@ -1058,6 +1133,9 @@ impl ThreadView {
             }
         }));
 
+        // One name per agent everywhere ("Claude Code", not the registry's
+        // "Claude Agent").
+        let agent_display_name = crate::agent_display_name(&agent_id, Some(agent_display_name));
         let has_slash_completions = session_capabilities.read().has_slash_completions();
         let placeholder = placeholder_text(agent_display_name.as_ref(), has_slash_completions);
 
@@ -1079,6 +1157,8 @@ impl ThreadView {
                 window,
                 cx,
             );
+            // The composer is a raised box: its text sits on that ground.
+            editor.set_on_raised_surface(true, cx);
             let content_blocks = if let Some(content) = initial_content {
                 match content {
                     AgentInitialContent::ThreadSummary { session_id, title } => {
@@ -1209,6 +1289,13 @@ impl ThreadView {
                 },
             ));
 
+            // What the chat says about its connection (not connected, loading,
+            // ready, needs attention, the balance) follows the providers.
+            subscriptions.push(cx.subscribe(
+                &LanguageModelRegistry::global(cx),
+                |_, _, _: &language_model::Event, cx| cx.notify(),
+            ));
+
             // A "no model selected" error is stale as soon as the thread has a
             // usable model
             if let Some(native_thread) = native_connection.thread(thread.read(cx).session_id(), cx)
@@ -1219,9 +1306,27 @@ impl ThreadView {
                         if matches!(this.thread_error, Some(ThreadError::NoModelSelected)) {
                             this.clear_thread_error(cx);
                         }
+                        // The empty chat names the model that will answer.
+                        cx.notify();
                     },
                 ));
             }
+        }
+
+        // The empty chat's starting points name the file being edited.
+        if parent_session_id.is_none()
+            && let Some(workspace) = workspace.upgrade()
+        {
+            subscriptions.push(cx.subscribe(
+                &workspace,
+                |this: &mut Self, _workspace, event: &workspace::Event, cx| {
+                    if matches!(event, workspace::Event::ActiveItemChanged)
+                        && !this.has_visible_conversation(cx)
+                    {
+                        cx.notify();
+                    }
+                },
+            ));
         }
 
         subscriptions.push(cx.observe(&message_editor, |this, editor, cx| {
@@ -1290,6 +1395,8 @@ impl ThreadView {
             permission_dropdown_handle: PopoverMenuHandle::default(),
             thread_retry_status: None,
             thread_error: None,
+            thread_error_provider: None,
+            _balance_refresh_task: None,
             thread_error_markdown: None,
             token_limit_callout_dismissed: false,
             last_token_limit_telemetry: None,
@@ -1299,10 +1406,12 @@ impl ThreadView {
             collapsed_sandbox_network_details: HashSet::default(),
             acknowledged_confusable_warnings: HashSet::default(),
             subagent_scroll_handles: RefCell::new(HashMap::default()),
+            // One row says what changed; the file list opens on demand.
             edits_expanded: false,
             plan_expanded: false,
             queue_expanded: true,
             editor_expanded: false,
+            composer_max_lines: None,
             should_be_following: false,
             editing_message: None,
             message_queue: MessageQueue::default(),
@@ -1316,6 +1425,10 @@ impl ThreadView {
             _draft_resolve_task: None,
             _sandbox_status_refresh_task: None,
             hovered_edited_file_buttons: None,
+            connect_form: None,
+            reenter_api_key: false,
+            balance_is_fresh: false,
+            composer_options_expanded: false,
             current_submission,
             revealed_unsettled_submissions,
             submission_reveal_tasks: HashMap::default(),
@@ -2610,21 +2723,72 @@ impl ThreadView {
         error: impl Into<ThreadError>,
         cx: &mut Context<Self>,
     ) {
-        let error = error.into();
+        // The error names its provider; the chat knows which one it is.
+        let provider_id = self.selected_provider_id(cx);
+        let error = error.into().for_provider(provider_id.as_ref());
         self.emit_thread_error_telemetry(&error, cx);
+        self.refresh_provider_after(&error, provider_id.as_ref(), cx);
         self.thread_error = Some(error);
+        self.thread_error_provider = provider_id;
         cx.notify();
+    }
+
+    /// The provider of the model this chat sends to. `None` for an external
+    /// agent and while no model is selected.
+    fn selected_provider_id(&self, cx: &App) -> Option<LanguageModelProviderId> {
+        self.as_native_thread(cx)?
+            .read(cx)
+            .model()
+            .map(|model| model.provider_id.clone())
+    }
+
+    /// A refused key or a refused payment changes what is known about the
+    /// connection: ask the provider again, so that the card, the connection
+    /// screen and the balance all say the same thing.
+    fn refresh_provider_after(
+        &mut self,
+        error: &ThreadError,
+        provider_id: Option<&LanguageModelProviderId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.balance_is_fresh = false;
+        self._balance_refresh_task = None;
+        let Some(provider_id) = provider_id else {
+            return;
+        };
+        let check = match error {
+            ThreadError::InsufficientCredit { .. }
+                if provider_id.0.as_ref() == crate::UNALIGNED_PROVIDER_ID =>
+            {
+                UnalignedLanguageModelProvider::global(cx)
+                    .map(|provider| provider.refresh_balance(cx))
+            }
+            ThreadError::AuthenticationFailed { .. } | ThreadError::InsufficientCredit { .. } => {
+                LanguageModelRegistry::read_global(cx)
+                    .provider(provider_id)
+                    .map(|provider| {
+                        let check = provider.check_connection(cx);
+                        cx.background_spawn(async move { check.await.map(|_| ()) })
+                    })
+            }
+            _ => None,
+        };
+        let Some(check) = check else {
+            return;
+        };
+        self._balance_refresh_task = Some(cx.spawn(async move |this, cx| {
+            let answered = check.await.is_ok();
+            this.update(cx, |this, cx| {
+                this.balance_is_fresh = answered;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn emit_thread_error_telemetry(&self, error: &ThreadError, cx: &mut Context<Self>) {
         let (error_kind, acp_error_code, message): (&str, Option<SharedString>, SharedString) =
             match error {
-                ThreadError::ZedPaymentRequired => (
-                    "payment_required",
-                    None,
-                    "You reached your free usage limit. Upgrade to Zed Pro for more prompts."
-                        .into(),
-                ),
                 ThreadError::Refusal => {
                     let model_or_agent_name = self.current_model_name(cx);
                     let message = format!(
@@ -2663,6 +2827,16 @@ impl ThreadView {
                     None,
                     format!("No credentials configured for {provider}.").into(),
                 ),
+                ThreadError::ServerError { provider, message } => (
+                    "server_error",
+                    None,
+                    format!("{provider}'s server reported an error: {message}").into(),
+                ),
+                ThreadError::Unreachable { provider } => (
+                    "unreachable",
+                    None,
+                    format!("{provider} could not be reached.").into(),
+                ),
                 ThreadError::StreamError { provider } => (
                     "stream_error",
                     None,
@@ -2698,6 +2872,14 @@ impl ThreadView {
                     "api_error",
                     None,
                     format!("{provider}'s API returned an unexpected error.").into(),
+                ),
+                ThreadError::InsufficientCredit { message, .. } => {
+                    ("insufficient_credit", None, message.clone())
+                }
+                ThreadError::ModelUnavailable { provider } => (
+                    "model_unavailable",
+                    None,
+                    format!("{provider} no longer offers the selected model.").into(),
                 ),
                 ThreadError::Other {
                     acp_error_code,
@@ -2800,6 +2982,78 @@ impl ThreadView {
             })
         })
         .detach();
+    }
+
+    /// The way out of a prompt that was turned down: reword it and send it
+    /// again. The prompt is edited where it stands in the chat, and sending it
+    /// restarts the chat from there. A prompt that is not in the chat (a
+    /// refusal removes it) or that cannot be edited there is edited in the
+    /// message box instead.
+    pub(crate) fn edit_last_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt_was_removed = matches!(self.thread_error, Some(ThreadError::Refusal))
+            && self.thread.read(cx).refused_prompt_removed();
+        self.clear_thread_error(cx);
+
+        if !prompt_was_removed {
+            let last_prompt = self
+                .thread
+                .read(cx)
+                .entries()
+                .iter()
+                .rposition(|entry| entry.user_message().is_some());
+            if let Some(entry_ix) = last_prompt
+                && self.can_edit_user_message(entry_ix, cx)
+                && let Some(editor) = self
+                    .entry_view_state
+                    .read(cx)
+                    .entry(entry_ix)
+                    .and_then(|entry| entry.message_editor())
+                    .cloned()
+            {
+                self.editing_message = Some(entry_ix);
+                self.scroll_to_entry(entry_ix, cx);
+                editor.focus_handle(cx).focus(window, cx);
+                return;
+            }
+        }
+
+        self.restore_last_prompt_to_composer(window, cx);
+        self.message_editor.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Puts the last prompt that was sent back in the message box, unless
+    /// something else was typed there since.
+    fn restore_last_prompt_to_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.message_editor.read(cx).is_empty(cx)
+            || self.message_editor.read(cx).editor().read(cx).read_only(cx)
+        {
+            return;
+        }
+        let content = {
+            let thread = self.thread.read(cx);
+            thread
+                .latest_submission_id()
+                .and_then(|id| thread.submission(id))
+                .map(|record| record.content.to_vec())
+        };
+        let Some(content) = content else {
+            return;
+        };
+        if content.is_empty() || !content.iter().all(acp_thread::content::can_convert_to_v1) {
+            return;
+        }
+        self.message_editor.update(cx, |editor, cx| {
+            editor.set_message(content, window, cx);
+        });
+    }
+
+    /// A refusal takes the refused prompt out of the chat: its words would be
+    /// lost. They come back in the message box, ready to be reworded.
+    pub(crate) fn restore_refused_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.read(cx).refused_prompt_removed() {
+            self.restore_last_prompt_to_composer(window, cx);
+        }
     }
 
     pub fn regenerate(
@@ -3254,7 +3508,7 @@ impl ThreadView {
 
     fn handle_message_editor_move_up(
         &mut self,
-        _: &zed_actions::editor::MoveUp,
+        _: &app_actions::editor::MoveUp,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3418,6 +3672,54 @@ impl ThreadView {
                     workspace.follow(CollaboratorId::Agent, window, cx);
                 })
                 .ok();
+        }
+        cx.notify();
+    }
+
+    /// "Allow All" on a tool request: allows it and stops asking for the next
+    /// ones, in every chat. A toast offers to undo, and the chat's "…" menu
+    /// turns the question back on.
+    pub(crate) fn allow_all_tools(
+        &mut self,
+        session_id: acp_v2::SessionId,
+        request_id: PermissionRequestId,
+        allow_once: SelectedPermissionOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // This request is answered here. The others that wait are answered
+        // by the agent when it sees the setting change.
+        self.conversation.update(cx, |conversation, cx| {
+            conversation.authorize_permission_request(session_id, request_id, allow_once, cx);
+        });
+        let fs = self.thread.read(cx).project().read(cx).fs().clone();
+        crate::set_ask_before_using_tools(false, fs.clone(), cx);
+
+        if self.should_be_following {
+            self.workspace
+                .update(cx, |workspace, cx| {
+                    workspace.follow(CollaboratorId::Agent, window, cx);
+                })
+                .ok();
+        }
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                let toast = StatusToast::new(
+                    "The agent no longer asks before using its tools.",
+                    cx,
+                    move |this, _cx| {
+                        this.icon(
+                            Icon::new(IconName::Check)
+                                .size(IconSize::Small)
+                                .color(Color::Success),
+                        )
+                        .action("Undo", move |_window, cx| {
+                            crate::set_ask_before_using_tools(true, fs.clone(), cx);
+                        })
+                    },
+                );
+                workspace.toggle_status_toast(toast, cx);
+            });
         }
         cx.notify();
     }
@@ -3888,6 +4190,8 @@ impl ThreadView {
 
     pub fn clear_thread_error(&mut self, cx: &mut Context<Self>) {
         self.thread_error = None;
+        self.thread_error_provider = None;
+        self._balance_refresh_task = None;
         self.thread_error_markdown = None;
         self.token_limit_callout_dismissed = true;
         cx.notify();
@@ -3932,7 +4236,9 @@ impl ThreadView {
         }
     }
 
-    pub fn render_thread_retry_status_callout(&self, cx: &mut Context<Self>) -> Option<Callout> {
+    /// While the agent retries by itself: who is not answering, which retry
+    /// this is, and the error in the server's own words.
+    pub fn render_thread_retry_status_callout(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let state = self.thread_retry_status.as_ref()?;
 
         if let Some(fallback_model) = acp_thread::refusal_fallback_model_from_meta(&state.meta) {
@@ -3950,10 +4256,13 @@ impl ThreadView {
                                 this.thread_retry_status = None;
                                 cx.notify();
                             })),
-                    ),
+                    )
+                    .into_any_element(),
             );
         }
 
+        // Once the wait is over the next request is on its way: the
+        // "generating" row says so.
         let next_attempt_in = state
             .duration
             .saturating_sub(Instant::now().saturating_duration_since(state.started_at));
@@ -3961,40 +4270,27 @@ impl ThreadView {
             return None;
         }
 
-        let next_attempt_in_secs = next_attempt_in.as_secs() + 1;
-
-        let retry_message = if state.max_attempts == 1 {
-            if next_attempt_in_secs == 1 {
-                "Retrying. Next attempt in 1 second.".to_string()
-            } else {
-                format!("Retrying. Next attempt in {next_attempt_in_secs} seconds.")
-            }
-        } else if next_attempt_in_secs == 1 {
-            format!(
-                "Retrying. Next attempt in 1 second (Attempt {} of {}).",
-                state.attempt, state.max_attempts,
-            )
+        let who = self.answering_name(cx);
+        let sentence = if state.max_attempts <= 1 {
+            format!("{who} is not answering. Retrying automatically.")
         } else {
             format!(
-                "Retrying. Next attempt in {next_attempt_in_secs} seconds (Attempt {} of {}).",
+                "{who} is not answering. Retrying automatically (retry {} of {}).",
                 state.attempt, state.max_attempts,
             )
         };
+        let last_error = state.last_error.clone();
+        let detail = (!last_error.is_empty()).then(|| Self::card_detail(last_error));
 
         Some(
-            Callout::new()
-                .border_position(self.callout_border_position())
-                .icon(IconName::Warning)
-                .severity(Severity::Warning)
-                .title(state.last_error.clone())
-                .description(retry_message),
+            self.state_card(Severity::Warning, sentence, detail, Vec::new(), false, cx)
+                .into_any_element(),
         )
     }
 
     fn activity_bar_bg(&self, cx: &Context<Self>) -> Hsla {
-        let editor_bg_color = cx.theme().colors().editor_background;
-        let active_color = cx.theme().colors().element_selected;
-        editor_bg_color.blend(active_color.opacity(0.3))
+        // Chrome: one step under the composer's raised box it sits on.
+        cx.theme().colors().background
     }
 
     pub fn render_activity_bar(
@@ -4042,14 +4338,10 @@ impl ThreadView {
         let queue_expanded = self.queue_expanded;
 
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
-        // Drop shadows have no opaque surface to blend into on a transparent
-        // window, so they render as a dark halo; only apply them when opaque.
-        let opaque_window =
-            cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
 
         h_flex()
             .w_full()
-            .px_2()
+            .px_3()
             .justify_center()
             .child(
                 v_flex()
@@ -4063,12 +4355,7 @@ impl ThreadView {
                     .border_b_0()
                     .border_color(cx.theme().colors().border)
                     .rounded_t_md()
-                    .when(opaque_window, |this| {
-                        this.shadow(vec![
-                            gpui::BoxShadow::new(px(1.), px(-1.), gpui::black().opacity(0.12))
-                                .blur_radius(px(2.)),
-                        ])
-                    })
+                    .overflow_hidden()
                     .when_some(awaiting_permission, |this, element| this.child(element))
                     .when(
                         has_awaiting_permission
@@ -4126,7 +4413,8 @@ impl ThreadView {
         pending_edits: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let editor_bg_color = cx.theme().colors().editor_background;
+        // The list is part of the bar: same ground as its summary row.
+        let editor_bg_color = self.activity_bar_bg(cx);
 
         // Sort edited files alphabetically for consistency with Git diff view
         let mut sorted_buffers: Vec<_> = changed_buffers.iter().collect();
@@ -4161,27 +4449,19 @@ impl ThreadView {
                                         parent.display(path_style)
                                     ))
                                     .color(Color::Muted)
-                                    .size(LabelSize::XSmall)
-                                    .buffer_font(cx),
+                                    .size(LabelSize::Small)
+                                    .truncate(),
                                 )
                             }
                         });
 
                         let file_name = path
                             .file_name()
-                            .map(|name| {
-                                Label::new(name.to_string())
-                                    .size(LabelSize::XSmall)
-                                    .buffer_font(cx)
-                                    .ml_1()
-                            })
+                            .map(|name| Label::new(name.to_string()).size(LabelSize::Small))
                             .or_else(|| {
-                                fallback_full_path.as_ref().map(|path| {
-                                    Label::new(path.clone())
-                                        .size(LabelSize::XSmall)
-                                        .buffer_font(cx)
-                                        .ml_1()
-                                })
+                                fallback_full_path
+                                    .as_ref()
+                                    .map(|path| Label::new(path.clone()).size(LabelSize::Small))
                             });
 
                         let full_path = fallback_full_path
@@ -4213,19 +4493,21 @@ impl ThreadView {
                             .id(("file-container", index))
                             .relative()
                             .min_w_0()
-                            .p_1p5()
+                            .h(ui::metrics::row_height(cx))
+                            .pl_2()
+                            .pr_1()
                             .gap_2()
                             .justify_between()
                             .bg(editor_bg_color)
-                            .when(index < changed_buffers.len() - 1, |parent| {
-                                parent.border_color(cx.theme().colors().border).border_b_1()
-                            })
                             .child(
                                 h_flex()
                                     .id(("file-name-path", index))
                                     .cursor_pointer()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
                                     .pr_0p5()
-                                    .gap_0p5()
+                                    .gap_1p5()
                                     .rounded_xs()
                                     .child(file_icon)
                                     .children(file_name)
@@ -4242,7 +4524,7 @@ impl ThreadView {
                                     .tooltip({
                                         move |_, cx| {
                                             Tooltip::with_meta(
-                                                "Go to File",
+                                                "Open Diff",
                                                 None,
                                                 full_path.clone(),
                                                 cx,
@@ -4276,12 +4558,10 @@ impl ThreadView {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         h_flex()
-            .id("edited-buttons-container")
-            .visible_on_hover("edited-code")
-            .absolute()
-            .right_0()
-            .px_1()
-            .gap_1()
+            .id(("edited-buttons-container", index))
+            // Keep and Undo stay in sight on every row.
+            .flex_none()
+            .gap_0p5()
             .bg(editor_bg_color)
             .on_hover(cx.listener(move |this, is_hovered, _window, cx| {
                 if *is_hovered {
@@ -4292,18 +4572,11 @@ impl ThreadView {
                 cx.notify();
             }))
             .child(
-                Button::new("review", "Review")
-                    .label_size(LabelSize::Small)
-                    .on_click({
-                        let buffer = buffer.clone();
-                        cx.listener(move |this, _, window, cx| {
-                            this.open_edited_buffer(&buffer, window, cx);
-                        })
-                    }),
-            )
-            .child(
-                Button::new(("reject-file", index), "Reject")
-                    .label_size(LabelSize::Small)
+                IconButton::new(("reject-file", index), IconName::Undo)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .aria_label("Undo the changes to this file")
+                    .tooltip(Tooltip::text("Undo"))
                     .disabled(pending_edits)
                     .on_click({
                         let buffer = buffer.clone();
@@ -4327,8 +4600,11 @@ impl ThreadView {
                     }),
             )
             .child(
-                Button::new(("keep-file", index), "Keep")
-                    .label_size(LabelSize::Small)
+                IconButton::new(("keep-file", index), IconName::Check)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .aria_label("Keep the changes to this file")
+                    .tooltip(Tooltip::text("Keep"))
                     .disabled(pending_edits)
                     .on_click({
                         let buffer = buffer.clone();
@@ -4776,12 +5052,7 @@ impl ThreadView {
             .child(
                 h_flex()
                     .gap_1p5()
-                    .child(
-                        h_flex()
-                            .w_2()
-                            .justify_center()
-                            .child(GeneratingSpinnerElement::new(SpinnerVariant::Sand)),
-                    )
+                    .child(WorkingIndicator::new("permission-waiting-indicator"))
                     .child(Label::new(label).size(LabelSize::Small).color(Color::Muted)),
             )
             .child(
@@ -5062,7 +5333,7 @@ impl ThreadView {
                         entry.content.read(cx).source().to_string().into();
                     let (icon_name, icon_color) = match &entry.source.status {
                         acp_v2::PlanEntryStatus::InProgress => {
-                            (IconName::TodoProgress, Color::Accent)
+                            (IconName::TodoProgress, Color::Default)
                         }
                         acp_v2::PlanEntryStatus::Completed => {
                             (IconName::TodoComplete, Color::Success)
@@ -5071,12 +5342,10 @@ impl ThreadView {
                         _ => (IconName::TodoPending, Color::Muted),
                     };
                     let icon = Icon::new(icon_name).size(IconSize::Small).color(icon_color);
-                    let icon = if matches!(entry.source.status, acp_v2::PlanEntryStatus::InProgress)
-                    {
-                        icon.with_rotate_animation(2).into_any_element()
-                    } else {
-                        icon.into_any_element()
-                    };
+                    // No rotation: a step can stay "in progress" long after
+                    // the turn has stopped, and nothing may keep turning in
+                    // an idle window.
+                    let icon = icon.into_any_element();
 
                     Some(
                         h_flex()
@@ -5293,6 +5562,7 @@ impl ThreadView {
 
         h_flex()
             .p_1()
+            .gap_1()
             .justify_between()
             .flex_wrap()
             .when(expanded, |this| {
@@ -5302,7 +5572,8 @@ impl ThreadView {
                 h_flex()
                     .id("edits-container")
                     .cursor_pointer()
-                    .gap_1()
+                    .min_w_0()
+                    .gap_1p5()
                     .child(Disclosure::new("edits-disclosure", expanded))
                     .map(|this| {
                         if pending_edits {
@@ -5317,32 +5588,14 @@ impl ThreadView {
                                     }
                                 ))
                                 .color(Color::Muted)
-                                .size(LabelSize::Small)
-                                .with_animation(
-                                    "edit-label",
-                                    Animation::new(Duration::from_secs(2))
-                                        .repeat()
-                                        .with_easing(pulsating_between(0.3, 0.7)),
-                                    |label, delta| label.alpha(delta),
-                                ),
+                                .size(LabelSize::Small),
                             )
                         } else {
                             let stats = DiffStats::all_files(changed_buffers.iter().cloned(), cx);
-                            let dot_divider = || {
-                                Label::new("•")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Disabled)
-                            };
 
                             this.child(
-                                Label::new("Edits")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .child(dot_divider())
-                            .child(
                                 Label::new(format!(
-                                    "{} {}",
+                                    "{} {} changed",
                                     changed_buffers.len(),
                                     if changed_buffers.len() == 1 {
                                         "file"
@@ -5350,10 +5603,8 @@ impl ThreadView {
                                         "files"
                                     }
                                 ))
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
+                                .size(LabelSize::Small),
                             )
-                            .child(dot_divider())
                             .child(DiffStat::new(
                                 "total",
                                 stats.lines_added as usize,
@@ -5372,6 +5623,8 @@ impl ThreadView {
                     .child(
                         IconButton::new("review-changes", IconName::ListTodo)
                             .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .aria_label("Review Changes")
                             .tooltip({
                                 let focus_handle = focus_handle.clone();
                                 move |_window, cx| {
@@ -5387,33 +5640,52 @@ impl ThreadView {
                                 window.dispatch_action(OpenAgentDiff.boxed_clone(), cx);
                             })),
                     )
-                    .child(Divider::vertical().color(DividerColor::Border))
+                    // Both outlined: Send stays the panel's one filled button.
+                    // The key bindings are in the tooltips, so the row fits a
+                    // 300px panel.
                     .child(
-                        Button::new("reject-all-changes", "Reject All")
+                        Button::new("reject-all-changes", "Undo All")
+                            .style(ButtonStyle::Outlined)
                             .label_size(LabelSize::Small)
                             .disabled(pending_edits)
-                            .when(pending_edits, |this| {
-                                this.tooltip(Tooltip::text(EDIT_NOT_READY_TOOLTIP_LABEL))
+                            .tooltip({
+                                let focus_handle = focus_handle.clone();
+                                move |_window, cx| {
+                                    if pending_edits {
+                                        Tooltip::simple(EDIT_NOT_READY_TOOLTIP_LABEL, cx)
+                                    } else {
+                                        Tooltip::for_action_in(
+                                            "Undo every change the agent made",
+                                            &RejectAll,
+                                            &focus_handle,
+                                            cx,
+                                        )
+                                    }
+                                }
                             })
-                            .key_binding(
-                                KeyBinding::for_action_in(&RejectAll, &focus_handle.clone(), cx)
-                                    .map(|kb| kb.size(rems_from_px(12_f32))),
-                            )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.reject_all(&RejectAll, window, cx);
                             })),
                     )
                     .child(
                         Button::new("keep-all-changes", "Keep All")
+                            .style(ButtonStyle::Outlined)
                             .label_size(LabelSize::Small)
                             .disabled(pending_edits)
-                            .when(pending_edits, |this| {
-                                this.tooltip(Tooltip::text(EDIT_NOT_READY_TOOLTIP_LABEL))
+                            .tooltip({
+                                move |_window, cx| {
+                                    if pending_edits {
+                                        Tooltip::simple(EDIT_NOT_READY_TOOLTIP_LABEL, cx)
+                                    } else {
+                                        Tooltip::for_action_in(
+                                            "Keep every change the agent made",
+                                            &KeepAll,
+                                            &focus_handle,
+                                            cx,
+                                        )
+                                    }
+                                }
                             })
-                            .key_binding(
-                                KeyBinding::for_action_in(&KeepAll, &focus_handle, cx)
-                                    .map(|kb| kb.size(rems_from_px(12_f32))),
-                            )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.keep_all(&KeepAll, window, cx);
                             })),
@@ -5547,6 +5819,49 @@ impl ThreadView {
         )
     }
 
+    /// Whether the built-in agent of this chat works without a folder: it
+    /// then answers questions and has no file or terminal tool
+    /// (`agent::Thread::has_open_folder`).
+    pub(crate) fn agent_has_no_folder(&self, cx: &App) -> bool {
+        !self.is_subagent()
+            && self
+                .as_native_thread(cx)
+                .is_some_and(|thread| !thread.read(cx).has_open_folder(cx))
+    }
+
+    /// The line above the composer while no folder is open: why the switch
+    /// stands on "Ask", and the way out.
+    fn render_no_folder_notice(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if !self.agent_has_no_folder(cx) {
+            return None;
+        }
+        Some(
+            h_flex()
+                .id("no-folder-notice")
+                .debug_selector(|| "no-folder-notice".into())
+                .flex_none()
+                .px_3()
+                .pb_1p5()
+                .gap_2()
+                .justify_between()
+                .child(
+                    div().min_w_0().child(
+                        Label::new(crate::profile_selector::NO_FOLDER_REASON)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+                )
+                .child(
+                    Button::new("no-folder-open", "Open Folder")
+                        .style(ButtonStyle::Outlined)
+                        .label_size(LabelSize::Small)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(workspace::Open::default().boxed_clone(), cx);
+                        }),
+                ),
+        )
+    }
+
     pub(crate) fn render_message_editor(
         &mut self,
         window: &mut Window,
@@ -5565,7 +5880,18 @@ impl ThreadView {
         }
 
         let focus_handle = self.message_editor.focus_handle(cx);
-        let editor_bg_color = cx.theme().colors().editor_background;
+        // The composer is a raised box on the sheet (D1, D8).
+        let composer_ground = cx.theme().colors().elevated_surface_background;
+
+        // It grows with its text up to 40% of the window, then scrolls. The
+        // row of controls and the box's padding take about 56px of that.
+        let line_height = MessageEditor::line_height(window, cx);
+        let available = window.viewport_size().height * 0.4 - px(56.);
+        let composer_max_lines = ((available / line_height).floor() as usize).max(3);
+        if self.composer_max_lines != Some(composer_max_lines) {
+            self.composer_max_lines = Some(composer_max_lines);
+            self.sync_editor_mode(cx);
+        }
 
         let editor_expanded = self.editor_expanded;
         let (expand_icon, expand_tooltip) = if editor_expanded {
@@ -5576,7 +5902,6 @@ impl ThreadView {
 
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
         let has_messages = self.has_visible_conversation(cx);
-        let fills_container = !has_messages || editor_expanded;
         let composer_is_read_only = self.message_editor.read(cx).editor().read(cx).read_only(cx);
         let discard_draft_button = composer_is_read_only.then(|| {
             div()
@@ -5595,106 +5920,166 @@ impl ThreadView {
                 )
         });
 
+        // An outline the user can type in: the strong line. The composer
+        // holds the focus most of the time, so a full outline in the text
+        // colour would be the loudest shape in the window (review W2-R1):
+        // focus lights the top edge only.
+        // A straight line cannot follow a round corner: a round theme gets
+        // its own focused outline instead.
+        let is_focused = focus_handle.contains_focused(window, cx);
+        let square_corners = gpui::corner_radius_scale() == 0.;
+        let border_color = if is_focused && !square_corners {
+            cx.theme().colors().border_focused
+        } else {
+            cx.theme().colors().border_strong
+        };
+        let focus_line_color = cx.theme().colors().text;
+        // An empty chat keeps a full-mode editor, which needs a definite
+        // height: three lines, as much as the composer's minimum elsewhere.
+        let empty_editor_height = line_height * 3.;
+
         h_flex()
-            .py_2()
-            .bg(editor_bg_color)
+            .debug_selector(|| "chat-composer".into())
+            .px_3()
+            .pb_3()
+            // The composer keeps its height, except when it is expanded: 80%
+            // of the window is a wish, and whatever sits above it (notices,
+            // cards) must not push its last lines out of the panel.
+            .when(!(has_messages && editor_expanded), |this| this.flex_none())
             .justify_center()
             .on_action(cx.listener(Self::handle_message_editor_move_up))
-            .map(|this| {
-                if has_messages {
-                    this.on_action(cx.listener(Self::expand_message_editor))
-                        .border_t_1()
-                        .border_color(cx.theme().colors().border)
-                        .when(editor_expanded, |this| this.h(vh(0.8, window)))
-                } else {
-                    this.flex_1().size_full()
-                }
+            .when(has_messages, |this| {
+                this.on_action(cx.listener(Self::expand_message_editor))
+                    .when(editor_expanded, |this| this.h(vh(0.8, window)))
             })
             .child(
                 v_flex()
                     .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
                     .when(max_content_width.is_none(), |this| this.w_full())
                     .min_w_0()
-                    .when(fills_container, |this| this.h_full())
-                    .px_2()
+                    .when(editor_expanded, |this| this.h_full())
+                    .relative()
                     .flex_shrink_1()
                     .flex_grow_0()
                     .justify_between()
                     .gap_2()
+                    // 4px at the sides and 8px more on the text: the text is
+                    // on the same 12px inset as in the user's message box,
+                    // and the row under it has room for its controls at the
+                    // panel's default 400px.
+                    .py_2()
+                    .px_1()
+                    .bg(composer_ground)
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border_color)
+                    // Borders are painted over an element's children, so the
+                    // focus line takes the top border's place (and its pixel
+                    // of height) instead of being drawn on it.
+                    .when(is_focused && square_corners, |this| {
+                        this.border_t_0().pt(px(9.)).child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h_px()
+                                .bg(focus_line_color),
+                        )
+                    })
                     .child(
                         v_flex()
                             .relative()
                             .w_full()
                             .min_h_0()
-                            .when(fills_container, |this| this.flex_1())
-                            .pt_1()
+                            .when(editor_expanded, |this| this.flex_1())
+                            // The box takes its height from the text and the
+                            // rows under it: controls that wrap (an external
+                            // agent's options at 300px) push the box up, they
+                            // never cover the text.
+                            .when(!has_messages, |this| {
+                                this.h(empty_editor_height).flex_none()
+                            })
+                            .pt_0p5()
+                            .pl_2()
                             .pr_2p5()
                             .child(self.message_editor.clone())
                             .when(has_messages, |this| {
                                 this.child(
-                                    h_flex()
-                                        .absolute()
-                                        .top_0()
-                                        .right_0()
-                                        .opacity(0.5)
-                                        .hover(|s| s.opacity(1.0))
-                                        .child(
-                                            IconButton::new("toggle-height", expand_icon)
-                                                .icon_size(IconSize::Small)
-                                                .icon_color(Color::Muted)
-                                                .tooltip({
-                                                    move |_window, cx| {
-                                                        Tooltip::for_action_in(
-                                                            expand_tooltip,
-                                                            &ExpandMessageEditor,
-                                                            &focus_handle,
-                                                            cx,
-                                                        )
-                                                    }
-                                                })
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.expand_message_editor(
+                                    h_flex().absolute().top_0().right_0().child(
+                                        IconButton::new("toggle-height", expand_icon)
+                                            .icon_size(IconSize::Small)
+                                            .icon_color(Color::Muted)
+                                            .tooltip({
+                                                move |_window, cx| {
+                                                    Tooltip::for_action_in(
+                                                        expand_tooltip,
                                                         &ExpandMessageEditor,
-                                                        window,
+                                                        &focus_handle,
                                                         cx,
-                                                    );
-                                                })),
-                                        ),
+                                                    )
+                                                }
+                                            })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.expand_message_editor(
+                                                    &ExpandMessageEditor,
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
+                                    ),
                                 )
                             }),
                     )
+                    .when(self.composer_options_expanded, |this| {
+                        this.child(self.render_composer_options_row(cx))
+                    })
                     .child(
                         h_flex()
                             .w_full()
                             .min_w_0()
                             .flex_none()
-                            .flex_wrap()
-                            .justify_between()
+                            .items_end()
+                            .gap_0p5()
+                            // Left: what goes into the request (context, mode,
+                            // model). In a narrow panel these wrap inside
+                            // their own column; Send stays where it is.
                             .child(
                                 h_flex()
+                                    .flex_1()
                                     .min_w_0()
                                     .flex_wrap()
                                     .gap_0p5()
                                     .child(self.render_add_context_button(cx))
-                                    .child(self.render_follow_toggle(cx))
-                                    .children(self.render_fast_mode_control(cx))
-                                    .children(self.render_thinking_control(cx)),
+                                    .children(self.profile_selector.clone())
+                                    // An external agent brings its own list
+                                    // of options (five for Claude Code): they
+                                    // open with "…", the row stays one row.
+                                    .when(self.config_options_view.is_none(), |this| {
+                                        this.children(self.mode_selector.clone())
+                                            .children(self.model_selector.clone())
+                                    })
+                                    // Thinking changes the answer and its
+                                    // price: next to the model whenever the
+                                    // model can think, never behind "…".
+                                    .children(self.render_thinking_control(cx))
+                                    // Follow and speed fold behind one "…".
+                                    .child(self.render_composer_options_toggle(cx))
+                                    // Usage is the first thing to give way:
+                                    // when the row is full it moves to a
+                                    // second line, next to Send.
+                                    .children(
+                                        self.render_token_usage(cx)
+                                            .map(|usage| div().ml_auto().child(usage)),
+                                    ),
                             )
+                            // Right: usage and the one primary action.
                             .child(
                                 h_flex()
-                                    .min_w_0()
-                                    .flex_wrap()
+                                    .flex_none()
                                     .gap_1()
                                     .children(self.render_activity_status_label(cx))
                                     .children(discard_draft_button)
-                                    .children(self.render_token_usage(cx))
-                                    .children(self.profile_selector.clone())
-                                    .map(|this| match self.config_options_view.clone() {
-                                        Some(config_view) => this.child(config_view),
-                                        None => this
-                                            .children(self.mode_selector.clone())
-                                            .children(self.model_selector.clone()),
-                                    })
                                     .child(self.render_send_button(cx)),
                             ),
                     ),
@@ -5980,14 +6365,32 @@ impl ThreadView {
             } else {
                 2
             };
-            format!("{:.prec$} {}", cost.amount, cost.currency, prec = precision)
-        });
-
-        let progress_color = |ratio: f32| -> Hsla {
-            if ratio >= 0.85 {
-                cx.theme().status().warning
+            // Written like every other amount of the product ("$20.50").
+            if cost.currency.as_ref() == "USD" {
+                format!("≈ ${:.prec$}", cost.amount, prec = precision)
             } else {
-                cx.theme().colors().text_muted
+                format!(
+                    "≈ {:.prec$} {}",
+                    cost.amount,
+                    cost.currency,
+                    prec = precision
+                )
+            }
+        });
+        // The built-in agent prices a chat from the provider's price list; an
+        // external agent reports its own figure. Neither is a statement.
+        let cost_note: &'static str = if self.as_native_thread(cx).is_some() {
+            "Estimated by the IDE from the provider's prices. The provider's own statement is \
+            authoritative."
+        } else {
+            "Reported by the agent. The provider's own statement is authoritative."
+        };
+
+        let usage_color = |ratio: f32| {
+            if ratio >= 0.85 {
+                Color::Warning
+            } else {
+                Color::Muted
             }
         };
 
@@ -6002,8 +6405,25 @@ impl ThreadView {
             0.0
         };
 
-        let ring_size = px(16.0);
-        let stroke_width = px(2.);
+        let usage_label = |text: String, ratio: f32| {
+            Label::new(text)
+                .size(LabelSize::XSmall)
+                .buffer_font(cx)
+                .color(usage_color(ratio))
+        };
+        let total_label = usage_label(format!("{used}/{max}"), progress_ratio);
+        let split_labels = (input_tokens_label.clone(), output_tokens_label.clone());
+        // The price of the chat so far: 12px in the muted text colour and a
+        // gap of its own, so it reads as an amount and not as a third token
+        // count (review W4-R2).
+        let cost_text = cost_label.as_ref().map(|cost| {
+            div().pl_1p5().child(
+                Label::new(cost.clone())
+                    .size(LabelSize::Small)
+                    .buffer_font(cx)
+                    .color(Color::Muted),
+            )
+        });
 
         let percentage = format!("{}%", (progress_ratio * 100.0).round() as u32);
 
@@ -6068,6 +6488,7 @@ impl ThreadView {
                     output_max: output_max_label,
                     show_split,
                     cost_label,
+                    cost_note,
                     separator_color: tooltip_separator_color,
                     global_agents_md_loaded,
                     project_rules_count,
@@ -6093,12 +6514,12 @@ impl ThreadView {
                 0.0
             };
 
+            let (input_text, output_text) = split_labels;
             Some(
                 h_flex()
                     .id("split_token_usage")
                     .flex_shrink_0()
-                    .gap_1p5()
-                    .mr_1()
+                    .gap_1()
                     .child(
                         h_flex()
                             .gap_0p5()
@@ -6107,16 +6528,7 @@ impl ThreadView {
                                     .size(IconSize::XSmall)
                                     .color(Color::Muted),
                             )
-                            .child(
-                                CircularProgress::new(
-                                    usage.input_tokens as f32,
-                                    input_max_raw as f32,
-                                    ring_size,
-                                    cx,
-                                )
-                                .stroke_width(stroke_width)
-                                .progress_color(progress_color(input_ratio)),
-                            ),
+                            .child(usage_label(input_text, input_ratio)),
                     )
                     .child(
                         h_flex()
@@ -6126,17 +6538,9 @@ impl ThreadView {
                                     .size(IconSize::XSmall)
                                     .color(Color::Muted),
                             )
-                            .child(
-                                CircularProgress::new(
-                                    usage.output_tokens as f32,
-                                    output_max_raw as f32,
-                                    ring_size,
-                                    cx,
-                                )
-                                .stroke_width(stroke_width)
-                                .progress_color(progress_color(output_ratio)),
-                            ),
+                            .child(usage_label(output_text, output_ratio)),
                     )
+                    .children(cost_text)
                     .hoverable_tooltip(build_tooltip)
                     .into_any_element(),
             )
@@ -6144,18 +6548,10 @@ impl ThreadView {
             Some(
                 h_flex()
                     .id("circular_progress_tokens")
-                    .mt_px()
-                    .mr_1()
-                    .child(
-                        CircularProgress::new(
-                            usage.used_tokens as f32,
-                            usage.max_tokens as f32,
-                            ring_size,
-                            cx,
-                        )
-                        .stroke_width(stroke_width)
-                        .progress_color(progress_color(progress_ratio)),
-                    )
+                    .flex_shrink_0()
+                    .gap_1p5()
+                    .child(total_label)
+                    .children(cost_text)
                     .hoverable_tooltip(build_tooltip)
                     .into_any_element(),
             )
@@ -6249,7 +6645,7 @@ impl ThreadView {
                 let thread = SandboxPolicyDisplay::from_policy(&thread_policy);
                 // Omit the per-thread section when it grants nothing extra.
                 let thread = (!sandbox_policy_grants_nothing(&thread))
-                    .then(|| sandbox_section("Allowed for this thread:", &thread, false));
+                    .then(|| sandbox_section("Allowed for this chat:", &thread, false));
                 SandboxStatusTooltip::enabled(
                     sandbox_section("Defined in your settings:", &settings, true),
                     thread,
@@ -6269,8 +6665,8 @@ impl ThreadView {
                         }))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(
-                                Box::new(zed_actions::OpenSettingsAt {
-                                    path: zed_actions::AGENT_SANDBOX_SETTINGS_PATH.to_string(),
+                                Box::new(app_actions::OpenSettingsAt {
+                                    path: app_actions::AGENT_SANDBOX_SETTINGS_PATH.to_string(),
                                     target: None,
                                 }),
                                 cx,
@@ -6567,7 +6963,7 @@ impl ThreadView {
             .map_or("Select Effort".into(), |effort| effort.name);
 
         let (label_color, icon) = if self.thinking_effort_menu_handle.is_deployed() {
-            (Color::Accent, IconName::ChevronUp)
+            (Color::Default, IconName::ChevronUp)
         } else {
             (Color::Muted, IconName::ChevronDown)
         };
@@ -6722,9 +7118,15 @@ impl ThreadView {
                 .child(loading_contents_spinner(IconSize::default()))
                 .into_any_element()
         } else if (is_generating || is_unconfirmed) && is_editor_empty {
+            // Stop takes Send's place while the answer is being written:
+            // outlined, with the error colour on the icon only. Sending is the
+            // one filled thing in the panel.
             IconButton::new("stop-generation", IconName::Stop)
+                .style(ButtonStyle::Outlined)
+                .size(ButtonSize::Medium)
                 .icon_color(Color::Error)
-                .style(ButtonStyle::Tinted(TintColor::Error))
+                .icon_size(IconSize::Small)
+                .aria_label("Stop Generation")
                 .tooltip(move |_window, cx| {
                     Tooltip::for_action(
                         if is_unconfirmed {
@@ -6744,15 +7146,14 @@ impl ThreadView {
             } else {
                 IconName::Send
             };
-            IconButton::new("send-message", send_icon)
-                .style(ButtonStyle::Filled)
-                .map(|this| {
-                    if is_editor_empty && !is_generating {
-                        this.disabled(true).icon_color(Color::Muted)
-                    } else {
-                        this.icon_color(Color::Accent)
-                    }
-                })
+            let can_send = !is_editor_empty || is_generating;
+            // The panel's one primary action: the only filled accent surface.
+            // Disabled, the primary button draws itself neutral.
+            IconButton::primary("send-message", send_icon)
+                .size(ButtonSize::Medium)
+                .icon_size(IconSize::Small)
+                .disabled(!can_send)
+                .aria_label("Send Message")
                 .tooltip(move |_window, cx| {
                     if is_editor_empty && !is_generating {
                         Tooltip::for_action("Type to Send", &Chat, cx)
@@ -6796,15 +7197,656 @@ impl ThreadView {
         }
     }
 
+    /// Whether a message from this chat would reach a model right now, and
+    /// if not, why. Everything the empty chat and the composer say about the
+    /// connection comes from here.
+    pub(crate) fn chat_readiness(&self, cx: &App) -> ChatReadiness {
+        let Some(thread) = self.as_native_thread(cx) else {
+            return ChatReadiness::External;
+        };
+        let registry = LanguageModelRegistry::read_global(cx);
+        if !registry.has_authenticated_provider(cx) {
+            return ChatReadiness::NotConnected;
+        }
+
+        if let Some(model) = thread.read(cx).model() {
+            let provider_id = model.provider_id.clone();
+            let provider_name = model.provider_name.0.clone();
+            let model_name = model.name.0.clone();
+            let status = registry
+                .provider(&provider_id)
+                .map(|provider| provider.connection_status(cx));
+            return match status {
+                Some(ProviderConnectionStatus::Connected { detail }) => {
+                    // Unaligned reports no detail until the server answered
+                    // about the stored key.
+                    let checking =
+                        detail.is_none() && provider_id.0.as_ref() == crate::UNALIGNED_PROVIDER_ID;
+                    ChatReadiness::Ready {
+                        model: model_name,
+                        provider: provider_name,
+                        detail,
+                        checking,
+                    }
+                }
+                Some(ProviderConnectionStatus::NeedsAttention { reason }) => {
+                    ChatReadiness::NeedsAttention {
+                        provider_id,
+                        provider: provider_name,
+                        reason,
+                    }
+                }
+                Some(ProviderConnectionStatus::NotConnected) | None => {
+                    ChatReadiness::NeedsAttention {
+                        provider_id,
+                        reason: format!(
+                            "{provider_name} is not connected, and this chat is set to \
+                            {model_name}."
+                        )
+                        .into(),
+                        provider: provider_name,
+                    }
+                }
+            };
+        }
+
+        if registry.available_models(cx).next().is_some() {
+            return ChatReadiness::NoModelSelected;
+        }
+
+        // Connected, yet nothing to talk to: the list is on its way, or it
+        // could not be loaded, or the provider has none.
+        let mut loading = None;
+        let mut failed = None;
+        let mut empty = None;
+        for provider in registry.providers() {
+            if !provider.is_authenticated(cx) {
+                continue;
+            }
+            let name = provider.name().0;
+            match provider.connection_status(cx) {
+                ProviderConnectionStatus::NeedsAttention { reason } => {
+                    failed.get_or_insert(reason);
+                }
+                // Unaligned turns a failed fetch into `NeedsAttention`, so
+                // "connected without models" means the list is still coming.
+                _ if provider.id().0.as_ref() == crate::UNALIGNED_PROVIDER_ID => {
+                    loading.get_or_insert(name);
+                }
+                _ => {
+                    empty.get_or_insert(name);
+                }
+            }
+        }
+        if let Some(provider) = loading {
+            ChatReadiness::LoadingModels { provider }
+        } else if let Some(reason) = failed {
+            ChatReadiness::NoModels { reason }
+        } else {
+            let reason = match empty {
+                Some(provider) => format!("{provider} lists no model yet."),
+                None => "No model is available yet.".to_string(),
+            };
+            ChatReadiness::NoModels {
+                reason: reason.into(),
+            }
+        }
+    }
+
+    /// A turn that ended well proves the connection works: when the provider
+    /// still reports a problem from an earlier check, ask it again so the
+    /// chat stops repeating old news.
+    pub(crate) fn recheck_connection_after_turn(&self, cx: &mut Context<Self>) {
+        if self.thread_error.is_some() {
+            return;
+        }
+        if let ChatReadiness::NeedsAttention { provider_id, .. } = self.chat_readiness(cx)
+            && let Some(provider) = LanguageModelRegistry::read_global(cx).provider(&provider_id)
+        {
+            provider.check_connection(cx).detach_and_log_err(cx);
+        }
+    }
+
+    /// What the chat says about its connection when a message could not be
+    /// sent, or would go to a provider that reports a problem. `None` when
+    /// there is nothing to say.
+    fn render_readiness_card(
+        &self,
+        readiness: &ChatReadiness,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let retry_models = |id: &'static str, first: bool| {
+            let button = if first {
+                Self::card_action(id, "Retry")
+            } else {
+                Self::card_secondary_action(id, "Retry")
+            };
+            button
+                .on_click(|_, _, cx| {
+                    let providers = LanguageModelRegistry::read_global(cx).providers();
+                    for provider in providers {
+                        if provider.is_authenticated(cx) {
+                            provider.refresh_models(cx);
+                            provider.check_connection(cx).detach_and_log_err(cx);
+                        }
+                    }
+                })
+                .into_any_element()
+        };
+
+        let card = match readiness {
+            ChatReadiness::External | ChatReadiness::Ready { .. } => return None,
+            ChatReadiness::NotConnected => self.state_card(
+                Severity::Info,
+                "No model is connected.",
+                None,
+                vec![
+                    Button::primary("connect-from-chat", "Connect")
+                        .label_size(LabelSize::Small)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(crate::ManageProviders), cx);
+                        })
+                        .into_any_element(),
+                ],
+                false,
+                cx,
+            ),
+            ChatReadiness::LoadingModels { provider } => self.state_card(
+                Severity::Info,
+                format!("Loading the model list from {provider}…"),
+                None,
+                vec![Self::open_connections_action(false, "Open Connections")],
+                false,
+                cx,
+            ),
+            ChatReadiness::NoModels { reason } => self.state_card(
+                Severity::Error,
+                reason.clone(),
+                None,
+                vec![
+                    retry_models("retry-load-models", true),
+                    Self::open_connections_action(false, "Open Connections"),
+                ],
+                false,
+                cx,
+            ),
+            ChatReadiness::NoModelSelected => self.state_card(
+                Severity::Warning,
+                "No model is selected for this chat.",
+                None,
+                vec![
+                    self.choose_model_action(true, "Choose a Model", cx),
+                    Self::open_connections_action(false, "Open Connections"),
+                ],
+                false,
+                cx,
+            ),
+            ChatReadiness::NeedsAttention {
+                provider_id,
+                provider,
+                reason,
+            } if readiness.key_refused() => {
+                // The same card as after a message was refused
+                // (`ThreadError::AuthenticationFailed`): one fact, one card.
+                let provider_id = provider_id.clone();
+                self.state_card(
+                    Severity::Error,
+                    format!("{provider} refused this key."),
+                    None,
+                    vec![
+                        Self::card_action("reenter-api-key", "Replace Key")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.start_reentering_api_key(
+                                    Some(provider_id.clone()),
+                                    window,
+                                    cx,
+                                );
+                            }))
+                            .into_any_element(),
+                        Self::open_connections_action(false, "Open Connections"),
+                    ],
+                    false,
+                    cx,
+                )
+            }
+            ChatReadiness::NeedsAttention {
+                provider_id,
+                provider,
+                reason,
+            } => {
+                let provider_id = provider_id.clone();
+                self.state_card(
+                    Severity::Warning,
+                    reason.clone(),
+                    Some(Self::card_detail(format!(
+                        "Messages to {provider} can fail until this is fixed."
+                    ))),
+                    vec![
+                        Self::open_connections_action(true, "Open Connections"),
+                        Self::card_secondary_action("check-connection", "Check Again")
+                            .on_click(move |_, _, cx| {
+                                let provider =
+                                    LanguageModelRegistry::read_global(cx).provider(&provider_id);
+                                if let Some(provider) = provider {
+                                    provider.refresh_models(cx);
+                                    provider.check_connection(cx).detach_and_log_err(cx);
+                                }
+                            })
+                            .into_any_element(),
+                    ],
+                    false,
+                    cx,
+                )
+            }
+        };
+        Some(card)
+    }
+
+    /// Starting points for an empty chat. They follow what is open: a file,
+    /// a project without a file, or nothing at all.
+    fn empty_state_suggestions(&self, cx: &App) -> Vec<EmptyStateSuggestion> {
+        let has_project = self
+            .project
+            .upgrade()
+            .is_some_and(|project| project.read(cx).visible_worktrees(cx).next().is_some());
+        if !has_project {
+            return vec![EmptyStateSuggestion::OpenFolder];
+        }
+
+        let active_file = self.workspace.upgrade().and_then(|workspace| {
+            let project_path = workspace.read(cx).active_item(cx)?.project_path(cx)?;
+            let file_name = project_path.path.file_name()?.to_string();
+            Some((file_name, project_path.path.as_unix_str().to_string()))
+        });
+        match active_file {
+            Some((file_name, path)) => ["Explain", "Find bugs in", "Write tests for"]
+                .into_iter()
+                .map(|verb| EmptyStateSuggestion::Prompt {
+                    label: format!("{verb} {file_name}").into(),
+                    text: format!("{verb} {path}").into(),
+                })
+                .collect(),
+            None => ["Summarize this project", "Find where to start"]
+                .into_iter()
+                .map(|text| EmptyStateSuggestion::Prompt {
+                    label: text.into(),
+                    text: text.into(),
+                })
+                .collect(),
+        }
+    }
+
+    /// What a chat shows before its first message. With nothing connected it
+    /// is the connection screen and nothing else; otherwise the mark, one
+    /// line, who will answer, and a few starting points.
+    fn render_empty_state(
+        &mut self,
+        readiness: &ChatReadiness,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let max_content_width = AgentSettings::get_global(cx).max_content_width;
+
+        // No key yet (or a rejected one being replaced): the empty state is
+        // the connection screen, nothing else.
+        if *readiness == ChatReadiness::NotConnected
+            || self.reenter_api_key
+            || self.connect_form_is_checking(cx)
+        {
+            let reentering = self.reenter_api_key;
+            let form = self.ensure_connect_form(window, cx);
+            // The composer is not on screen: whoever focused the chat gets
+            // the form instead, so a key can be pasted at once.
+            // The same when the chat itself holds the focus (it was focused
+            // before the form existed, as after the first launch's "Start
+            // Coding"): the caret belongs in the key field.
+            if !reentering
+                && (self.message_editor.focus_handle(cx).is_focused(window)
+                    || self.focus_handle.is_focused(window))
+            {
+                form.focus_handle(cx).focus(window, cx);
+            }
+            let form = form.update(cx, |form, cx| {
+                form.render_form(reentering, window, cx).into_any_element()
+            });
+            // Top-aligned: the picker can be taller than the panel, and a
+            // list that grows from the bottom could not be scrolled back up.
+            return div()
+                .id("empty-thread-connect")
+                .size_full()
+                .overflow_y_scroll()
+                .child(
+                    v_flex()
+                        .when_some(max_content_width, |this, max_w| this.max_w(max_w))
+                        .mx_auto()
+                        .w_full()
+                        .p_3()
+                        .pb_6()
+                        .child(form),
+                )
+                .into_any_element();
+        }
+
+        // Connected, but a message has nowhere to go (the model list is
+        // loading or could not be loaded): like the connection screen, the
+        // panel says that and nothing else. No invitation, no composer.
+        // A refused key is the same dead end for the invitation: a click on
+        // a suggestion could only fail (the composer stays, with its model
+        // picker, for whoever has another connection).
+        if !readiness.can_send() || readiness.key_refused() {
+            let card = self.render_readiness_card(readiness, cx);
+            return div()
+                .id("empty-thread-blocked")
+                .size_full()
+                .overflow_y_scroll()
+                .child(
+                    v_flex()
+                        .when_some(max_content_width, |this, max_w| this.max_w(max_w))
+                        .mx_auto()
+                        .w_full()
+                        .pt_3()
+                        .children(card.map(|card| card.border_b_1())),
+                )
+                .into_any_element();
+        }
+
+        let colors = cx.theme().colors();
+        let hover_background = colors.ghost_element_hover;
+        let text_color = colors.text;
+        let muted_color = colors.text_muted;
+        let link_color = colors.text_accent;
+
+        // The keychain could not store the key (Linux without a Secret
+        // Service): it works until the app quits, and the chat says so where
+        // the key was just given.
+        let session_only_key = self
+            .as_native_thread(cx)
+            .and_then(|thread| {
+                thread
+                    .read(cx)
+                    .model()
+                    .map(|model| model.provider_id.clone())
+            })
+            .and_then(|id| LanguageModelRegistry::read_global(cx).provider(&id))
+            .is_some_and(|provider| provider.key_is_session_only(cx));
+
+        // Who answers, on one line, or what stands in the way.
+        let answers_line = match readiness {
+            ChatReadiness::Ready {
+                model,
+                provider,
+                detail,
+                checking,
+            } => {
+                let provider_line = if *checking {
+                    Some(format!("{provider} · checking the key…"))
+                } else {
+                    detail
+                        .as_ref()
+                        .map(|detail| format!("{provider} · {detail}"))
+                };
+                Some(
+                    v_flex()
+                        .px_3()
+                        .gap_0p5()
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_x_1()
+                                .child(
+                                    Label::new(format!("Answers come from {model}."))
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    div()
+                                        .id("empty-state-change-model")
+                                        .cursor_pointer()
+                                        .text_ui_sm(cx)
+                                        .text_color(link_color)
+                                        .hover(|style| style.underline())
+                                        .tooltip(|_window, cx| {
+                                            Tooltip::for_action(
+                                                "Choose Another Model",
+                                                &ToggleModelSelector,
+                                                cx,
+                                            )
+                                        })
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_model_selector(window, cx);
+                                        }))
+                                        .child("Change"),
+                                ),
+                        )
+                        .children(provider_line.map(|line| {
+                            Label::new(line)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .buffer_font(cx)
+                        }))
+                        .when(session_only_key, |this| {
+                            this.child(
+                                Label::new(crate::connect_form::KEY_SESSION_ONLY_SENTENCE)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                        })
+                        .into_any_element(),
+                )
+            }
+            ChatReadiness::External => Some(
+                div()
+                    .px_3()
+                    .child(
+                        Label::new(format!("Answers come from {}.", self.agent_display_name))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element(),
+            ),
+            _ => None,
+        };
+        let readiness_card = self
+            .render_readiness_card(readiness, cx)
+            .map(|card| card.border_b_1());
+
+        let suggestions = {
+            let row_height = ui::metrics::row_height(cx);
+            let focus_ring = ui::focus_ring(cx);
+            v_flex().children(
+                self.empty_state_suggestions(cx)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, suggestion)| {
+                        let label = suggestion.label();
+                        let focus_ring = focus_ring.clone();
+                        h_flex()
+                            .id(("empty-state-suggestion", ix))
+                            .debug_selector(move || format!("empty-state-suggestion-{ix}"))
+                            .role(gpui::Role::Button)
+                            .aria_label(label.clone())
+                            .tab_index(0)
+                            .w_full()
+                            .h(row_height)
+                            .px_3()
+                            .cursor_pointer()
+                            .text_ui(cx)
+                            .text_color(muted_color)
+                            .hover(move |style| style.bg(hover_background).text_color(text_color))
+                            .focus_visible(move |mut style: gpui::StyleRefinement| {
+                                style.box_shadow = Some(focus_ring);
+                                style
+                            })
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_x_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(label),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| match &suggestion {
+                                EmptyStateSuggestion::Prompt { text, .. } => {
+                                    this.message_editor.update(cx, |editor, cx| {
+                                        editor.insert_text(text, window, cx);
+                                    });
+                                    this.message_editor.focus_handle(cx).focus(window, cx);
+                                }
+                                EmptyStateSuggestion::OpenFolder => {
+                                    window.dispatch_action(
+                                        Box::new(workspace::Open {
+                                            create_new_window: None,
+                                        }),
+                                        cx,
+                                    );
+                                }
+                            }))
+                    }),
+            )
+        };
+
+        h_flex()
+            .id("empty-thread-state")
+            .size_full()
+            .justify_center()
+            .items_end()
+            .overflow_y_scroll()
+            .child(
+                v_flex()
+                    .when_some(max_content_width, |this, max_w| this.max_w(max_w))
+                    .w_full()
+                    .pt_3()
+                    .pb_4()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .px_3()
+                            .gap_2()
+                            // The logo's two colours, as on the connection
+                            // screen: never the one-colour glyph at this size.
+                            .child(ConnectForm::brand_mark(20., cx))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .font_family(ui::DISPLAY_FONT)
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_size(rems_from_px(20_f32))
+                                    .line_height(gpui::relative(1.25))
+                                    .text_color(text_color)
+                                    .child("What are we building?"),
+                            ),
+                    )
+                    .children(answers_line)
+                    .children(readiness_card)
+                    .child(suggestions),
+            )
+            .into_any_element()
+    }
+
+    /// The single "…" of the composer: opens the row with the controls that
+    /// only some models or habits need.
+    fn render_composer_options_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let expanded = self.composer_options_expanded;
+        IconButton::new("composer-options", IconName::Ellipsis)
+            .icon_size(IconSize::Small)
+            .icon_color(Color::Muted)
+            .toggle_state(expanded)
+            .selected_icon_color(Some(Color::Default))
+            .tooltip(Tooltip::text(if expanded {
+                "Hide Options"
+            } else {
+                "More Options"
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.composer_options_expanded = !this.composer_options_expanded;
+                cx.notify();
+            }))
+    }
+
+    fn render_composer_options_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .flex_wrap()
+            .gap_0p5()
+            .pb_1()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(self.render_follow_toggle(cx))
+            .children(self.render_fast_mode_control(cx))
+            .children(self.config_options_view.clone())
+    }
+
+    /// Builds the API key form on first use and wires its outcome back here.
+    fn ensure_connect_form(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ConnectForm> {
+        if let Some(form) = &self.connect_form {
+            return form.clone();
+        }
+        let form = cx.new(|cx| ConnectForm::new(window, cx));
+        self._subscriptions.push(cx.subscribe_in(
+            &form,
+            window,
+            |this, _, event: &ConnectFormEvent, window, cx| {
+                this.reenter_api_key = false;
+                if matches!(event, ConnectFormEvent::Connected) {
+                    this.clear_thread_error(cx);
+                    this.message_editor.focus_handle(cx).focus(window, cx);
+                }
+                cx.notify();
+            },
+        ));
+        self.connect_form = Some(form.clone());
+        form
+    }
+
+    /// Whether the connection screen is checking a key the user just gave.
+    /// The provider counts as connected from the moment the key is stored,
+    /// but the screen stays until the check has answered: its result (the
+    /// balance, or "this key was refused") is shown there.
+    fn connect_form_is_checking(&self, cx: &App) -> bool {
+        self.connect_form
+            .as_ref()
+            .is_some_and(|form| form.read(cx).is_checking())
+    }
+
+    /// Whether the chat has nowhere to send a message: the built-in agent
+    /// with no model connected. The panel is then the connection screen.
+    fn needs_connection(&self, cx: &App) -> bool {
+        self.as_native_thread(cx).is_some()
+            && !LanguageModelRegistry::read_global(cx).has_authenticated_provider(cx)
+    }
+
+    /// Puts `provider_id`'s key field in place of the error. Without a
+    /// provider there is no single key to replace: the picker opens instead.
+    fn start_reentering_api_key(
+        &mut self,
+        provider_id: Option<LanguageModelProviderId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if provider_id.is_none() {
+            window.dispatch_action(Box::new(crate::ManageProviders), cx);
+            return;
+        }
+        self.reenter_api_key = true;
+        let form = self.ensure_connect_form(window, cx);
+        form.update(cx, |form, cx| form.begin_reenter(provider_id, window, cx));
+        form.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
     fn render_add_context_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.message_editor.focus_handle(cx);
         let weak_self = cx.weak_entity();
 
         PopoverMenu::new("add-context-menu")
             .trigger_with_tooltip(
-                IconButton::new("add-context", IconName::Plus)
-                    .icon_size(IconSize::Small)
-                    .icon_color(Color::Muted),
+                IconButton::new("add-context", IconName::AtSign).icon_color(Color::Muted),
                 {
                     move |_window, cx| {
                         Tooltip::for_action_in(
@@ -6947,7 +7989,7 @@ impl ThreadView {
                         .handler({
                             move |window, cx| {
                                 window.dispatch_action(
-                                    zed_actions::agent::AddSelectionToThread.boxed_clone(),
+                                    app_actions::agent::AddSelectionToThread.boxed_clone(),
                                     cx,
                                 );
                             }
@@ -6992,18 +8034,15 @@ impl ThreadView {
     fn render_follow_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let following = self.is_following(cx);
 
-        let tooltip_label = if following {
-            if self.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
-                format!("Stop Following the {}", self.agent_id)
-            } else {
-                format!("Stop Following {}", self.agent_id)
-            }
-        } else {
-            if self.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
-                format!("Follow the {}", self.agent_id)
-            } else {
-                format!("Follow {}", self.agent_id)
-            }
+        // The built-in agent's id is not a name the user knows.
+        let tooltip_label = match (
+            following,
+            self.agent_id.as_ref() == agent::IDE_AGENT_ID.as_ref(),
+        ) {
+            (true, true) => "Stop Following the Agent".to_string(),
+            (true, false) => format!("Stop Following {}", self.agent_display_name),
+            (false, true) => "Follow the Agent".to_string(),
+            (false, false) => format!("Follow {}", self.agent_display_name),
         };
 
         IconButton::new("follow-agent", IconName::Crosshair)
@@ -7039,6 +8078,7 @@ struct TokenUsageTooltip {
     output_max: String,
     show_split: bool,
     cost_label: Option<String>,
+    cost_note: &'static str,
     separator_color: Color,
     global_agents_md_loaded: bool,
     project_rules_count: usize,
@@ -7058,6 +8098,7 @@ impl Render for TokenUsageTooltip {
         let output_max = self.output_max.clone();
         let show_split = self.show_split;
         let cost_label = self.cost_label.clone();
+        let cost_note = self.cost_note;
         let global_agents_md_loaded = self.global_agents_md_loaded;
         let project_rules_count = self.project_rules_count;
         let project_entry_ids = self.project_entry_ids.clone();
@@ -7113,11 +8154,18 @@ impl Render for TokenUsageTooltip {
                             .border_t_1()
                             .border_color(cx.theme().colors().border_variant)
                             .child(
-                                Label::new("Cost")
+                                Label::new("This chat so far")
                                     .color(Color::Muted)
                                     .size(LabelSize::Small),
                             )
-                            .child(Label::new(cost_label)),
+                            .child(Label::new(cost_label))
+                            .child(
+                                div().max_w(rems_from_px(260_f32)).child(
+                                    Label::new(cost_note)
+                                        .color(Color::Muted)
+                                        .size(LabelSize::Small),
+                                ),
+                            ),
                     )
                 })
                 .when(
@@ -7475,9 +8523,6 @@ impl ThreadView {
                 let editing = self.editing_message == Some(entry_ix);
                 let editor_focus = editor.focus_handle(cx).is_focused(window);
                 let focus_border = cx.theme().colors().border_focused;
-                // Drop shadows render as a dark halo on transparent windows.
-                let opaque_window = cx.theme().window_background_appearance()
-                    == gpui::WindowBackgroundAppearance::Opaque;
 
                 let is_subagent = self.is_subagent();
                 let can_rewind = self
@@ -7495,6 +8540,7 @@ impl ThreadView {
                 } else {
                     self.agent_id.clone()
                 };
+                let user_message_group = SharedString::from(format!("user-message-{entry_ix}"));
 
                 v_flex()
                     .id(("user_message", entry_ix))
@@ -7502,28 +8548,25 @@ impl ThreadView {
                         if is_first_indented {
                             this.pt_0p5()
                         } else {
-                            this.pt_2()
+                            // A new turn starts here: more air above than below.
+                            this.pt_4()
                         }
                     })
-                    .pb_3()
-                    .px_2()
+                    .pb_2()
+                    .px_3()
                     .gap_1p5()
                     .w_full()
                     .child(
                         div()
                             .relative()
+                            .group(user_message_group.clone())
                             .child(
                                 div()
-                                    .py_3()
-                                    .px_2()
+                                    .p_3()
                                     .rounded_md()
-                                    .bg(cx.theme().colors().editor_background)
+                                    .bg(cx.theme().colors().elevated_surface_background)
                                     .border_1()
-                                    .when(is_indented, |this| {
-                                        this.py_2().px_2().when(opaque_window, |this| {
-                                            this.shadow_sm()
-                                        })
-                                    })
+                                    .when(is_indented, |this| this.py_1p5().px_2())
                                     .border_color(cx.theme().colors().border)
                                     .map(|this| {
                                         if !is_editable {
@@ -7538,14 +8581,39 @@ impl ThreadView {
                                         if editing && !editor_focus {
                                             return this.border_dashed()
                                         }
-                                        this.when(opaque_window, |this| this.shadow_md())
-                                            .hover(|s| {
-                                                s.border_color(focus_border.opacity(0.8))
-                                            })
+                                        this.hover(|s| s.border_color(focus_border))
                                     })
-                                    .text_xs()
                                     .child(editor.clone().into_any_element())
                             )
+                            // Hovering shows that the message can be edited
+                            // and sent again from here; a click in the text
+                            // does the same.
+                            .when(is_editable && !editor_focus, |this| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .top_1()
+                                        .right_1()
+                                        .bg(cx.theme().colors().elevated_surface_background)
+                                        .visible_on_hover(user_message_group.clone())
+                                        .child(
+                                            IconButton::new(
+                                                ("edit-user-message", entry_ix),
+                                                IconName::Pencil,
+                                            )
+                                            .icon_size(IconSize::XSmall)
+                                            .icon_color(Color::Muted)
+                                            .aria_label("Edit Message")
+                                            .tooltip(Tooltip::text("Edit"))
+                                            .on_click({
+                                                let editor = editor.clone();
+                                                move |_, window, cx| {
+                                                    editor.focus_handle(cx).focus(window, cx);
+                                                }
+                                            }),
+                                        ),
+                                )
+                            })
                             .when(editor_focus, |this| {
                                 let base_container = h_flex()
                                     .absolute()
@@ -7555,7 +8623,7 @@ impl ThreadView {
                                     .rounded_sm()
                                     .border_1()
                                     .border_color(cx.theme().colors().border)
-                                    .bg(cx.theme().colors().editor_background)
+                                    .bg(cx.theme().colors().elevated_surface_background)
                                     .overflow_hidden();
 
                                 let is_loading_contents = self.is_loading_contents;
@@ -7581,7 +8649,7 @@ impl ThreadView {
                                                         .icon_color(Color::Muted)
                                                         .icon_size(IconSize::XSmall)
                                                         .tooltip(Tooltip::text(
-                                                            "Editing will restart the thread from this point."
+                                                            "Editing will restart the chat from this point."
                                                         ))
                                                         .on_click(cx.listener({
                                                             let editor = editor.clone();
@@ -7640,7 +8708,7 @@ impl ThreadView {
 
                 let message_body = v_flex()
                     .w_full()
-                    .gap_3()
+                    .gap_4()
                     .children(chunks.iter().enumerate().filter_map(
                         |(chunk_ix, chunk)| match chunk {
                             AssistantMessageChunk::Message { block, .. } => {
@@ -7674,9 +8742,11 @@ impl ThreadView {
                 if is_blank {
                     Empty.into_any()
                 } else {
+                    // On the panel's 12px inset, like the header's title and
+                    // the edges of the user's box and of the composer.
                     v_flex()
-                        .px_5()
-                        .py_1p5()
+                        .px_3()
+                        .py_2()
                         .when(is_thread_bottom, |this| this.pb_4())
                         .w_full()
                         .text_ui(cx)
@@ -7793,7 +8863,7 @@ impl ThreadView {
                 .child(
                     h_flex()
                         .id("subagent_output")
-                        .px_5()
+                        .px_4()
                         .py_1()
                         .gap_2()
                         .child(Divider::horizontal())
@@ -7882,6 +8952,9 @@ impl ThreadView {
         };
 
         let is_assistant = matches!(entry, AgentThreadEntry::AssistantMessage(_));
+        // Under a question that got no answer (an error card follows) there
+        // is nothing to copy or to scroll back to: no floating actions.
+        let is_unanswered_question = matches!(entry, AgentThreadEntry::UserMessage(_));
 
         let comments_editor = self.thread_feedback.comments_editor.clone();
 
@@ -7889,7 +8962,7 @@ impl ThreadView {
             v_flex()
                 .w_full()
                 .child(primary)
-                .when(!is_assistant, |this| {
+                .when(!is_assistant && !is_unanswered_question, |this| {
                     this.child(self.render_thread_controls(
                         &thread,
                         entry_ix,
@@ -7915,7 +8988,7 @@ impl ThreadView {
                 .size_full()
                 .absolute()
                 .inset_0()
-                .bg(cx.theme().colors().panel_background)
+                .bg(cx.theme().colors().editor_background)
                 .opacity(0.8)
                 .block_mouse_except_scroll()
                 .on_click(cx.listener(Self::cancel_editing));
@@ -8163,7 +9236,8 @@ impl ThreadView {
                     .filter(|&duration| duration > STOPWATCH_THRESHOLD)
                     .map(|duration| {
                         Label::new(duration_alt_display(duration))
-                            .size(LabelSize::Small)
+                            .size(LabelSize::XSmall)
+                            .buffer_font(cx)
                             .color(Color::Muted)
                     })
             })
@@ -8177,7 +9251,8 @@ impl ThreadView {
                     .filter(|&tokens| tokens > TOKEN_THRESHOLD)
                     .map(|tokens| {
                         Label::new(format!("{} tokens", crate::humanize_token_count(tokens)))
-                            .size(LabelSize::Small)
+                            .size(LabelSize::XSmall)
+                            .buffer_font(cx)
                             .color(Color::Muted)
                     })
             })
@@ -8187,8 +9262,8 @@ impl ThreadView {
             .then(|| {
                 (self.is_subagent() && self.is_thread_feedback_enabled(cx)).then(|| {
                     let feedback = self.thread_feedback.feedback;
-                    let tooltip_meta =
-                        "Rating the thread sends all of your current conversation to the Zed team.";
+                    let tooltip_meta = "Rating the chat sends all of the current conversation to \
+                        the developers of the upstream editor.";
 
                     h_flex()
                         .child(
@@ -8251,10 +9326,8 @@ impl ThreadView {
         h_flex()
             .w_full()
             .py_1p5()
-            .px_4()
+            .px_3()
             .justify_end()
-            .opacity(0.4)
-            .hover(|s| s.opacity(1.))
             .when(
                 last_turn_tokens_label.is_some() || last_turn_clock.is_some(),
                 |this| {
@@ -8279,6 +9352,11 @@ impl ThreadView {
     }
 
     fn is_thread_feedback_enabled(&self, cx: &App) -> bool {
+        // The thumbs, `/helpful` and `/not-helpful` post the conversation to
+        // the upstream project's cloud, which this product does not use.
+        if !crate::show_zed_account_ui() {
+            return false;
+        }
         util::maybe!({
             let project = self.thread.read(cx).project().read(cx);
             let user_store = project.user_store();
@@ -8631,9 +9709,16 @@ impl ThreadView {
                 sizing_behavior: SizingBehavior::Default,
             }
         } else {
+            let min_lines = AgentSettings::get_global(cx).message_editor_min_lines;
             EditorMode::AutoHeight {
-                min_lines: AgentSettings::get_global(cx).message_editor_min_lines,
-                max_lines: Some(AgentSettings::get_global(cx).set_message_editor_max_lines()),
+                min_lines,
+                max_lines: Some(
+                    self.composer_max_lines
+                        .unwrap_or_else(|| {
+                            AgentSettings::get_global(cx).set_message_editor_max_lines()
+                        })
+                        .max(min_lines),
+                ),
             }
         };
         self.message_editor.update(cx, |editor, cx| {
@@ -8690,42 +9775,54 @@ impl ThreadView {
             IconName::ArrowDown
         };
 
+        // Nothing has come back for the last message yet.
+        let awaiting_first_output = matches!(
+            self.thread.read(cx).entries().last(),
+            Some(AgentThreadEntry::UserMessage(_))
+        )
+        .then(|| {
+            if self.as_native_connection(cx).is_some() {
+                self.current_model_name(cx)
+            } else {
+                self.agent_display_name.clone()
+            }
+        });
+
         h_flex()
             .id("generating-spinner")
             .py_2()
-            .px(rems_from_px(22_f32))
+            .px_3()
             .gap_2()
             .map(|this| {
                 if confirmation {
-                    this.child(
-                        h_flex()
-                            .w_2()
-                            .justify_center()
-                            .child(GeneratingSpinnerElement::new(SpinnerVariant::Sand)),
-                    )
-                    .child(
-                        div().min_w(rems(8.)).child(
-                            LoadingLabel::new("Awaiting Confirmation")
+                    this.child(WorkingIndicator::new("confirmation-indicator"))
+                        .child(
+                            Label::new("Awaiting Confirmation")
                                 .size(LabelSize::Small)
                                 .color(Color::Muted)
                                 .single_line(),
-                        ),
-                    )
+                        )
                 } else if is_blocked_on_terminal_command {
                     this
                 } else {
-                    this.child(
-                        h_flex()
-                            .w_2()
-                            .justify_center()
-                            .child(GeneratingSpinnerElement::new(SpinnerVariant::Dots)),
-                    )
+                    this.child(WorkingIndicator::new("generating-indicator"))
+                        // Until the first word arrives the dots alone do not say
+                        // what is going on: name who is being waited for.
+                        .when_some(awaiting_first_output, |this, who| {
+                            this.child(
+                                Label::new(format!("Waiting for {who}…"))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .single_line(),
+                            )
+                        })
                 }
             })
             .when_some(elapsed_label, |this, elapsed| {
                 this.child(
                     Label::new(elapsed)
-                        .size(LabelSize::Small)
+                        .size(LabelSize::XSmall)
+                        .buffer_font(cx)
                         .color(Color::Muted),
                 )
             })
@@ -8740,7 +9837,8 @@ impl ThreadView {
                         )
                         .child(
                             Label::new(format!("{} tokens", tokens))
-                                .size(LabelSize::Small)
+                                .size(LabelSize::XSmall)
+                                .buffer_font(cx)
                                 .color(Color::Muted),
                         ),
                 )
@@ -8789,7 +9887,7 @@ impl ThreadView {
         window: &Window,
         cx: &Context<Self>,
     ) -> Div {
-        v_flex().w_full().gap_3().children(
+        v_flex().w_full().gap_4().children(
             content
                 .blocks()
                 .enumerate()
@@ -8839,7 +9937,17 @@ impl ThreadView {
             }
         }
 
-        let panel_bg = cx.theme().colors().panel_background;
+        // One quiet row that opens. The turn does not record how long a
+        // thought took, so the row says what it is, not "Thought for 4s".
+        let thread = self.thread.read(cx);
+        let still_thinking = thread.status() == ThreadStatus::Generating
+            && entry_ix + 1 == thread.entries().len()
+            && should_auto_scroll;
+        let thinking_label = if still_thinking {
+            "Thinking"
+        } else {
+            "Thought"
+        };
 
         v_flex()
             .id(("thinking-block", chunk_ix))
@@ -8854,7 +9962,7 @@ impl ThreadView {
                     .justify_between()
                     .child(
                         h_flex()
-                            .h(window.line_height() - px(2.))
+                            .h(ui::metrics::row_height(cx))
                             .gap_1p5()
                             .overflow_hidden()
                             .child(
@@ -8863,10 +9971,9 @@ impl ThreadView {
                                     .color(Color::Muted),
                             )
                             .child(
-                                div()
-                                    .text_size(self.tool_name_font_size())
-                                    .text_color(cx.theme().colors().text_muted)
-                                    .child("Thinking"),
+                                Label::new(thinking_label)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
                             ),
                     )
                     .child(
@@ -8887,33 +9994,23 @@ impl ThreadView {
             )
             .when(is_open, |this| {
                 this.child(
-                    div()
-                        .when(is_constrained, |this| this.relative())
-                        .child(
-                            div()
-                                .id(("thinking-content", chunk_ix))
-                                .ml_1p5()
-                                .pl_3p5()
-                                .border_l_1()
-                                .border_color(self.tool_card_border_color(cx))
-                                .when(is_constrained, |this| this.max_h_64())
-                                .when_some(scroll_handle, |this, scroll_handle| {
-                                    this.track_scroll(&scroll_handle)
-                                })
-                                .overflow_hidden()
-                                .child(
-                                    self.render_message_content(
-                                        entry_ix, chunk_ix, chunk, window, cx,
-                                    ),
-                                ),
-                        )
-                        .when(is_constrained, |this| {
-                            this.child(div().absolute().inset_0().size_full().bg(linear_gradient(
-                                180.,
-                                linear_color_stop(panel_bg.opacity(0.8), 0.),
-                                linear_color_stop(panel_bg.opacity(0.), 0.1),
-                            )))
-                        }),
+                    div().when(is_constrained, |this| this.relative()).child(
+                        div()
+                            .id(("thinking-content", chunk_ix))
+                            .ml_1p5()
+                            .pl_3p5()
+                            .border_l_1()
+                            .border_color(self.tool_card_border_color(cx))
+                            .text_color(cx.theme().colors().text_muted)
+                            .when(is_constrained, |this| this.max_h_64())
+                            .when_some(scroll_handle, |this, scroll_handle| {
+                                this.track_scroll(&scroll_handle)
+                            })
+                            .overflow_hidden()
+                            .child(
+                                self.render_message_content(entry_ix, chunk_ix, chunk, window, cx),
+                            ),
+                    ),
                 )
             })
             .into_any_element()
@@ -9586,39 +10683,33 @@ impl ThreadView {
         reason: &SandboxNotAppliedReason,
         cx: &Context<Self>,
     ) -> TerminalSandboxWarning {
-        // (title, detail line, docs section slug)
-        let (title, detail, docs_section): (SharedString, SharedString, Option<&'static str>) =
-            match reason {
-                SandboxNotAppliedReason::ErrorLinuxWsl(error) => (
-                    "Couldn't create a sandbox".into(),
-                    error.user_facing_message().into(),
-                    Some(error.docs_section()),
-                ),
-                SandboxNotAppliedReason::DisabledForThisThread => {
-                    // The grant only exists because an earlier command failed to
-                    // create a sandbox; surface that same explanation here.
-                    let thread_error = self.find_thread_sandbox_error(cx);
-                    let detail = thread_error
-                        .as_ref()
-                        .map(|error| {
-                            SharedString::from(format!(
-                                "Allowed for this thread after the sandbox failed: {}",
-                                error.user_facing_message()
-                            ))
-                        })
-                        .unwrap_or_else(|| {
-                            "Unsandboxed execution is allowed for the rest of this thread.".into()
-                        });
-                    let docs_section = thread_error.as_ref().map(|error| error.docs_section());
-                    ("Ran without sandbox".into(), detail, docs_section)
-                }
-            };
+        // (title, detail line). Upstream also linked a page of its manual
+        // about sandboxing; the product has no such page.
+        let (title, detail): (SharedString, SharedString) = match reason {
+            SandboxNotAppliedReason::ErrorLinuxWsl(error) => (
+                "Couldn't create a sandbox".into(),
+                error.user_facing_message().into(),
+            ),
+            SandboxNotAppliedReason::DisabledForThisThread => {
+                // The grant only exists because an earlier command failed to
+                // create a sandbox; surface that same explanation here.
+                let thread_error = self.find_thread_sandbox_error(cx);
+                let detail = thread_error
+                    .as_ref()
+                    .map(|error| {
+                        SharedString::from(format!(
+                            "Allowed for this chat after the sandbox failed: {}",
+                            error.user_facing_message()
+                        ))
+                    })
+                    .unwrap_or_else(|| {
+                        "Unsandboxed execution is allowed for the rest of this chat.".into()
+                    });
+                ("Ran without sandbox".into(), detail)
+            }
+        };
 
-        TerminalSandboxWarning {
-            title,
-            detail,
-            docs_url: zed_urls::sandboxing_docs(docs_section, cx).into(),
-        }
+        TerminalSandboxWarning { title, detail }
     }
 
     /// Find the first terminal tool call in the thread whose sandbox couldn't be
@@ -9930,15 +11021,21 @@ impl ThreadView {
                 | ToolCallStatus::Completed
                 | ToolCallStatus::Failed
                 | ToolCallStatus::Canceled => v_flex()
+                    .when(!use_card_layout, |this| {
+                        this.mt_1()
+                            .py_2()
+                            .gap_1()
+                            .rounded_md()
+                            .bg(cx.theme().colors().background)
+                            .border_1()
+                            .border_color(self.tool_card_border_color(cx))
+                    })
                     .when(should_show_raw_input, |this| {
-                        this.mt_1p5().w_full().child(
+                        this.w_full().child(
                             v_flex()
-                                .ml(rems(0.4))
-                                .px_3p5()
+                                .px_2()
                                 .pb_1()
                                 .gap_1()
-                                .border_l_1()
-                                .border_color(self.tool_card_border_color(cx))
                                 .child(input_output_header("Raw Input:".into()))
                                 .children(tool_call.raw_input_markdown.clone().map(|input| {
                                     div().id(("tool-call-raw-input-markdown", entry_ix)).child(
@@ -9980,30 +11077,22 @@ impl ThreadView {
                         let tool_call_id = tool_call.id.clone();
 
                         this.child(
-                            div()
-                                .ml(rems(0.4))
-                                .px_3p5()
-                                .pt_2()
-                                .border_l_1()
-                                .border_color(self.tool_card_border_color(cx))
-                                .child(
-                                    IconButton::new(button_id, IconName::ChevronUp)
-                                        .full_width()
-                                        .style(ButtonStyle::Outlined)
-                                        .icon_color(Color::Muted)
-                                        .on_click(cx.listener({
-                                            move |this: &mut Self,
-                                                  _,
-                                                  window,
-                                                  cx: &mut Context<Self>| {
-                                                this.entry_view_state.update(cx, |state, _cx| {
-                                                    state.collapse_tool_call(&tool_call_id);
-                                                });
-                                                this.refresh_thread_search(window, cx);
-                                                cx.notify();
-                                            }
-                                        })),
-                                ),
+                            div().px_2().pt_1().child(
+                                IconButton::new(button_id, IconName::ChevronUp)
+                                    .full_width()
+                                    .style(ButtonStyle::Subtle)
+                                    .icon_color(Color::Muted)
+                                    .aria_label("Collapse")
+                                    .on_click(cx.listener({
+                                        move |this: &mut Self, _, window, cx: &mut Context<Self>| {
+                                            this.entry_view_state.update(cx, |state, _cx| {
+                                                state.collapse_tool_call(&tool_call_id);
+                                            });
+                                            this.refresh_thread_search(window, cx);
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
                         )
                     })
                     .into_any(),
@@ -10053,7 +11142,7 @@ impl ThreadView {
                             .justify_between()
                             .when(use_card_layout, |this| {
                                 this.p_0p5()
-                                    .rounded_t(rems_from_px(5_f32))
+                                    .rounded_t_md()
                                     .bg(self.tool_card_header_bg(cx))
                             })
                             .child(self.render_tool_call_label(
@@ -10177,6 +11266,34 @@ impl ThreadView {
                                         )
                                     })
                                     .when(
+                                        !use_card_layout
+                                            && matches!(
+                                                tool_call.status(),
+                                                ToolCallStatus::InProgress
+                                            ),
+                                        |this| {
+                                            this.child(WorkingIndicator::new(
+                                                "tool-call-working-indicator",
+                                            ))
+                                        },
+                                    )
+                                    .when(
+                                        !use_card_layout
+                                            && matches!(
+                                                tool_call.status(),
+                                                ToolCallStatus::Completed
+                                            ),
+                                        |this| {
+                                            this.child(
+                                                div().pr_0p5().child(
+                                                    Icon::new(IconName::Check)
+                                                        .size(IconSize::XSmall)
+                                                        .color(Color::Muted),
+                                                ),
+                                            )
+                                        },
+                                    )
+                                    .when(
                                         tool_call.status() == ToolCallStatus::Paused,
                                         |this| {
                                             this.child(
@@ -10254,13 +11371,15 @@ impl ThreadView {
             })
             .when(layout == ToolCallLayout::Standalone, |this| {
                 this.map(|this| {
+                    // A row with a location has 4px of its own padding for
+                    // its hover ground: its icon stays on the 12px inset.
                     if has_location && !use_card_layout {
-                        this.ml_4()
+                        this.ml_2()
                     } else {
-                        this.ml_5()
+                        this.ml_3()
                     }
                 })
-                .mr_5()
+                .mr_3()
             })
             .map(|this| {
                 if layout == ToolCallLayout::Floating {
@@ -10277,34 +11396,6 @@ impl ThreadView {
             })
             .children(permission_buttons)
             .children(generic_permissions)
-    }
-
-    /// A small "Learn more" link to the sandboxing docs, deep-linked to
-    /// `section` when provided. Shared by the sandbox warning and the two
-    /// sandbox approval prompts so the user can always reach an explanation of
-    /// what they're being asked about.
-    fn render_sandbox_docs_link(
-        &self,
-        id: &'static str,
-        section: Option<&str>,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let url = zed_urls::sandboxing_docs(section, cx);
-
-        Button::new(id, "View Sandboxing Docs")
-            .label_size(LabelSize::Small)
-            .color(Color::Muted)
-            .end_icon(
-                Icon::new(IconName::ArrowUpRight)
-                    .color(Color::Muted)
-                    .size(IconSize::XSmall),
-            )
-            .tooltip({
-                let url = url.clone();
-                move |_, cx| Tooltip::with_meta("Open Docs", None, url.clone(), cx)
-            })
-            .on_click(move |_, _, cx| cx.open_url(&url))
-            .into_any_element()
     }
 
     fn render_sandbox_authorization_details(
@@ -10574,20 +11665,6 @@ impl ThreadView {
             .children(write_section)
             .children(unsandboxed_section)
             .children(reason_section)
-            .when(!has_windows_fs_warning, |this| {
-                // The Windows-drive warning banner carries its own docs link, so
-                // skip the default one that every other sandbox prompt appends.
-                this.child(
-                    h_flex()
-                        .px_1()
-                        .py_0p5()
-                        .child(self.render_sandbox_docs_link(
-                            "sandbox-authorization-docs-link",
-                            None,
-                            cx,
-                        )),
-                )
-            })
             .into_any_element()
     }
 
@@ -10722,8 +11799,8 @@ impl ThreadView {
                             .tooltip(Tooltip::text("Configure unicode confusables warning"))
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(
-                                    Box::new(zed_actions::OpenSettingsAt {
-                                        path: zed_actions::AGENT_SANDBOX_SETTINGS_PATH.to_string(),
+                                    Box::new(app_actions::OpenSettingsAt {
+                                        path: app_actions::AGENT_SANDBOX_SETTINGS_PATH.to_string(),
                                         target: None,
                                     }),
                                     cx,
@@ -10808,12 +11885,7 @@ impl ThreadView {
                                 )
                                 .size(LabelSize::XSmall)
                                 .color(Color::Muted),
-                            )
-                            .child(h_flex().child(self.render_sandbox_docs_link(
-                                "sandbox-windows-fs-docs-link",
-                                Some("windows"),
-                                cx,
-                            ))),
+                            ),
                     )
                     .child(
                         IconButton::new("configure-ntfs-warning", IconName::Settings)
@@ -10822,8 +11894,8 @@ impl ThreadView {
                             .tooltip(Tooltip::text("Configure Windows-drive warning"))
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(
-                                    Box::new(zed_actions::OpenSettingsAt {
-                                        path: zed_actions::AGENT_SANDBOX_SETTINGS_PATH.to_string(),
+                                    Box::new(app_actions::OpenSettingsAt {
+                                        path: app_actions::AGENT_SANDBOX_SETTINGS_PATH.to_string(),
                                         target: None,
                                     }),
                                     cx,
@@ -10891,12 +11963,7 @@ impl ThreadView {
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     )
-                    .child(Label::new(details.reason.clone()).size(LabelSize::Small))
-                    .child(self.render_sandbox_docs_link(
-                        "sandbox-fallback-docs-link",
-                        details.docs_section.as_deref(),
-                        cx,
-                    )),
+                    .child(Label::new(details.reason.clone()).size(LabelSize::Small)),
             )
             .into_any_element()
     }
@@ -11088,11 +12155,19 @@ impl ThreadView {
             )
         };
 
+        // "Allow All" answers this request once and turns the question off.
+        let allow_once = choices
+            .iter()
+            .find(|choice| choice.allow.kind == acp_v2::PermissionOptionKind::AllowOnce)
+            .map(|choice| choice.build_outcome(true));
+
         h_flex()
             .w_full()
             .debug_selector(permission_buttons_selector)
             .p_1()
             .gap_2()
+            // A narrow panel puts the choice of "how long" on a second line.
+            .flex_wrap()
             .justify_between()
             .border_t_1()
             .border_color(self.tool_card_border_color(cx))
@@ -11101,6 +12176,9 @@ impl ThreadView {
                     .gap_0p5()
                     .child(
                         Button::new(("allow-btn", entry_ix), "Allow")
+                            // Outlined, never filled: Send is the panel's
+                            // one primary action. Deny stays subtle.
+                            .style(ButtonStyle::Outlined)
                             .disabled(allow_disabled)
                             .start_icon(
                                 Icon::new(IconName::Check)
@@ -11131,6 +12209,35 @@ impl ThreadView {
                                 }
                             })),
                     )
+                    .when_some(allow_once, |this, allow_once| {
+                        this.child(
+                            Button::new(("allow-all-btn", entry_ix), "Allow All")
+                                .label_size(LabelSize::Small)
+                                .disabled(allow_disabled)
+                                .tooltip(|_window, cx| {
+                                    Tooltip::with_meta(
+                                        "Allow and Stop Asking",
+                                        None,
+                                        "The agent uses its tools without asking first, in \
+                                         every chat. \"Ask Before Using Tools\" in the chat's \
+                                         … menu turns the question back on.",
+                                        cx,
+                                    )
+                                })
+                                .on_click(cx.listener({
+                                    let session_id = session_id.clone();
+                                    move |this, _, window, cx| {
+                                        this.allow_all_tools(
+                                            session_id.clone(),
+                                            request_id,
+                                            allow_once.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                    })
                     .child(
                         Button::new(("deny-btn", entry_ix), "Deny")
                             .start_icon(
@@ -11540,7 +12647,7 @@ impl ThreadView {
     fn render_diff_loading(&self, cx: &Context<Self>) -> AnyElement {
         let bar = |n: u64, width_class: &str| {
             let bg_color = cx.theme().colors().element_active;
-            let base = h_flex().h_1().rounded_full();
+            let base = h_flex().h_1().rounded_pill();
 
             let modified = match width_class {
                 "w_4_5" => base.w_3_4(),
@@ -11551,18 +12658,9 @@ impl ThreadView {
                 _ => base.w_1_2(),
             };
 
-            modified.with_animation(
-                ElementId::Integer(n),
-                Animation::new(Duration::from_secs(2)).repeat(),
-                move |tab, delta| {
-                    let delta = (delta - 0.15 * n as f32) / 0.7;
-                    let delta = 1.0 - (0.5 - delta).abs() * 2.;
-                    let delta = ease_in_out(delta.clamp(0., 1.));
-                    let delta = 0.1 + 0.9 * delta;
-
-                    tab.bg(bg_color.opacity(delta))
-                },
-            )
+            // Still bars, lighter towards the end: a shimmer would repaint
+            // the whole window on every frame for as long as the diff loads.
+            modified.bg(bg_color.opacity(1.0 - 0.15 * n as f32))
         };
 
         v_flex()
@@ -11595,7 +12693,7 @@ impl ThreadView {
         &self,
         entry_ix: usize,
         tool_call: &ToolCall,
-        is_edit: bool,
+        _is_edit: bool,
         has_failed: bool,
         has_diff_changes: bool,
         use_card_layout: bool,
@@ -11658,44 +12756,28 @@ impl ThreadView {
             .into_any_element()
         };
 
-        let gradient_overlay = {
-            div()
-                .absolute()
-                .top_0()
-                .right_0()
-                .w_12()
-                .h_full()
-                .map(|this| {
-                    if use_card_layout {
-                        this.bg(linear_gradient(
-                            90.,
-                            linear_color_stop(self.tool_card_header_bg(cx), 1.),
-                            linear_color_stop(self.tool_card_header_bg(cx).opacity(0.2), 0.),
-                        ))
-                    } else {
-                        this.bg(linear_gradient(
-                            90.,
-                            linear_color_stop(cx.theme().colors().panel_background, 1.),
-                            linear_color_stop(
-                                cx.theme().colors().panel_background.opacity(0.2),
-                                0.,
-                            ),
-                        ))
-                    }
-                })
+        // A plain row reads as a sentence ("Read src/store.rs"): the chat's
+        // body type. Inside a card the label heads code, and keeps the code
+        // font.
+        let label_style = |cx: &Context<Self>| {
+            let style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
+            if use_card_layout {
+                style.with_agent_buffer_font(cx).with_muted_text(cx)
+            } else {
+                style.with_muted_text(cx)
+            }
         };
 
         h_flex()
             .relative()
             .w_full()
-            .h(window.line_height() - px(2.))
+            .h(ui::metrics::row_height(cx))
             .text_size(self.tool_name_font_size())
             .gap_1p5()
             .when(has_location || use_card_layout, |this| this.px_1())
             .when(has_location, |this| {
                 this.cursor(CursorStyle::PointingHand)
-                    .rounded(rems_from_px(3_f32)) // Concentric border radius
-                    .hover(|s| s.bg(cx.theme().colors().element_hover.opacity(0.5)))
+                    .hover(|s| s.bg(cx.theme().colors().element_hover))
             })
             .overflow_hidden()
             .child(
@@ -11722,17 +12804,14 @@ impl ThreadView {
                             this.text_color(cx.theme().colors().text_muted)
                         }
                     })
-                    .child(
-                        self.render_markdown(
-                            tool_call.label.clone(),
-                            MarkdownStyle {
-                                prevent_mouse_interaction: true,
-                                ..MarkdownStyle::themed(MarkdownFont::Agent, window, cx)
-                                    .with_muted_text(cx)
-                            },
-                            cx,
-                        ),
-                    )
+                    .child(self.render_markdown(
+                        tool_call.label.clone(),
+                        MarkdownStyle {
+                            prevent_mouse_interaction: true,
+                            ..label_style(cx)
+                        },
+                        cx,
+                    ))
                     .tooltip(Tooltip::text("Go to File"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_tool_call_location(entry_ix, 0, window, cx);
@@ -11741,14 +12820,9 @@ impl ThreadView {
             } else {
                 h_flex()
                     .w_full()
-                    .child(self.render_markdown(
-                        tool_call.label.clone(),
-                        MarkdownStyle::themed(MarkdownFont::Agent, window, cx).with_muted_text(cx),
-                        cx,
-                    ))
+                    .child(self.render_markdown(tool_call.label.clone(), label_style(cx), cx))
                     .into_any()
             })
-            .when(!is_edit, |this| this.child(gradient_overlay))
     }
 
     fn open_tool_call_location(
@@ -12051,10 +13125,7 @@ impl ThreadView {
                             .border_color(self.tool_card_border_color(cx))
                     })
                 } else {
-                    this.ml(rems(0.4))
-                        .px_3p5()
-                        .border_l_1()
-                        .border_color(self.tool_card_border_color(cx))
+                    this.px_2()
                 }
             })
             .child(self.render_embedded_resource_label(resource))
@@ -12122,10 +13193,7 @@ impl ThreadView {
         let button_id = SharedString::from(format!("item-{}", uri));
 
         div()
-            .ml(rems(0.4))
-            .pl_2p5()
-            .border_l_1()
-            .border_color(self.tool_card_border_color(cx))
+            .px_1()
             .overflow_hidden()
             .child(
                 Button::new(button_id, label)
@@ -12225,10 +13293,8 @@ impl ThreadView {
                             .border_color(self.tool_card_border_color(cx))
                     })
                 } else {
-                    this.ml(rems(0.4))
-                        .px_3p5()
-                        .border_l_1()
-                        .border_color(self.tool_card_border_color(cx))
+                    // The frame around an opened tool row is drawn by the row.
+                    this.px_2()
                 }
             })
             .text_xs()
@@ -12277,16 +13343,7 @@ impl ThreadView {
         v_flex()
             .debug_selector(|| "agent-output-image".into())
             .gap_2()
-            .map(|this| {
-                if card_layout {
-                    this
-                } else {
-                    this.ml(rems(0.4))
-                        .px_3p5()
-                        .border_l_1()
-                        .border_color(self.tool_card_border_color(cx))
-                }
-            })
+            .map(|this| if card_layout { this } else { this.px_2() })
             .when_some(location, |this, _loc| {
                 this.child(
                     h_flex().w_full().justify_end().child(
@@ -12403,9 +13460,9 @@ impl ThreadView {
 
         let icon =
             h_flex().w_4().justify_center().child(match state.status {
-                SubagentStatus::Running => SpinnerLabel::new()
-                    .size(LabelSize::Small)
-                    .into_any_element(),
+                SubagentStatus::Running => {
+                    WorkingIndicator::new("subagent-working-indicator").into_any_element()
+                }
                 SubagentStatus::Canceled => {
                     div()
                         .id(status_icon)
@@ -12789,25 +13846,246 @@ impl ThreadView {
     }
 
     fn tool_card_header_bg(&self, cx: &Context<Self>) -> Hsla {
-        cx.theme()
-            .colors()
-            .element_background
-            .blend(cx.theme().colors().editor_foreground.opacity(0.025))
+        cx.theme().colors().surface_background
     }
 
     fn tool_card_border_color(&self, cx: &Context<Self>) -> Hsla {
-        cx.theme().colors().border.opacity(0.8)
+        cx.theme().colors().border
     }
 
+    // Tool rows are set in the mono font, which runs wider than the UI font.
     fn tool_name_font_size(&self) -> Rems {
-        rems_from_px(13_f32)
+        rems_from_px(12_f32)
     }
 
-    fn provider_by_name(name: &SharedString, cx: &App) -> Option<Arc<dyn LanguageModelProvider>> {
-        LanguageModelRegistry::read_global(cx)
-            .providers()
-            .into_iter()
-            .find(|provider| provider.name().0 == *name)
+    /// The registered provider of the model that was selected when the
+    /// current error was recorded.
+    fn error_provider(&self, cx: &App) -> Option<Arc<dyn LanguageModelProvider>> {
+        let id = self.thread_error_provider.as_ref()?;
+        LanguageModelRegistry::read_global(cx).provider(id)
+    }
+
+    /// Who is asked for answers: the provider of the selected model, or the
+    /// external agent.
+    fn answering_name(&self, cx: &App) -> SharedString {
+        match self.as_native_thread(cx) {
+            Some(thread) => thread
+                .read(cx)
+                .model()
+                .map(|model| model.provider_name.0.clone())
+                .unwrap_or_else(|| "The model".into()),
+            None => self.agent_display_name.clone(),
+        }
+    }
+
+    /// How `provider` is connected, which decides what fixes a refused
+    /// credential: a key field, a new sign-in, or the connection screen.
+    fn connection_means(
+        provider: &Arc<dyn LanguageModelProvider>,
+        cx: &mut App,
+    ) -> ConnectionMeans {
+        let id = provider.id();
+        let sign_in_title = connections::catalog(cx).into_iter().find_map(|spec| {
+            let is_this_provider =
+                matches!(&spec.backing, Backing::Provider(spec_id) if *spec_id == id);
+            (is_this_provider && spec.kind == ConnectionKind::SignIn).then_some(spec.title)
+        });
+        if let Some(title) = sign_in_title {
+            return ConnectionMeans::SignIn { title };
+        }
+        if matches!(
+            provider.settings_view(cx),
+            Some(ProviderSettingsView::ApiKey(_))
+        ) {
+            ConnectionMeans::ApiKey
+        } else {
+            ConnectionMeans::Other
+        }
+    }
+
+    /// The card every state of the chat that needs the user is told with: one
+    /// sentence, an optional second line, at most two buttons. The first
+    /// button is outlined, never filled: Send stays the panel's one primary
+    /// action.
+    fn state_card(
+        &self,
+        severity: Severity,
+        sentence: impl Into<SharedString>,
+        detail: Option<AnyElement>,
+        actions: Vec<AnyElement>,
+        dismissable: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let colors = cx.theme().colors();
+        let bar_color = match severity {
+            Severity::Error => cx.theme().status().error,
+            Severity::Warning => cx.theme().status().warning,
+            Severity::Success => cx.theme().status().success,
+            Severity::Info => colors.border_strong,
+        };
+        debug_assert!(
+            actions.len() <= 2,
+            "a state card offers at most two actions"
+        );
+
+        h_flex()
+            .relative()
+            .w_full()
+            .min_w_0()
+            .items_start()
+            .gap_2()
+            .py_2()
+            .pl_3()
+            .pr_2()
+            .border_t_1()
+            .border_color(colors.border)
+            .bg(colors.surface_background)
+            // The severity is a bar on the left edge, not a tinted box.
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(2.))
+                    .bg(bar_color),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(Label::new(sentence))
+                    .children(detail)
+                    .when(!actions.is_empty(), |this| {
+                        this.child(h_flex().pt_1().gap_1().flex_wrap().children(actions))
+                    }),
+            )
+            .when(dismissable, |this| {
+                this.child(self.dismiss_error_button(cx))
+            })
+    }
+
+    /// The second line of a card, in the secondary text style.
+    fn card_detail(text: impl Into<SharedString>) -> AnyElement {
+        Label::new(text)
+            .size(LabelSize::Small)
+            .color(Color::Muted)
+            .into_any_element()
+    }
+
+    /// The first button of a card.
+    fn card_action(id: &'static str, label: &'static str) -> Button {
+        Button::new(id, label)
+            .label_size(LabelSize::Small)
+            .style(ButtonStyle::Outlined)
+    }
+
+    /// The second button of a card.
+    fn card_secondary_action(id: &'static str, label: &'static str) -> Button {
+        Button::new(id, label).label_size(LabelSize::Small)
+    }
+
+    fn open_connections_action(first: bool, label: &'static str) -> AnyElement {
+        let button = if first {
+            Self::card_action("open-connections", label)
+        } else {
+            Self::card_secondary_action("open-connections", label)
+        };
+        button
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(crate::ManageProviders), cx);
+            })
+            .into_any_element()
+    }
+
+    fn choose_model_action(
+        &self,
+        first: bool,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let button = if first {
+            Self::card_action("open-model-selector", label)
+        } else {
+            Self::card_secondary_action("open-model-selector", label)
+        };
+        button
+            .key_binding(KeyBinding::for_action(&ToggleModelSelector, cx))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.clear_thread_error(cx);
+                this.toggle_model_selector(window, cx);
+            }))
+            .into_any_element()
+    }
+
+    fn edit_prompt_action(&self, first: bool, cx: &mut Context<Self>) -> AnyElement {
+        let button = if first {
+            Self::card_action("edit-prompt", "Edit Prompt")
+        } else {
+            Self::card_secondary_action("edit-prompt", "Edit Prompt")
+        };
+        button
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.edit_last_prompt(window, cx);
+            }))
+            .into_any_element()
+    }
+
+    fn retry_action(&self, first: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.thread.read(cx).can_retry(cx) {
+            return None;
+        }
+        let button = if first {
+            Self::card_action("retry", "Retry")
+        } else {
+            Self::card_secondary_action("retry", "Retry")
+        };
+        Some(
+            button
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.retry_generation(cx);
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// Opens the model picker of this chat, whichever kind of agent it has.
+    /// An external agent's options sit behind the composer's "…". A shortcut
+    /// that opens one of their pickers first opens that row, so the picker
+    /// has something to hang from. Returns whether the row had to be opened.
+    fn reveal_config_options(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.config_options_view.is_some() && !self.composer_options_expanded {
+            self.composer_options_expanded = true;
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn toggle_model_selector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.read(cx).status() != ThreadStatus::Idle {
+            return;
+        }
+        if self.reveal_config_options(cx) {
+            cx.on_next_frame(window, |this, window, cx| {
+                this.toggle_model_selector(window, cx);
+            });
+            return;
+        }
+        if let Some(config_options_view) = self.config_options_view.clone() {
+            let handled = config_options_view.update(cx, |view, cx| {
+                view.toggle_category_picker(acp_v2::SessionConfigOptionCategory::Model, window, cx)
+            });
+            if handled {
+                return;
+            }
+        }
+
+        if let Some(model_selector) = self.model_selector.clone() {
+            model_selector.update(cx, |model_selector, cx| model_selector.toggle(window, cx));
+        }
     }
 
     pub(crate) fn render_thread_error(
@@ -12815,129 +14093,352 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
+        // Replacing a rejected key takes the error's place above the composer.
+        // An empty thread shows the same form as its empty state instead.
+        if self.reenter_api_key && self.has_visible_conversation(cx) {
+            let form = self.ensure_connect_form(window, cx);
+            let form = form.update(cx, |form, cx| {
+                form.render_form(true, window, cx).into_any_element()
+            });
+            return Some(
+                div()
+                    .p_3()
+                    .border_t_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(form),
+            );
+        }
+
+        self.thread_error.as_ref()?;
+
+        // Everything about "which provider" is decided on the id of the model
+        // that was selected when the error arrived, never on the name the
+        // error carries.
+        let error_provider = self.error_provider(cx);
+        let provider_id = error_provider.as_ref().map(|provider| provider.id());
+        let is_unaligned = provider_id
+            .as_ref()
+            .is_some_and(|id| id.0.as_ref() == crate::UNALIGNED_PROVIDER_ID);
+        let means = error_provider
+            .as_ref()
+            .map(|provider| Self::connection_means(provider, cx));
+        let registered_name = error_provider.as_ref().map(|provider| provider.name().0);
+        let name = |from_error: &SharedString| -> SharedString {
+            registered_name
+                .clone()
+                .unwrap_or_else(|| from_error.clone())
+        };
+
         let callout = match self.thread_error.as_ref()? {
             ThreadError::Other { message, .. } => {
                 self.render_any_thread_error(message.clone(), window, cx)
             }
-            ThreadError::Refusal => self.render_refusal_error(cx),
+            ThreadError::Refusal => return Some(self.render_refusal_error(cx)),
             ThreadError::DataRetentionConsentRequired => {
                 self.render_data_retention_consent_error(cx)
             }
             ThreadError::AuthenticationRequired(error) => {
                 self.render_authentication_required_error(error.clone(), cx)
             }
-            ThreadError::ZedPaymentRequired => self.render_zed_payment_required_error(cx),
-            ThreadError::RateLimitExceeded { provider } => self.render_error_callout(
-                "Rate Limit Reached",
-                format!(
-                    "{provider}'s rate limit was reached. Zed will retry automatically. \
-                    You can also wait a moment and try again."
-                )
-                .into(),
-                true,
-                true,
-                cx,
-            ),
-            ThreadError::ServerOverloaded { provider } => self.render_error_callout(
-                "Provider Unavailable",
-                format!(
-                    "{provider}'s servers are temporarily unavailable. Zed will retry \
-                    automatically. If the problem persists, check the provider's status page."
-                )
-                .into(),
-                true,
-                true,
-                cx,
-            ),
             ThreadError::PromptTooLarge => self.render_prompt_too_large_error(cx),
-            ThreadError::NoCredentials { provider } => {
-                let message = Self::provider_by_name(provider, cx)
-                    .map(|provider| provider.missing_credentials_error_message())
-                    .unwrap_or_else(|| {
-                        format!("No credentials are configured for {provider}.").into()
-                    });
-                self.render_error_callout("Credentials Missing", message, false, true, cx)
-            }
-            ThreadError::StreamError { provider } => self.render_error_callout(
-                "Connection Interrupted",
-                format!(
-                    "The connection to {provider}'s API was interrupted. Zed will retry \
-                    automatically. If the problem persists, check your network connection."
+            ThreadError::MaxOutputTokens => Callout::new()
+                .severity(Severity::Error)
+                .icon(IconName::XCircle)
+                .title("Output Limit Reached")
+                .description(
+                    "The model stopped because it reached its maximum output length. \
+                    You can ask it to continue where it left off.",
                 )
-                .into(),
-                true,
-                true,
-                cx,
-            ),
+                .dismiss_action(self.dismiss_error_button(cx)),
+            ThreadError::NoModelSelected => return Some(self.render_no_model_card(cx)),
+
             ThreadError::AuthenticationFailed { provider } => {
-                let message = Self::provider_by_name(provider, cx)
-                    .map(|provider| provider.authentication_error_message())
-                    .unwrap_or_else(|| format!("Could not authenticate with {provider}.").into());
-                self.render_error_callout("Authentication Failed", message, false, false, cx)
+                let name = name(provider);
+                let card = match means {
+                    Some(ConnectionMeans::ApiKey) => self.state_card(
+                        Severity::Error,
+                        format!("{name} refused this key."),
+                        None,
+                        vec![
+                            Self::card_action("reenter-api-key", "Replace Key")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.start_reentering_api_key(provider_id.clone(), window, cx);
+                                }))
+                                .into_any_element(),
+                            Self::open_connections_action(false, "Open Connections"),
+                        ],
+                        true,
+                        cx,
+                    ),
+                    Some(ConnectionMeans::SignIn { title }) => self.state_card(
+                        Severity::Error,
+                        format!("Your {title} sign-in expired."),
+                        None,
+                        vec![Self::open_connections_action(true, "Sign In Again")],
+                        true,
+                        cx,
+                    ),
+                    Some(ConnectionMeans::Other) | None => self.state_card(
+                        Severity::Error,
+                        format!("{name} refused the credentials of this connection."),
+                        None,
+                        vec![Self::open_connections_action(true, "Open Connections")],
+                        true,
+                        cx,
+                    ),
+                };
+                return Some(card);
+            }
+            ThreadError::NoCredentials { provider } => {
+                let name = name(provider);
+                let card = match means {
+                    Some(ConnectionMeans::ApiKey) => self.state_card(
+                        Severity::Error,
+                        format!("No key is stored for {name}."),
+                        None,
+                        vec![
+                            Self::card_action("reenter-api-key", "Enter Key")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.start_reentering_api_key(provider_id.clone(), window, cx);
+                                }))
+                                .into_any_element(),
+                            Self::open_connections_action(false, "Open Connections"),
+                        ],
+                        true,
+                        cx,
+                    ),
+                    Some(ConnectionMeans::SignIn { title }) => self.state_card(
+                        Severity::Error,
+                        format!("Your {title} sign-in expired."),
+                        None,
+                        vec![Self::open_connections_action(true, "Sign In Again")],
+                        true,
+                        cx,
+                    ),
+                    Some(ConnectionMeans::Other) | None => self.state_card(
+                        Severity::Error,
+                        format!("{name} is not connected."),
+                        None,
+                        vec![Self::open_connections_action(true, "Open Connections")],
+                        true,
+                        cx,
+                    ),
+                };
+                return Some(card);
+            }
+            ThreadError::InsufficientCredit { provider, message } => {
+                let name = name(provider);
+                // The server's own sentence says whether the balance is empty
+                // or only too low for this request.
+                let sentence: SharedString = if message.trim().is_empty() {
+                    format!("{name} refused the request: the balance is too low.").into()
+                } else {
+                    message.clone()
+                };
+                let balance = (is_unaligned && self.balance_is_fresh)
+                    .then(|| {
+                        UnalignedLanguageModelProvider::global(cx)
+                            .and_then(|provider| provider.balance(cx))
+                    })
+                    .flatten();
+                let detail = balance.map(|balance| {
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Label::new("Balance:")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(format_balance(balance))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .buffer_font(cx),
+                        )
+                        .into_any_element()
+                });
+                let mut actions = Vec::new();
+                if is_unaligned {
+                    actions.push(
+                        Self::card_action("add-funds", "Add Funds")
+                            .end_icon(
+                                Icon::new(IconName::ArrowUpRight)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .on_click(|_, _, cx| cx.open_url(branding::PROVIDER_BILLING_URL))
+                            .into_any_element(),
+                    );
+                }
+                actions.extend(self.retry_action(actions.is_empty(), cx));
+                return Some(self.state_card(Severity::Error, sentence, detail, actions, true, cx));
+            }
+            ThreadError::ModelUnavailable { provider } => {
+                let sentence = format!(
+                    "{} does not offer {} anymore.",
+                    name(provider),
+                    self.current_model_name(cx)
+                );
+                let actions = vec![self.choose_model_action(true, "Choose Another Model", cx)];
+                return Some(self.state_card(Severity::Error, sentence, None, actions, true, cx));
+            }
+            ThreadError::ApiError { provider } => {
+                let sentence = format!(
+                    "{} does not know this model or this address (404).",
+                    name(provider)
+                );
+                let actions = vec![
+                    self.choose_model_action(true, "Choose Another Model", cx),
+                    Self::open_connections_action(false, "Open Connections"),
+                ];
+                return Some(self.state_card(Severity::Error, sentence, None, actions, true, cx));
+            }
+            ThreadError::RateLimitExceeded { provider } => {
+                let sentence = format!("{} is limiting requests.", name(provider));
+                let detail = Self::card_detail("Wait a moment before sending again.");
+                let actions = self.retry_action(true, cx).into_iter().collect();
+                return Some(self.state_card(
+                    Severity::Error,
+                    sentence,
+                    Some(detail),
+                    actions,
+                    true,
+                    cx,
+                ));
+            }
+            ThreadError::ServerOverloaded { provider } => {
+                let sentence = format!("{} is overloaded and did not answer.", name(provider));
+                let actions = self.retry_action(true, cx).into_iter().collect();
+                return Some(self.state_card(Severity::Error, sentence, None, actions, true, cx));
+            }
+            ThreadError::ServerError { provider, message } => {
+                let sentence = format!("{} did not answer.", name(provider));
+                let detail = (!message.trim().is_empty())
+                    .then(|| Self::card_detail(format!("The server said: {message}")));
+                let actions = self.retry_action(true, cx).into_iter().collect();
+                return Some(self.state_card(Severity::Error, sentence, detail, actions, true, cx));
+            }
+            ThreadError::Unreachable { provider } => {
+                let sentence = format!("Could not reach {}.", name(provider));
+                let detail = Self::card_detail("Check your network connection.");
+                let actions = self.retry_action(true, cx).into_iter().collect();
+                return Some(self.state_card(
+                    Severity::Error,
+                    sentence,
+                    Some(detail),
+                    actions,
+                    true,
+                    cx,
+                ));
+            }
+            ThreadError::StreamError { provider } => {
+                let sentence = format!("The answer from {} was cut off.", name(provider));
+                let actions = self.retry_action(true, cx).into_iter().collect();
+                return Some(self.state_card(Severity::Error, sentence, None, actions, true, cx));
             }
             ThreadError::PermissionDenied { provider, message } => {
-                let message: SharedString = message.clone().unwrap_or_else(|| {
-                    format!("{provider} rejected the request due to insufficient permissions.")
-                        .into()
-                });
-
-                self.render_error_callout("Permission Denied", message, false, false, cx)
+                let sentence = format!("{} did not allow this request.", name(provider));
+                let detail = message
+                    .clone()
+                    .filter(|message| !message.trim().is_empty())
+                    .map(Self::card_detail);
+                let actions = vec![self.choose_model_action(true, "Choose Another Model", cx)];
+                return Some(self.state_card(Severity::Error, sentence, detail, actions, true, cx));
             }
             ThreadError::ProviderRejection { message } => {
-                self.render_error_callout("Request Failed", message.clone(), true, false, cx)
+                let who = registered_name
+                    .clone()
+                    .unwrap_or_else(|| self.answering_name(cx));
+                let sentence = format!("{who} rejected the request.");
+                let detail =
+                    (!message.trim().is_empty()).then(|| Self::card_detail(message.clone()));
+                // The request itself was turned down: the same request again
+                // rarely passes, a reworded one can.
+                let mut actions = vec![self.edit_prompt_action(true, cx)];
+                actions.extend(self.retry_action(false, cx));
+                return Some(self.state_card(Severity::Error, sentence, detail, actions, true, cx));
             }
-            ThreadError::MaxOutputTokens => self.render_error_callout(
-                "Output Limit Reached",
-                "The model stopped because it reached its maximum output length. \
-                You can ask it to continue where it left off."
-                    .into(),
-                false,
-                false,
-                cx,
-            ),
-            ThreadError::NoModelSelected => self
-                .render_model_not_available_error(cx)
-                .unwrap_or_else(|| {
-                    self.render_error_callout(
-                        "No Model Selected",
-                        "Select a model from the model picker below to get started.".into(),
-                        false,
-                        false,
-                        cx,
-                    )
-                }),
-            ThreadError::ApiError { provider } => self.render_error_callout(
-                "API Error",
-                format!(
-                    "{provider}'s API returned an unexpected error. \
-                    If the problem persists, try switching models or restarting Zed."
-                )
-                .into(),
-                true,
-                true,
-                cx,
-            ),
         };
 
-        Some(div().child(callout.border_position(self.callout_border_position())))
+        Some(
+            div()
+                .border_l_1()
+                .border_color(cx.theme().status().error)
+                .child(callout.border_position(self.callout_border_position())),
+        )
     }
 
-    fn render_refusal_error(&self, cx: &mut Context<'_, Self>) -> Callout {
-        let model_or_agent_name = self.current_model_name(cx);
-        let refusal_message = format!(
-            "{} refused to respond to this prompt. \
-            This can happen when a model believes the prompt violates its content policy \
-            or safety guidelines, so rephrasing it can sometimes address the issue.",
-            model_or_agent_name
-        );
+    /// The chat was asked to send without a usable model.
+    fn render_no_model_card(&self, cx: &mut Context<Self>) -> Div {
+        let has_authenticated_provider =
+            LanguageModelRegistry::read_global(cx).has_authenticated_provider(cx);
+        if !has_authenticated_provider {
+            return self.state_card(
+                Severity::Error,
+                "No model is connected.",
+                None,
+                vec![Self::open_connections_action(true, "Open Connections")],
+                true,
+                cx,
+            );
+        }
 
-        Callout::new()
-            .severity(Severity::Error)
-            .title("Request Refused")
-            .icon(IconName::XCircle)
-            .description(refusal_message.clone())
-            .actions_slot(self.create_copy_button(&refusal_message))
-            .dismiss_action(self.dismiss_error_button(cx))
+        // The chat can be set to a model that is not there (anymore).
+        let selection =
+            self.as_native_thread(cx)
+                .and_then(|thread| match thread.read(cx).thread_model() {
+                    agent::ThreadModel::Unresolved(selected_model) => Some((
+                        selected_model.provider.clone(),
+                        selected_model.model.0.clone(),
+                    )),
+                    agent::ThreadModel::Ready(_) | agent::ThreadModel::Unset => None,
+                });
+        let sentence: SharedString = match selection {
+            Some((provider_id, model_id)) => {
+                match LanguageModelRegistry::read_global(cx).provider(&provider_id) {
+                    Some(provider) if provider.is_authenticated(cx) => {
+                        format!("{} does not list the model {model_id}.", provider.name().0,).into()
+                    }
+                    Some(provider) => format!("{} is not connected.", provider.name().0).into(),
+                    None => format!(
+                        "This chat is set to \"{}\", which is not available here.",
+                        provider_id.0
+                    )
+                    .into(),
+                }
+            }
+            None => "No model is selected for this chat.".into(),
+        };
+        let actions = vec![
+            self.choose_model_action(true, "Choose a Model", cx),
+            Self::open_connections_action(false, "Open Connections"),
+        ];
+        self.state_card(Severity::Error, sentence, None, actions, true, cx)
+    }
+
+    /// The model refused the prompt. Sending the same words again gets the
+    /// same answer, so the card leads to rewording it or to another model.
+    fn render_refusal_error(&self, cx: &mut Context<'_, Self>) -> Div {
+        let sentence = format!("{} refused this prompt.", self.current_model_name(cx));
+        // A refusal that took the prompt out of the chat put it back in the
+        // message box.
+        let detail = if self.thread.read(cx).refused_prompt_removed() {
+            "Your prompt is back in the message box: reword it and send it again."
+        } else {
+            "Reword your prompt and send it again."
+        };
+        let actions = vec![
+            self.edit_prompt_action(true, cx),
+            self.choose_model_action(false, "Choose Another Model", cx),
+        ];
+        self.state_card(
+            Severity::Error,
+            sentence,
+            Some(Self::card_detail(detail)),
+            actions,
+            true,
+            cx,
+        )
     }
 
     fn render_authentication_required_error(
@@ -12947,7 +14448,7 @@ impl ThreadView {
     ) -> Callout {
         Callout::new()
             .severity(Severity::Error)
-            .title("Authentication Required")
+            .title("Sign-in Required")
             .icon(IconName::XCircle)
             .description(error.clone())
             .actions_slot(
@@ -12959,151 +14460,9 @@ impl ThreadView {
             .dismiss_action(self.dismiss_error_button(cx))
     }
 
-    fn render_zed_payment_required_error(&self, cx: &mut Context<Self>) -> Callout {
-        const ERROR_MESSAGE: &str =
-            "You reached your free usage limit. Upgrade to Zed Pro for more prompts.";
-
-        Callout::new()
-            .severity(Severity::Error)
-            .icon(IconName::XCircle)
-            .title("Free Usage Exceeded")
-            .description(ERROR_MESSAGE)
-            .actions_slot(
-                h_flex()
-                    .gap_0p5()
-                    .child(self.upgrade_button(cx))
-                    .child(self.create_copy_button(ERROR_MESSAGE)),
-            )
-            .dismiss_action(self.dismiss_error_button(cx))
-    }
-
-    fn render_error_callout(
-        &self,
-        title: &'static str,
-        message: SharedString,
-        show_retry: bool,
-        show_copy: bool,
-        cx: &mut Context<Self>,
-    ) -> Callout {
-        let can_resume = show_retry && self.thread.read(cx).can_retry(cx);
-        let show_actions = can_resume || show_copy;
-
-        Callout::new()
-            .severity(Severity::Error)
-            .icon(IconName::XCircle)
-            .title(title)
-            .description(message.clone())
-            .when(show_actions, |callout| {
-                callout.actions_slot(
-                    h_flex()
-                        .gap_0p5()
-                        .when(can_resume, |this| this.child(self.retry_button(cx)))
-                        .when(show_copy, |this| {
-                            this.child(self.create_copy_button(message.clone()))
-                        }),
-                )
-            })
-            .dismiss_action(self.dismiss_error_button(cx))
-    }
-
-    fn render_model_not_available_error(&self, cx: &mut Context<Self>) -> Option<Callout> {
-        let thread = self.as_native_thread(cx)?;
-
-        let has_authenticated_provider =
-            LanguageModelRegistry::read_global(cx).has_authenticated_provider(cx);
-
-        let (title, description): (SharedString, SharedString) =
-            match thread.read(cx).thread_model() {
-                agent::ThreadModel::Ready(_) => return None,
-                agent::ThreadModel::Unresolved(selected_model) => {
-                    if let Some(provider) = LanguageModelRegistry::global(cx)
-                        .read(cx)
-                        .provider(&&selected_model.provider)
-                    {
-                        if !provider.is_authenticated(cx) {
-                            (
-                                format!("Failed to authenticate with {} provider", provider.name())
-                                    .into(),
-                                "Open the settings to configure the selected provider".into(),
-                            )
-                        } else {
-                            (
-                                format!("Model {} was not found", selected_model.model.0).into(),
-                                "You may need to reconfigure authentication for this provider"
-                                    .into(),
-                            )
-                        }
-                    } else {
-                        (
-                            format!("Provider {} was not found", selected_model.provider).into(),
-                            "Open the settings to configure providers".into(),
-                        )
-                    }
-                }
-                agent::ThreadModel::Unset => {
-                    if has_authenticated_provider {
-                        (
-                            "No model selected".into(),
-                            "Choose a different model or configure other providers to get started"
-                                .into(),
-                        )
-                    } else {
-                        (
-                            "No model selected".into(),
-                            "Configure a provider to get started".into(),
-                        )
-                    }
-                }
-            };
-
-        let callout = Callout::new()
-            .severity(Severity::Error)
-            .icon(IconName::XCircle)
-            .title(title)
-            .description(description)
-            .actions_slot(
-                h_flex()
-                    .gap_1()
-                    .child(self.open_llm_providers_settings_button(cx))
-                    .when(has_authenticated_provider, |this| {
-                        this.child(self.open_model_selector_button(cx))
-                    }),
-            )
-            .dismiss_action(self.dismiss_error_button(cx));
-
-        Some(callout)
-    }
-
-    fn open_llm_providers_settings_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("configure-llm-provider", "Configure Provider")
-            .label_size(LabelSize::Small)
-            .style(ButtonStyle::Filled)
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.clear_thread_error(cx);
-                window.dispatch_action(
-                    Box::new(zed_actions::OpenSettingsAt {
-                        path: "llm_providers".to_string(),
-                        target: None,
-                    }),
-                    cx,
-                );
-            }))
-    }
-
-    fn open_model_selector_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("open-model-selector", "Select Model")
-            .label_size(LabelSize::Small)
-            .style(ButtonStyle::Filled)
-            .key_binding(KeyBinding::for_action(&ToggleModelSelector, cx))
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.clear_thread_error(cx);
-                window.dispatch_action(ToggleModelSelector.boxed_clone(), cx);
-            }))
-    }
-
     fn render_prompt_too_large_error(&self, cx: &mut Context<Self>) -> Callout {
         const MESSAGE: &str = "This conversation is too long for the model's context window. \
-            Start a new thread or remove some attached files to continue.";
+            Start a new chat or remove some attached files to continue.";
 
         Callout::new()
             .severity(Severity::Error)
@@ -13119,41 +14478,20 @@ impl ThreadView {
             .dismiss_action(self.dismiss_error_button(cx))
     }
 
-    fn retry_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("retry", "Retry")
-            .label_size(LabelSize::Small)
-            .style(ButtonStyle::Filled)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.retry_generation(cx);
-            }))
-    }
-
     fn new_thread_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("new_thread", "New Thread")
+        Button::new("new_thread", "New Chat")
             .label_size(LabelSize::Small)
-            .style(ButtonStyle::Filled)
+            .style(ButtonStyle::Outlined)
             .on_click(cx.listener(|this, _, window, cx| {
                 this.clear_thread_error(cx);
                 window.dispatch_action(NewThread.boxed_clone(), cx);
             }))
     }
 
-    fn upgrade_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("upgrade", "Upgrade")
-            .label_size(LabelSize::Small)
-            .style(ButtonStyle::Tinted(ui::TintColor::Accent))
-            .on_click(cx.listener({
-                move |this, _, _, cx| {
-                    this.clear_thread_error(cx);
-                    cx.open_url(&zed_urls::upgrade_to_zed_pro_url(cx));
-                }
-            }))
-    }
-
     fn authenticate_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("authenticate", "Authenticate")
+        Button::new("authenticate", "Sign In")
             .label_size(LabelSize::Small)
-            .style(ButtonStyle::Filled)
+            .style(ButtonStyle::Outlined)
             .on_click(cx.listener({
                 move |this, _, window, cx| {
                     let server_view = this.server_view.clone();
@@ -13214,8 +14552,8 @@ impl ThreadView {
     }
 
     fn current_model_name(&self, cx: &App) -> SharedString {
-        // For native agent (Zed Agent), use the specific model name (e.g., "Claude 3.5 Sonnet")
-        // For ACP agents, use the agent name (e.g., "Claude Agent", "Gemini CLI")
+        // For the built-in agent, use the specific model name (e.g. Claude Sonnet).
+        // For ACP agents, use the agent name (e.g. Claude Agent, Gemini CLI).
         // This provides better clarity about what refused the request
         if self.as_native_connection(cx).is_some() {
             self.model_selector
@@ -13224,7 +14562,7 @@ impl ThreadView {
                 .map(|model| model.name.clone())
                 .unwrap_or_else(|| SharedString::from("The model"))
         } else {
-            // ACP agent - use the agent name (e.g., "Claude Agent", "Gemini CLI")
+            // ACP agent: use the agent name.
             self.agent_id.0.clone()
         }
     }
@@ -13294,6 +14632,12 @@ impl ThreadView {
         .on_mermaid_zoom(move |_window, _cx| {
             list_state.pause_following_tail();
         })
+        // "How do I put this code in my file?": next to Copy, a button that
+        // inserts the block at the cursor of the editor the user works in.
+        .on_insert_code_block({
+            let workspace = self.workspace.clone();
+            move |code, window, cx| insert_code_at_cursor(&workspace, code, window, cx)
+        })
     }
 
     fn create_copy_button(&self, message: impl Into<String>) -> impl IntoElement {
@@ -13338,7 +14682,7 @@ impl ThreadView {
                     move |_, _, _window, cx| {
                         #[cfg(windows)]
                         _window.dispatch_action(
-                            zed_actions::wsl_actions::OpenWsl::default().boxed_clone(),
+                            app_actions::wsl_actions::OpenWsl::default().boxed_clone(),
                             cx,
                         );
                         cx.notify();
@@ -13715,7 +15059,7 @@ impl ThreadView {
             ),
         };
 
-        let description = "To continue, run /compact or start a new thread and @-mention this one";
+        let description = "To continue, run /compact or start a new chat and @-mention this one";
 
         Some(
             Callout::new()
@@ -13726,7 +15070,7 @@ impl ThreadView {
                 .description(description)
                 .actions_slot(
                     h_flex().gap_0p5().child(
-                        Button::new("start-new-thread", "Start New Thread")
+                        Button::new("start-new-thread", "Start New Chat")
                             .label_size(LabelSize::Small)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let session_id = this.thread.read(cx).session_id().clone();
@@ -13997,6 +15341,11 @@ impl Render for ThreadView {
 
         let has_messages = self.has_visible_conversation(cx);
         let list_state = self.list_state.clone();
+        let readiness = if self.is_subagent() {
+            ChatReadiness::External
+        } else {
+            self.chat_readiness(cx)
+        };
 
         let conversation = v_flex()
             .when(self.resumed_without_history, |this| {
@@ -14009,13 +15358,25 @@ impl Render for ThreadView {
                         .child(self.render_entries(cx))
                         .vertical_scrollbar_for(&list_state, window, cx)
                         .into_any()
-                } else {
+                } else if self.is_subagent() {
                     this.into_any()
+                } else {
+                    this.flex_1()
+                        .min_h_0()
+                        .child(self.render_empty_state(&readiness, window, cx))
+                        .into_any()
                 }
             });
 
+        // A chat is on the sheet ground, under the panel's chrome header. The
+        // connection screen and the "nowhere to send" cards keep the chrome.
+        let on_sheet = !self.is_subagent() && (has_messages || readiness.can_send());
+
         v_flex()
             .key_context("AcpThread")
+            .when(on_sheet, |this| {
+                this.bg(cx.theme().colors().editor_background)
+            })
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| {
                 if this.parent_session_id.is_none() {
@@ -14225,6 +15586,12 @@ impl Render for ThreadView {
                 this.clear_queue(cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleProfileSelector, window, cx| {
+                if this.reveal_config_options(cx) {
+                    cx.on_next_frame(window, |_, window, cx| {
+                        window.dispatch_action(ToggleProfileSelector.boxed_clone(), cx);
+                    });
+                    return;
+                }
                 if let Some(config_options_view) = this.config_options_view.clone() {
                     let handled = config_options_view.update(cx, |view, cx| {
                         view.toggle_category_picker(
@@ -14239,7 +15606,14 @@ impl Render for ThreadView {
                 }
 
                 if let Some(profile_selector) = this.profile_selector.clone() {
-                    profile_selector.read(cx).menu_handle().toggle(window, cx);
+                    if !crate::show_profile_management() {
+                        // No picker to open: the shortcut flips Agent / Ask.
+                        profile_selector.update(cx, |profile_selector, cx| {
+                            profile_selector.cycle_profile(cx);
+                        });
+                    } else {
+                        profile_selector.read(cx).menu_handle().toggle(window, cx);
+                    }
                 } else if let Some(mode_selector) = this.mode_selector.clone() {
                     mode_selector.read(cx).menu_handle().toggle(window, cx);
                 }
@@ -14272,26 +15646,7 @@ impl Render for ThreadView {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleModelSelector, window, cx| {
-                if this.thread.read(cx).status() != ThreadStatus::Idle {
-                    return;
-                }
-                if let Some(config_options_view) = this.config_options_view.clone() {
-                    let handled = config_options_view.update(cx, |view, cx| {
-                        view.toggle_category_picker(
-                            acp_v2::SessionConfigOptionCategory::Model,
-                            window,
-                            cx,
-                        )
-                    });
-                    if handled {
-                        return;
-                    }
-                }
-
-                if let Some(model_selector) = this.model_selector.clone() {
-                    model_selector
-                        .update(cx, |model_selector, cx| model_selector.toggle(window, cx));
-                }
+                this.toggle_model_selector(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CycleFavoriteModels, window, cx| {
                 if this.thread.read(cx).status() != ThreadStatus::Idle {
@@ -14343,6 +15698,15 @@ impl Render for ThreadView {
             .children(self.render_skill_loading_issues(cx))
             .children(self.render_thread_retry_status_callout(cx))
             .children(self.render_thread_error(window, cx))
+            // An empty chat says who answers in its empty state. With a
+            // conversation on screen, a connection problem goes here instead.
+            .when(
+                has_messages
+                    && self.thread_error.is_none()
+                    && self.thread_retry_status.is_none()
+                    && !self.reenter_api_key,
+                |this| this.children(self.render_readiness_card(&readiness, cx)),
+            )
             .when_some(
                 match has_messages {
                     true => None,
@@ -14352,8 +15716,39 @@ impl Render for ThreadView {
             )
             .children(self.render_token_limit_callout(cx))
             .children(self.render_request_elicitations(cx))
-            .child(self.render_message_editor(window, cx))
+            // No composer while a message has nowhere to go: the connection
+            // screen, or the card above, is the whole answer.
+            .when(
+                readiness.can_send() && (has_messages || !self.connect_form_is_checking(cx)),
+                |this| {
+                    this.children(self.render_no_folder_notice(cx))
+                        .child(self.render_message_editor(window, cx))
+                },
+            )
     }
+}
+
+/// Inserts a code block of the chat at the cursor of the active editor (it
+/// replaces the selection, like typing) and hands the focus to that editor.
+/// Without an editable file in front there is nowhere to insert: nothing
+/// happens.
+fn insert_code_at_cursor(
+    workspace: &WeakEntity<Workspace>,
+    code: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(workspace) = workspace.upgrade() else {
+        return;
+    };
+    let Some(editor) = workspace.read(cx).active_item_as::<Editor>(cx) else {
+        return;
+    };
+    if editor.read(cx).read_only(cx) {
+        return;
+    }
+    editor.update(cx, |editor, cx| editor.insert(&code, window, cx));
+    editor.focus_handle(cx).focus(window, cx);
 }
 
 pub(crate) fn open_link(
@@ -14773,6 +16168,55 @@ mod tests {
                 ThreadView::activity_completion_status(reason.as_ref()),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn test_format_balance() {
+        assert_eq!(format_balance(20.5), "$20.50");
+        assert_eq!(format_balance(0.04), "$0.04");
+        assert_eq!(format_balance(0.0), "$0.00");
+        assert_eq!(format_balance(0.004), "under $0.01");
+    }
+
+    #[test]
+    fn test_only_a_chat_with_somewhere_to_send_shows_its_composer() {
+        let provider_id = LanguageModelProviderId::new("unaligned");
+        for (readiness, can_send) in [
+            (ChatReadiness::External, true),
+            (ChatReadiness::NotConnected, false),
+            (
+                ChatReadiness::LoadingModels {
+                    provider: "Unaligned".into(),
+                },
+                false,
+            ),
+            (
+                ChatReadiness::NoModels {
+                    reason: "Could not load the model list: timeout".into(),
+                },
+                false,
+            ),
+            (ChatReadiness::NoModelSelected, true),
+            (
+                ChatReadiness::NeedsAttention {
+                    provider_id,
+                    provider: "Unaligned".into(),
+                    reason: "This key was refused.".into(),
+                },
+                true,
+            ),
+            (
+                ChatReadiness::Ready {
+                    model: "Claude Sonnet 5.5".into(),
+                    provider: "Unaligned".into(),
+                    detail: Some("$20.50 left".into()),
+                    checking: false,
+                },
+                true,
+            ),
+        ] {
+            assert_eq!(readiness.can_send(), can_send, "{readiness:?}");
         }
     }
 

@@ -30,7 +30,13 @@ use theme_settings::ThemeSettings;
 use time::OffsetDateTime;
 use ui::{ContextMenu, CopyButton, Divider, prelude::*, tooltip_container};
 use util::paths::PathStyle;
-use workspace::{Workspace, notifications::NotifyTaskExt as _};
+use workspace::{
+    Workspace,
+    active_file_name::{
+        status_bar_icon, status_bar_item, status_bar_item_content, status_bar_message,
+    },
+    notifications::NotifyTaskExt as _,
+};
 
 const GIT_BLAME_MAX_AUTHOR_CHARS_DISPLAYED: usize = 20;
 const GIT_BLAME_GUTTER_MARGIN: Rems = rems(0.5);
@@ -96,13 +102,20 @@ impl Render for GitBlameStatus {
 
         div().when_some(self.text.clone(), |el, (text, tooltip)| {
             el.child(
-                Button::new("git-blame-status", text)
-                    .label_size(LabelSize::Small)
-                    .start_icon(
-                        Icon::new(IconName::FileGit)
-                            .size(IconSize::Small)
-                            .color(Color::Hint),
+                status_bar_item("git-blame-status", cx)
+                    .aria_label(text.clone())
+                    .child(
+                        status_bar_item_content()
+                            .child(status_bar_icon(IconName::FileGit))
+                            // An author and a commit summary: their case is kept.
+                            .child(
+                                status_bar_message(text, cx)
+                                    .flex_initial()
+                                    .max_w(rems_from_px(360_f32))
+                                    .truncate(),
+                            ),
                     )
+                    .tab_index(0isize)
                     .on_click(cx.listener(|this, _, window, cx| {
                         if let Some(editor) = this.active_editor.clone() {
                             let focus_handle = gpui::Focusable::focus_handle(editor.read(cx), cx);

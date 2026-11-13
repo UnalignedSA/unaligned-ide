@@ -1,9 +1,6 @@
 use gpui::{Action as _, App};
 use itertools::Itertools as _;
-use settings::{
-    AudioInputDeviceName, AudioOutputDeviceName, EditPredictionDataCollectionChoice,
-    LanguageSettingsContent, SemanticTokens, SettingsContent,
-};
+use settings::{LanguageSettingsContent, SemanticTokens, SettingsContent};
 use std::sync::{Arc, OnceLock};
 use strum::{EnumMessage, IntoDiscriminant as _, VariantArray};
 use theme::SystemAppearance;
@@ -13,9 +10,9 @@ use crate::{
     ActionLink, DynamicItem, PROJECT, SettingField, SettingItem, SettingsFieldMetadata,
     SettingsPage, SettingsPageItem, SubPageLink, USER, active_language, all_language_names,
     pages::{
-        open_audio_test_window, render_edit_prediction_setup_page, render_external_agents_page,
-        render_llm_providers_page, render_mcp_servers_page, render_sandbox_settings_page,
-        render_skills_setup_page, render_tool_permissions_setup_page,
+        render_edit_prediction_setup_page, render_external_agents_page, render_llm_providers_page,
+        render_mcp_servers_page, render_sandbox_settings_page, render_skills_setup_page,
+        render_tool_permissions_setup_page,
     },
 };
 
@@ -24,10 +21,7 @@ const DEFAULT_STRING: String = String::new();
 /// to avoid the "NO DEFAULT" case.
 const DEFAULT_EMPTY_STRING: Option<&String> = Some(&DEFAULT_STRING);
 
-const DEFAULT_AUDIO_OUTPUT: AudioOutputDeviceName = AudioOutputDeviceName(None);
-const DEFAULT_EMPTY_AUDIO_OUTPUT: Option<&AudioOutputDeviceName> = Some(&DEFAULT_AUDIO_OUTPUT);
-const DEFAULT_AUDIO_INPUT: AudioInputDeviceName = AudioInputDeviceName(None);
-const DEFAULT_EMPTY_AUDIO_INPUT: Option<&AudioInputDeviceName> = Some(&DEFAULT_AUDIO_INPUT);
+const DEFAULT_UI_DENSITY: settings::UiDensity = settings::UiDensity::Default;
 
 macro_rules! concat_sections {
     (@vec, $($arr:expr),+ $(,)?) => {{
@@ -75,7 +69,6 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         debugger_page(),
         terminal_page(),
         version_control_page(),
-        collaboration_page(),
         ai_page(cx),
         network_page(),
         developer_page(cx),
@@ -105,7 +98,7 @@ fn developer_page(cx: &App) -> SettingsPage {
     items.push(SettingsPageItem::SectionHeader("Instrumentation"));
     items.push(SettingsPageItem::SettingItem(SettingItem {
         title: "Performance Profiler",
-        description: "Collect timing data for foreground and background executor tasks so they can be inspected via `zed: open performance profiler`. May lead to increased memory usage.",
+        description: "Collect timing data for foreground and background executor tasks so they can be inspected via the \"App: Open Performance Profiler\" action. May lead to increased memory usage.",
         field: Box::new(SettingField {
             organization_override: None,
             json_path: Some("instrumentation.performance_profiler.enabled"),
@@ -141,7 +134,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("General Settings"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Accessible Mode",
-                description: "Optimize Zed's interface for assistive technology such as screen readers. When enabled, otherwise-collapsed controls stay expanded and keyboard-reachable.",
+                description: "Optimize the interface for assistive technology such as screen readers. When enabled, otherwise-collapsed controls stay expanded and keyboard-reachable.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("accessible_mode"),
@@ -267,7 +260,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "CLI Default Open Behavior",
-                description: "How `zed <path>` opens directories when no flag is specified.",
+                description: "How the command-line tool opens directories when no flag is specified.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("cli_default_open_behavior"),
@@ -289,7 +282,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Reveal If Open",
-                description: "when enabled, zed will prefer already-open buffers.",
+                description: "When enabled, a file that is already open is revealed in its pane instead of being opened in the active one.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("reveal_if_open"),
@@ -327,7 +320,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("Security"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Trust All Projects By Default",
-                description: "When opening Zed, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.",
+                description: "Avoid Restricted Mode at startup by trusting every project, so that all features work without giving permission for each new project.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("session.trust_all_projects"),
@@ -377,7 +370,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Restore On Startup",
-                description: "What to restore from the previous session when opening Zed.",
+                description: "What to restore from the previous session at startup.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("restore_on_startup"),
@@ -398,7 +391,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SettingItem(SettingItem {
                 files: USER,
                 title: "Preview Channel",
-                description: "Which settings should be activated only in Preview build of Zed.",
+                description: "Which settings apply only in Preview builds.",
                 field: Box::new(
                     SettingField {
                         organization_override: None,
@@ -428,81 +421,12 @@ fn general_page(cx: &App) -> SettingsPage {
         ]
     }
 
-    fn privacy_section() -> [SettingsPageItem; 4] {
-        [
-            SettingsPageItem::SectionHeader("Privacy"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Telemetry Diagnostics",
-                description: "Send debug information like crash reports.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("telemetry.diagnostics"),
-                    pick: |settings_content| {
-                        settings_content
-                            .telemetry
-                            .as_ref()
-                            .and_then(|telemetry| telemetry.diagnostics.as_ref())
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .telemetry
-                            .get_or_insert_default()
-                            .diagnostics = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Telemetry Metrics",
-                description: "Send anonymized usage data like what languages you're using Zed with.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("telemetry.metrics"),
-                    pick: |settings_content| {
-                        settings_content
-                            .telemetry
-                            .as_ref()
-                            .and_then(|telemetry| telemetry.metrics.as_ref())
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content.telemetry.get_or_insert_default().metrics = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Anthropic Data Retention",
-                description: "Allow sending requests to Anthropic models that cannot be offered with Zero Data Retention.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("telemetry.anthropic_retention"),
-                    pick: |settings_content| {
-                        settings_content
-                            .telemetry
-                            .as_ref()
-                            .and_then(|telemetry| telemetry.anthropic_retention.as_ref())
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .telemetry
-                            .get_or_insert_default()
-                            .anthropic_retention = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
     fn auto_update_section() -> [SettingsPageItem; 2] {
         [
-            SettingsPageItem::SectionHeader("Auto Update"),
+            SettingsPageItem::SectionHeader("Updates"),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Auto Update",
-                description: "Whether or not to automatically check for updates.",
+                title: "Check for Updates",
+                description: "Check once a day whether a newer version has been released. A newer version is announced, never downloaded or installed.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("auto_update"),
@@ -545,7 +469,6 @@ fn general_page(cx: &App) -> SettingsPage {
             security_section(),
             workspace_restoration_section(),
             scoped_settings_section(),
-            privacy_section(),
             auto_update_section(),
             extensions_section(),
         )
@@ -554,193 +477,109 @@ fn general_page(cx: &App) -> SettingsPage {
 }
 
 fn appearance_page() -> SettingsPage {
-    fn theme_section() -> [SettingsPageItem; 3] {
+    fn theme_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("Theme"),
-            SettingsPageItem::DynamicItem(DynamicItem {
-                discriminant: SettingItem {
-                    files: USER,
-                    title: "Theme Mode",
-                    description: "Choose a static, fixed theme or dynamically select themes based on appearance and light/dark modes.",
-                    field: Box::new(SettingField {
-                        organization_override: None,
-                        json_path: Some("theme$"),
-                        pick: |settings_content| {
-                            Some(&dynamic_variants::<settings::ThemeSelection>()[
-                                settings_content
-                                    .theme
-                                    .theme
-                                    .as_ref()?
-                                    .discriminant() as usize])
-                        },
-                        write: |settings_content, value, app: &App| {
-                            let Some(value) = value else {
-                                settings_content.theme.theme = None;
-                                return;
-                            };
-                            let settings_value = settings_content.theme.theme.get_or_insert_default();
-                            *settings_value = match value {
-                                settings::ThemeSelectionDiscriminants::Static => {
-                                    let name = match settings_value {
-                                        settings::ThemeSelection::Static(_) => return,
-                                        settings::ThemeSelection::Dynamic { mode, light, dark } => {
-                                            match mode {
-                                                theme_settings::ThemeAppearanceMode::Light => light.clone(),
-                                                theme_settings::ThemeAppearanceMode::Dark => dark.clone(),
-                                                theme_settings::ThemeAppearanceMode::System => {
-                                                    if SystemAppearance::global(app).is_light() {
-                                                        light.clone()
-                                                    } else {
-                                                        dark.clone()
-                                                    }
-                                                }
-                                            }
-                                        },
-                                    };
-                                    settings::ThemeSelection::Static(name)
-                                },
-                                settings::ThemeSelectionDiscriminants::Dynamic => {
-                                    let static_name = match settings_value {
-                                        settings::ThemeSelection::Static(theme_name) => theme_name.clone(),
-                                        settings::ThemeSelection::Dynamic {..} => return,
-                                    };
-
-                                    settings::ThemeSelection::Dynamic {
-                                        mode: settings::ThemeAppearanceMode::System,
-                                        light: static_name.clone(),
-                                        dark: static_name,
-                                    }
-                                },
-                            };
-                        },
-                    }),
-                    metadata: None,
-                },
-                pick_discriminant: |settings_content| {
-                    Some(settings_content.theme.theme.as_ref()?.discriminant() as usize)
-                },
-                fields: dynamic_variants::<settings::ThemeSelection>().into_iter().map(|variant| {
-                    match variant {
-                        settings::ThemeSelectionDiscriminants::Static => vec![
-                            SettingItem {
-                                files: USER,
-                                title: "Theme Name",
-                                description: "The name of your selected theme.",
-                                field: Box::new(SettingField {
-                                    organization_override: None,
-                                    json_path: Some("theme"),
-                                    pick: |settings_content| {
-                                        match settings_content.theme.theme.as_ref() {
-                                            Some(settings::ThemeSelection::Static(name)) => Some(name),
-                                            _ => None
-                                        }
-                                    },
-                                    write: |settings_content, value, _| {
-                                        let Some(value) = value else {
-                                            return;
-                                        };
-                                        match settings_content
-                                            .theme
-                                            .theme.get_or_insert_default() {
-                                                settings::ThemeSelection::Static(theme_name) => *theme_name = value,
-                                                _ => return
-                                            }
-                                    },
-                                }),
-                                metadata: None,
+            // Drawn as a grid of tiles (`appearance::render_theme_tiles_item`): a click fills
+            // the slot in use, light or dark, and keeps the other one.
+            SettingsPageItem::SettingItem(SettingItem {
+                files: USER,
+                title: "Theme",
+                description: "Point at a theme to try it on the whole window, click to keep it. Light and dark mode each remember their own theme.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("theme"),
+                    pick: |settings_content| settings_content.theme.theme.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.theme.theme = value;
+                    },
+                }),
+                metadata: None,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                files: USER,
+                title: "Mode",
+                description: "Always light, always dark, or the same as the system.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("theme.mode"),
+                    pick: |settings_content| match settings_content.theme.theme.as_ref() {
+                        Some(settings::ThemeSelection::Dynamic { mode, .. }) => Some(mode),
+                        _ => None,
+                    },
+                    write: |settings_content, value, app: &App| {
+                        let Some(mode) = value else {
+                            // Reset: back to the default mode, the two themes stay.
+                            if let Some(settings::ThemeSelection::Dynamic { mode, .. }) =
+                                settings_content.theme.theme.as_mut()
+                            {
+                                *mode = settings::ThemeAppearanceMode::Dark;
                             }
-                        ],
-                        settings::ThemeSelectionDiscriminants::Dynamic => vec![
-                            SettingItem {
-                                files: USER,
-                                title: "Mode",
-                                description: "Choose whether to use the selected light or dark theme or to follow your OS appearance configuration.",
-                                field: Box::new(SettingField {
-                                    organization_override: None,
-                                    json_path: Some("theme.mode"),
-                                    pick: |settings_content| {
-                                        match settings_content.theme.theme.as_ref() {
-                                            Some(settings::ThemeSelection::Dynamic { mode, ..}) => Some(mode),
-                                            _ => None
-                                        }
-                                    },
-                                    write: |settings_content, value, _| {
-                                        let Some(value) = value else {
-                                            return;
-                                        };
-                                        match settings_content
-                                            .theme
-                                            .theme.get_or_insert_default() {
-                                                settings::ThemeSelection::Dynamic{ mode, ..} => *mode = value,
-                                                _ => return
-                                            }
-                                    },
-                                }),
-                                metadata: None,
-                            },
-                            SettingItem {
-                                files: USER,
-                                title: "Light Theme",
-                                description: "The theme to use when mode is set to light, or when mode is set to system and it is in light mode.",
-                                field: Box::new(SettingField {
-                                    organization_override: None,
-                                    json_path: Some("theme.light"),
-                                    pick: |settings_content| {
-                                        match settings_content.theme.theme.as_ref() {
-                                            Some(settings::ThemeSelection::Dynamic { light, ..}) => Some(light),
-                                            _ => None
-                                        }
-                                    },
-                                    write: |settings_content, value, _| {
-                                        let Some(value) = value else {
-                                            return;
-                                        };
-                                        match settings_content
-                                            .theme
-                                            .theme.get_or_insert_default() {
-                                                settings::ThemeSelection::Dynamic{ light, ..} => *light = value,
-                                                _ => return
-                                            }
-                                    },
-                                }),
-                                metadata: None,
-                            },
-                            SettingItem {
-                                files: USER,
-                                title: "Dark Theme",
-                                description: "The theme to use when mode is set to dark, or when mode is set to system and it is in dark mode.",
-                                field: Box::new(SettingField {
-                                    organization_override: None,
-                                    json_path: Some("theme.dark"),
-                                    pick: |settings_content| {
-                                        match settings_content.theme.theme.as_ref() {
-                                            Some(settings::ThemeSelection::Dynamic { dark, ..}) => Some(dark),
-                                            _ => None
-                                        }
-                                    },
-                                    write: |settings_content, value, _| {
-                                        let Some(value) = value else {
-                                            return;
-                                        };
-                                        match settings_content
-                                            .theme
-                                            .theme.get_or_insert_default() {
-                                                settings::ThemeSelection::Dynamic{ dark, ..} => *dark = value,
-                                                _ => return
-                                            }
-                                    },
-                                }),
-                                metadata: None,
-                            }
-                        ],
-                    }
-                }).collect(),
+                            return;
+                        };
+                        crate::appearance::write_theme_mode(
+                            &mut settings_content.theme.theme,
+                            mode,
+                            |name| crate::appearance::is_light_theme(name, app),
+                        );
+                    },
+                }),
+                metadata: None,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                files: USER,
+                title: "Corners",
+                description: "How round buttons, inputs and menus are. The theme decides unless you choose here.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("corners"),
+                    pick: |settings_content| settings_content.theme.corners.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.theme.corners = value;
+                    },
+                }),
+                metadata: None,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                files: USER,
+                title: "Accent",
+                description: "The color of the main button, the marker of the active item, links, the cursor and the selection.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("accent"),
+                    pick: |settings_content| settings_content.theme.accent.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.theme.accent = value;
+                    },
+                }),
+                metadata: None,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                files: USER,
+                title: "Interface Density",
+                description: "How much room rows, tabs and buttons take.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("unstable.ui_density"),
+                    // The key is absent from the default settings: the default density stands in.
+                    pick: |settings_content| {
+                        settings_content
+                            .theme
+                            .ui_density
+                            .as_ref()
+                            .or(Some(&DEFAULT_UI_DENSITY))
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.theme.ui_density = value;
+                    },
+                }),
+                metadata: None,
             }),
             SettingsPageItem::DynamicItem(DynamicItem {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Icon Theme",
-                    description: "The custom set of icons Zed will associate with files and directories.",
+                    description: "The set of icons shown next to files and folders.",
                     field: Box::new(SettingField {
                         organization_override: None,
                         json_path: Some("icon_theme$"),
@@ -1669,10 +1508,91 @@ fn appearance_page() -> SettingsPage {
         ]
     }
 
+    /// The same row under another title: the two font sections say "Font Family" twice.
+    fn titled(item: SettingsPageItem, title: &'static str) -> SettingsPageItem {
+        match item {
+            SettingsPageItem::SettingItem(mut item) => {
+                item.title = title;
+                SettingsPageItem::SettingItem(item)
+            }
+            SettingsPageItem::DynamicItem(mut item) => {
+                item.discriminant.title = title;
+                SettingsPageItem::DynamicItem(item)
+            }
+            other => other,
+        }
+    }
+
+    /// The six font choices most people make, then everything else about the two fonts.
+    fn fonts_sections() -> [SettingsPageItem; 14] {
+        let [
+            _,
+            editor_family,
+            editor_size,
+            editor_weight,
+            line_height,
+            editor_features,
+            editor_fallbacks,
+        ] = buffer_font_section();
+        let [_, ui_family, ui_size, ui_weight, ui_features, ui_fallbacks] = ui_font_section();
+
+        [
+            SettingsPageItem::SectionHeader("Fonts"),
+            titled(ui_family, "UI Font"),
+            titled(ui_size, "UI Font Size"),
+            titled(editor_family, "Editor Font"),
+            titled(editor_size, "Editor Font Size"),
+            line_height,
+            SettingsPageItem::SettingItem(SettingItem {
+                files: USER,
+                title: "Ligatures",
+                description: "Join character pairs such as `->` and `!=` into one glyph in editor text.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("buffer_font_features.calt"),
+                    // Ligatures are the `calt` feature of the editor font: on unless it is set to 0.
+                    pick: |settings_content| {
+                        let calt = settings_content
+                            .theme
+                            .buffer_font_features
+                            .as_ref()?
+                            .0
+                            .get("calt")?;
+                        Some(if *calt == 0 { &false } else { &true })
+                    },
+                    write: |settings_content, value, _| {
+                        let features = settings_content
+                            .theme
+                            .buffer_font_features
+                            .get_or_insert_default();
+                        match value {
+                            Some(on) => {
+                                features.0.insert("calt".to_string(), on as u32);
+                            }
+                            None => {
+                                features.0.shift_remove("calt");
+                                if features.0.is_empty() {
+                                    settings_content.theme.buffer_font_features = None;
+                                }
+                            }
+                        }
+                    },
+                }),
+                metadata: None,
+            }),
+            SettingsPageItem::SectionHeader("Fonts and Editor Display"),
+            titled(editor_weight, "Editor Font Weight"),
+            titled(editor_features, "Editor Font Features"),
+            titled(editor_fallbacks, "Editor Font Fallbacks"),
+            titled(ui_weight, "UI Font Weight"),
+            titled(ui_features, "UI Font Features"),
+            titled(ui_fallbacks, "UI Font Fallbacks"),
+        ]
+    }
+
     let items: Box<[SettingsPageItem]> = concat_sections!(
         theme_section(),
-        buffer_font_section(),
-        ui_font_section(),
+        fonts_sections(),
         agent_panel_font_section(),
         markdown_preview_font_section(),
         mermaid_font_section(),
@@ -1683,7 +1603,7 @@ fn appearance_page() -> SettingsPage {
     );
 
     SettingsPage {
-        title: "Appearance",
+        title: crate::APPEARANCE_PAGE_TITLE,
         items,
     }
 }
@@ -1703,7 +1623,7 @@ fn keymap_page() -> SettingsPage {
                     original_window
                         .update(cx, |_workspace, original_window, cx| {
                             original_window
-                                .dispatch_action(zed_actions::OpenKeymap.boxed_clone(), cx);
+                                .dispatch_action(app_actions::OpenKeymap.boxed_clone(), cx);
                             original_window.activate_window();
                         })
                         .ok();
@@ -4048,7 +3968,7 @@ fn search_and_files_page() -> SettingsPage {
             SettingsPageItem::SectionHeader("File Scan"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Exclusions",
-                description: "Files or globs of files that will be excluded by Zed entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
+                description: "Files or globs of files that are excluded entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
                 field: Box::new(
                     SettingField {
                         organization_override: None,
@@ -4071,7 +3991,7 @@ fn search_and_files_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Inclusions",
-                description: "Files or globs of files that will be included by Zed, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down Zed's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
+                description: "Files or globs of files that are included even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
                 field: Box::new(
                     SettingField {
                         organization_override: None,
@@ -4171,7 +4091,7 @@ fn search_and_files_page() -> SettingsPage {
 }
 
 fn window_and_layout_page() -> SettingsPage {
-    fn status_bar_section() -> [SettingsPageItem; 13] {
+    fn status_bar_section() -> [SettingsPageItem; 11] {
         [
             SettingsPageItem::SectionHeader("Status Bar"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -4364,26 +4284,6 @@ fn window_and_layout_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Project Search Button",
-                description: "Show the project search button in the status bar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("search.button"),
-                    pick: |settings_content| {
-                        settings_content.editor.search.as_ref()?.button.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .editor
-                            .search
-                            .get_or_insert_default()
-                            .button = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
                 title: "Debugger Button",
                 description: "Show the debugger button in the status bar.",
                 field: Box::new(SettingField {
@@ -4397,33 +4297,10 @@ fn window_and_layout_page() -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Active File Name",
-                description: "Show the name of the active file in the status bar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("status_bar.show_active_file"),
-                    pick: |settings_content| {
-                        settings_content
-                            .status_bar
-                            .as_ref()?
-                            .show_active_file
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .status_bar
-                            .get_or_insert_default()
-                            .show_active_file = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
         ]
     }
 
-    fn title_bar_section() -> [SettingsPageItem; 13] {
+    fn title_bar_section() -> [SettingsPageItem; 9] {
         [
             SettingsPageItem::SectionHeader("Title Bar"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -4488,7 +4365,7 @@ fn window_and_layout_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Worktree Name",
-                description: "Show the worktree name button in the titlebar.",
+                description: "Prefix the branch with the worktree's name when the folder is a linked worktree.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("title_bar.show_worktree_name"),
@@ -4527,90 +4404,6 @@ fn window_and_layout_page() -> SettingsPage {
                             .title_bar
                             .get_or_insert_default()
                             .show_project_items = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Onboarding Banner",
-                description: "Show banners announcing new features in the titlebar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("title_bar.show_onboarding_banner"),
-                    pick: |settings_content| {
-                        settings_content
-                            .title_bar
-                            .as_ref()?
-                            .show_onboarding_banner
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .title_bar
-                            .get_or_insert_default()
-                            .show_onboarding_banner = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Sign In",
-                description: "Show the sign in button in the titlebar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("title_bar.show_sign_in"),
-                    pick: |settings_content| {
-                        settings_content.title_bar.as_ref()?.show_sign_in.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .title_bar
-                            .get_or_insert_default()
-                            .show_sign_in = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show User Menu",
-                description: "Show the user menu button in the titlebar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("title_bar.show_user_menu"),
-                    pick: |settings_content| {
-                        settings_content.title_bar.as_ref()?.show_user_menu.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .title_bar
-                            .get_or_insert_default()
-                            .show_user_menu = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show User Picture",
-                description: "Show user picture in the titlebar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("title_bar.show_user_picture"),
-                    pick: |settings_content| {
-                        settings_content
-                            .title_bar
-                            .as_ref()?
-                            .show_user_picture
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .title_bar
-                            .get_or_insert_default()
-                            .show_user_picture = value;
                     },
                 }),
                 metadata: None,
@@ -5346,7 +5139,7 @@ fn window_and_layout_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Window Decorations",
-                description: "(Linux only) whether Zed or your compositor should draw window decorations.",
+                description: "(Linux only) whether the IDE or your compositor should draw window decorations.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("window_decorations"),
@@ -7251,7 +7044,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Save Breakpoints",
-                description: "Whether breakpoints should be reused across Zed sessions.",
+                description: "Whether breakpoints should be reused across sessions.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("debugger.save_breakpoints"),
@@ -7288,7 +7081,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Log DAP Communications",
-                description: "Whether to log messages between active debug adapters and Zed.",
+                description: "Whether to log messages between active debug adapters and the IDE.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("debugger.log_dap_communications"),
@@ -8242,7 +8035,7 @@ fn version_control_page() -> SettingsPage {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Disable Git Integration",
-                    description: "Disable all Git integration features in Zed.",
+                    description: "Disable all Git integration features.",
                     field: Box::new(SettingField::<bool> {
                         organization_override: None,
                         json_path: Some("git.disable_git"),
@@ -8996,128 +8789,154 @@ fn version_control_page() -> SettingsPage {
     }
 }
 
-fn collaboration_page() -> SettingsPage {
-    fn calls_section() -> [SettingsPageItem; 3] {
-        [
-            SettingsPageItem::SectionHeader("Calls"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Mute On Join",
-                description: "Whether the microphone should be muted when joining a channel or a call.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("calls.mute_on_join"),
-                    pick: |settings_content| settings_content.calls.as_ref()?.mute_on_join.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.calls.get_or_insert_default().mute_on_join = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Share On Join",
-                description: "Whether your current project should be shared when joining an empty channel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("calls.share_on_join"),
-                    pick: |settings_content| {
-                        settings_content.calls.as_ref()?.share_on_join.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content.calls.get_or_insert_default().share_on_join = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    fn audio_settings() -> [SettingsPageItem; 3] {
-        [
-            SettingsPageItem::ActionLink(ActionLink {
-                title: "Test Audio".into(),
-                description: Some("Test your microphone and speaker setup".into()),
-                button_text: "Test Audio".into(),
-                on_click: Arc::new(|_settings_window, window, cx| {
-                    open_audio_test_window(window, cx);
-                }),
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Output Audio Device",
-                description: "Select output audio device",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("audio.experimental.output_audio_device"),
-                    pick: |settings_content| {
-                        settings_content
-                            .audio
-                            .as_ref()?
-                            .output_audio_device
-                            .as_ref()
-                            .or(DEFAULT_EMPTY_AUDIO_OUTPUT)
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .audio
-                            .get_or_insert_default()
-                            .output_audio_device = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Input Audio Device",
-                description: "Select input audio device",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("audio.experimental.input_audio_device"),
-                    pick: |settings_content| {
-                        settings_content
-                            .audio
-                            .as_ref()?
-                            .input_audio_device
-                            .as_ref()
-                            .or(DEFAULT_EMPTY_AUDIO_INPUT)
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .audio
-                            .get_or_insert_default()
-                            .input_audio_device = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    SettingsPage {
-        title: "Collaboration",
-        items: concat_sections![calls_section(), audio_settings()],
-    }
-}
-
 fn ai_page(cx: &App) -> SettingsPage {
-    fn general_section() -> [SettingsPageItem; 8] {
+    fn connections_section() -> [SettingsPageItem; 4] {
         [
-            SettingsPageItem::SectionHeader("General"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Disable AI",
-                description: "Whether to disable all AI features in Zed.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("disable_ai"),
-                    pick: |settings_content| settings_content.project.disable_ai.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.project.disable_ai = value;
-                    },
+            SettingsPageItem::SectionHeader("Connections"),
+            SettingsPageItem::ActionLink(ActionLink {
+                title: "Connections".into(),
+                description: Some(
+                    "Unaligned, a subscription you already have, your own key or a local model: connect them in one place."
+                        .into(),
+                ),
+                button_text: "Open Connections…".into(),
+                on_click: Arc::new(|settings_window, window, cx| {
+                    let Some(original_window) = settings_window.original_window else {
+                        return;
+                    };
+                    // `agent_ui` is not a dependency of this crate: the action is
+                    // built by its name.
+                    let action = match cx.build_action("agent::ManageProviders", None) {
+                        Ok(action) => action,
+                        Err(error) => {
+                            log::error!("cannot open the connections: {error}");
+                            return;
+                        }
+                    };
+                    original_window
+                        .update(cx, |_workspace, original_window, cx| {
+                            original_window.dispatch_action(action, cx);
+                            original_window.activate_window();
+                        })
+                        .ok();
+                    // The connections open over the main window, which not
+                    // every window system lets this one raise: make room, as
+                    // "Open Keymap" does.
+                    window.remove_window();
                 }),
-                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Models and Subscriptions".into(),
+                r#type: Default::default(),
+                json_path: Some("llm_providers"),
+                description: Some("Every connection with its state, key and settings.".into()),
+                search_aliases: &[
+                    "ai",
+                    "amazon",
+                    "anthropic",
+                    "api key",
+                    "azure",
+                    "bedrock",
+                    "chat",
+                    "claude",
+                    "copilot",
+                    "gemini",
+                    "github",
+                    "google",
+                    "gpt",
+                    "grok",
+                    "llama",
+                    "llm",
+                    "lm studio",
+                    "mistral",
+                    "ollama",
+                    "openai",
+                    "opencode",
+                    "provider",
+                    "vercel",
+                    "xai",
+                ],
+                in_json: false,
+                files: USER,
+                render: render_llm_providers_page,
+            }),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Agents with Their Own Subscription".into(),
+                r#type: Default::default(),
+                json_path: Some("agent_servers"),
+                description: Some(
+                    "Claude Code, Codex and Gemini CLI run inside the chat with your own account."
+                        .into(),
+                ),
+                search_aliases: &[
+                    "acp",
+                    "agent client protocol",
+                    "amp",
+                    "claude agent",
+                    "claude code",
+                    "codex",
+                    "copilot cli",
+                    "cursor",
+                    "external agent",
+                    "factory droid",
+                    "github copilot",
+                    "grok build",
+                    "junie",
+                    "opencode",
+                ],
+                in_json: false,
+                files: USER,
+                render: render_external_agents_page,
+            }),
+        ]
+    }
+
+    fn advanced_section() -> [SettingsPageItem; 8] {
+        [
+            SettingsPageItem::SectionHeader("Advanced"),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "MCP Servers".into(),
+                r#type: Default::default(),
+                json_path: Some("context_servers"),
+                description: Some(
+                    "View, add, configure, and remove Model Context Protocol servers.".into(),
+                ),
+                search_aliases: &["context server", "mcp", "model context protocol"],
+                in_json: false,
+                files: USER,
+                render: render_mcp_servers_page,
+            }),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Skills".into(),
+                r#type: Default::default(),
+                json_path: Some(app_actions::AGENT_SKILLS_SETTINGS_PATH),
+                description: Some("View and manage agent skills installed globally or in project worktrees.".into()),
+                search_aliases: &["agent skill", "agent skills", "custom instructions", "skill", "skills"],
+                in_json: false,
                 files: USER | PROJECT,
+                render: render_skills_setup_page,
+            }),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Sandbox".into(),
+                r#type: Default::default(),
+                json_path: Some(app_actions::AGENT_SANDBOX_SETTINGS_PATH),
+                description: Some(
+                    "Review and change the elevated terminal sandbox permissions that are always allowed without prompting."
+                        .into(),
+                ),
+                search_aliases: &[
+                    "allow",
+                    "domain",
+                    "filesystem",
+                    "network",
+                    "sandbox",
+                    "unsandboxed",
+                    "permissions",
+                ],
+                in_json: true,
+                files: USER,
+                render: render_sandbox_settings_page,
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Threads Sidebar Position",
@@ -9194,124 +9013,32 @@ fn ai_page(cx: &App) -> SettingsPage {
                 metadata: None,
                 files: USER,
             }),
-            SettingsPageItem::SubPageLink(SubPageLink {
-                title: "LLM Providers".into(),
-                r#type: Default::default(),
-                json_path: Some("llm_providers"),
-                description: Some("Configure natively-included model providers.".into()),
-                search_aliases: &[
-                    "ai",
-                    "amazon",
-                    "anthropic",
-                    "api key",
-                    "azure",
-                    "bedrock",
-                    "chat",
-                    "claude",
-                    "copilot",
-                    "gemini",
-                    "github",
-                    "google",
-                    "gpt",
-                    "grok",
-                    "llama",
-                    "llm",
-                    "lm studio",
-                    "mistral",
-                    "ollama",
-                    "openai",
-                    "opencode",
-                    "provider",
-                    "vercel",
-                    "xai",
-                ],
-                in_json: false,
-                files: USER,
-                render: render_llm_providers_page,
-            }),
-            SettingsPageItem::SubPageLink(SubPageLink {
-                title: "External Agents".into(),
-                r#type: Default::default(),
-                json_path: Some("agent_servers"),
-                description: Some(
-                    "View, add, and remove agents connected through the Agent Client Protocol."
-                        .into(),
-                ),
-                search_aliases: &[
-                    "acp",
-                    "agent client protocol",
-                    "amp",
-                    "claude agent",
-                    "claude code",
-                    "codex",
-                    "copilot cli",
-                    "cursor",
-                    "external agent",
-                    "factory droid",
-                    "github copilot",
-                    "grok build",
-                    "junie",
-                    "opencode",
-                ],
-                in_json: false,
-                files: USER,
-                render: render_external_agents_page,
-            }),
-            SettingsPageItem::SubPageLink(SubPageLink {
-                title: "MCP Servers".into(),
-                r#type: Default::default(),
-                json_path: Some("context_servers"),
-                description: Some(
-                    "View, add, configure, and remove Model Context Protocol servers.".into(),
-                ),
-                search_aliases: &["context server", "mcp", "model context protocol"],
-                in_json: false,
-                files: USER,
-                render: render_mcp_servers_page,
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Disable AI",
+                description: "Turn off every AI feature: chat, inline edit and tab completion.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("disable_ai"),
+                    pick: |settings_content| settings_content.project.disable_ai.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.project.disable_ai = value;
+                    },
+                }),
+                metadata: None,
+                files: USER | PROJECT,
             }),
         ]
     }
 
-    fn agent_configuration_section(_cx: &App) -> Box<[SettingsPageItem]> {
-        let mut items = vec![SettingsPageItem::SectionHeader("Agent Configuration")];
+    fn chat_section(_cx: &App) -> Box<[SettingsPageItem]> {
+        let mut items = vec![SettingsPageItem::SectionHeader("Chat")];
 
         items.extend([
-            SettingsPageItem::SubPageLink(SubPageLink {
-                title: "Skills".into(),
-                r#type: Default::default(),
-                json_path: Some(zed_actions::AGENT_SKILLS_SETTINGS_PATH),
-                description: Some("View and manage agent skills installed globally or in project worktrees.".into()),
-                search_aliases: &["agent skill", "agent skills", "custom instructions", "skill", "skills"],
-                in_json: false,
-                files: USER | PROJECT,
-                render: render_skills_setup_page,
-            }),
-            SettingsPageItem::SubPageLink(SubPageLink {
-                title: "Sandbox".into(),
-                r#type: Default::default(),
-                json_path: Some(zed_actions::AGENT_SANDBOX_SETTINGS_PATH),
-                description: Some(
-                    "Review and change the elevated terminal sandbox permissions that are always allowed without prompting."
-                        .into(),
-                ),
-                search_aliases: &[
-                    "allow",
-                    "domain",
-                    "filesystem",
-                    "network",
-                    "sandbox",
-                    "unsandboxed",
-                    "permissions",
-                ],
-                in_json: true,
-                files: USER,
-                render: render_sandbox_settings_page,
-            }),
             SettingsPageItem::SubPageLink(SubPageLink {
                 title: "Tool Permissions".into(),
                 r#type: Default::default(),
                 json_path: Some("agent.tool_permissions"),
-                description: Some("Set up regex patterns to auto-allow, auto-deny, or always request confirmation, for specific tool inputs.".into()),
+                description: Some("Choose what the agent may do without asking, what it may never do, and what it must confirm.".into()),
                 search_aliases: &[],
                 in_json: true,
                 files: USER,
@@ -9494,7 +9221,7 @@ fn ai_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Terminal Thread Init Command",
-                description: "Command to automatically run when Zed creates a Terminal Thread shell in the agent panel. Runs in your configured shell.",
+                description: "Command run automatically when a Terminal Thread shell is created in the chat. Runs in your configured shell.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("agent.terminal_init_command"),
@@ -9654,7 +9381,7 @@ fn ai_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Auto-Generate Thread Titles",
-                description: "Whether to automatically generate a title for Zed Agent threads using the summary model. When disabled, titles are only created when manually requested.",
+                description: "Whether to automatically generate a title for the built-in agent's threads using the summary model. When disabled, titles are only created when manually requested.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("agent.auto_generate_thread_titles"),
@@ -9740,6 +9467,18 @@ fn ai_page(cx: &App) -> SettingsPage {
         items.into_boxed_slice()
     }
 
+    // The shared section (also on the Languages page) opens on its own header,
+    // "Edit Predictions"; on this page the feature is called by its plain name.
+    fn tab_completion_section() -> Vec<SettingsPageItem> {
+        let mut items = vec![SettingsPageItem::SectionHeader("Tab Completion")];
+        items.extend(
+            edit_prediction_language_settings_section()
+                .into_iter()
+                .skip(1),
+        );
+        items
+    }
+
     fn edit_prediction_display_sub_section() -> [SettingsPageItem; 1] {
         [SettingsPageItem::SettingItem(SettingItem {
             title: "Display Mode",
@@ -9774,17 +9513,18 @@ fn ai_page(cx: &App) -> SettingsPage {
         title: "AI",
         items: concat_sections!(
             @vec,
-            general_section(),
-            agent_configuration_section(cx),
-            edit_prediction_language_settings_section(),
+            connections_section(),
+            chat_section(cx),
+            tab_completion_section(),
             edit_prediction_display_sub_section(),
+            advanced_section(),
         )
         .into(),
     }
 }
 
 fn network_page() -> SettingsPage {
-    fn network_section() -> [SettingsPageItem; 3] {
+    fn network_section() -> [SettingsPageItem; 2] {
         [
             SettingsPageItem::SectionHeader("Network"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -9800,23 +9540,6 @@ fn network_page() -> SettingsPage {
                 }),
                 metadata: Some(Box::new(SettingsFieldMetadata {
                     placeholder: Some("socks5h://localhost:10808"),
-                    ..Default::default()
-                })),
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Server URL",
-                description: "The URL of the Zed server to connect to.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("server_url"),
-                    pick: |settings_content| settings_content.server_url.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.server_url = value;
-                    },
-                }),
-                metadata: Some(Box::new(SettingsFieldMetadata {
-                    placeholder: Some("https://zed.dev"),
                     ..Default::default()
                 })),
                 files: USER,
@@ -10386,7 +10109,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             SettingsPageItem::SectionHeader("Autoclose"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Autoclose",
-                description: "Whether to automatically type closing characters for you. For example, when you type '(', Zed will automatically add a closing ')' at the correct position.",
+                description: "Whether to automatically type closing characters for you. For example, when you type '(', a closing ')' is added at the correct position.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("languages.$(language).use_autoclose"),
@@ -10406,7 +10129,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Auto Surround",
-                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', Zed will automatically surround text with ().",
+                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', the text is surrounded with ().",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("languages.$(language).use_auto_surround"),
@@ -10954,7 +10677,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Prefer LSP",
-                description: "Use LSP tasks over Zed language extension tasks.",
+                description: "Use LSP tasks over language extension tasks.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("languages.$(language).tasks.prefer_lsp"),
@@ -11706,53 +11429,18 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
     )
 }
 
-fn edit_prediction_language_settings_section() -> [SettingsPageItem; 5] {
+fn edit_prediction_language_settings_section() -> [SettingsPageItem; 4] {
     [
         SettingsPageItem::SectionHeader("Edit Predictions"),
         SettingsPageItem::SubPageLink(SubPageLink {
             title: "Configure Providers".into(),
             r#type: Default::default(),
             json_path: Some("edit_predictions.providers"),
-            description: Some("Set up different edit prediction providers in complement to Zed's built-in Zeta model.".into()),
+            description: Some("Choose which service suggests code as you type.".into()),
             search_aliases: &[],
             in_json: false,
             files: USER,
-            render: render_edit_prediction_setup_page
-        }),
-        SettingsPageItem::SettingItem(SettingItem {
-            title: "Data Collection",
-            description: "Controls whether Zed may collect training data when using Zed's Edit Predictions. Data is only collected for files in projects detected as open source. The default value uses the preference previously set via the status-bar toggle, or false if no preference has been stored.",
-            field: Box::new(SettingField {
-                organization_override: Some(|org_settings| {
-                    const DATA_COLLECTION_DISABLED: EditPredictionDataCollectionChoice = EditPredictionDataCollectionChoice::No;
-
-                    if !org_settings.edit_prediction.is_feedback_enabled {
-                        Some(&DATA_COLLECTION_DISABLED)
-                    } else {
-                        None
-                    }
-                }),
-                json_path: Some("edit_predictions.allow_data_collection"),
-                pick: |settings_content| {
-                    settings_content
-                        .project
-                        .all_languages
-                        .edit_predictions
-                        .as_ref()?
-                        .allow_data_collection
-                        .as_ref()
-                },
-                write: |settings_content, value, _app| {
-                    settings_content
-                        .project
-                        .all_languages
-                        .edit_predictions
-                        .get_or_insert_default()
-                        .allow_data_collection = value;
-                },
-            }),
-            metadata: None,
-            files: USER,
+            render: render_edit_prediction_setup_page,
         }),
         SettingsPageItem::SettingItem(SettingItem {
             title: "Show Edit Predictions",

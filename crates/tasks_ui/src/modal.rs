@@ -18,9 +18,9 @@ use ui::{
     prelude::*,
 };
 
+pub use app_actions::{Rerun, Spawn};
 use util::{ResultExt, truncate_and_trailoff};
 use workspace::{ModalView, Workspace};
-pub use zed_actions::{Rerun, Spawn};
 
 /// A modal used to spawn new tasks.
 pub struct TasksModalDelegate {
@@ -542,7 +542,7 @@ impl PickerDelegate for TasksModalDelegate {
                         .child(history_run_icon.unwrap())
                         .into_any_element(),
                 )
-                .spacing(ListItemSpacing::Sparse)
+                .spacing(ListItemSpacing::Dense)
                 .when_some(tooltip_label, |list_item, item_label| {
                     list_item.tooltip(move |_, _| item_label.clone())
                 })
@@ -651,18 +651,15 @@ impl PickerDelegate for TasksModalDelegate {
             None
         };
         Some(
-            h_flex()
-                .w_full()
-                .p_1p5()
-                .justify_between()
-                .border_t_1()
-                .border_color(cx.theme().colors().border_variant)
+            picker::footer(cx)
                 .child(
                     left_button
                         .map(|(label, action)| {
                             let keybind = KeyBinding::for_action(&*action, cx);
 
                             Button::new("edit-current-task", label)
+                                .label_size(LabelSize::Small)
+                                .color(Color::Muted)
                                 .key_binding(keybind)
                                 .on_click(move |_, window, cx| {
                                     window.dispatch_action(action.boxed_clone(), cx);
@@ -686,6 +683,8 @@ impl PickerDelegate for TasksModalDelegate {
                             };
 
                             Button::new("spawn-onehshot", spawn_oneshot_label)
+                                .label_size(LabelSize::Small)
+                                .color(Color::Muted)
                                 .key_binding(KeyBinding::for_action(&*action, cx))
                                 .on_click(move |_, window, cx| {
                                     window.dispatch_action(action.boxed_clone(), cx)
@@ -699,6 +698,8 @@ impl PickerDelegate for TasksModalDelegate {
                                 "Spawn Without History"
                             };
                             Button::new("spawn", label)
+                                .label_size(LabelSize::Small)
+                                .color(Color::Muted)
                                 .key_binding(KeyBinding::for_action(&menu::SecondaryConfirm, cx))
                                 .on_click(move |_, window, cx| {
                                     window.dispatch_action(menu::SecondaryConfirm.boxed_clone(), cx)
@@ -710,6 +711,8 @@ impl PickerDelegate for TasksModalDelegate {
                                 if is_recent_selected { "Rerun" } else { "Spawn" };
 
                             Button::new("spawn", run_entry_label)
+                                .label_size(LabelSize::Small)
+                                .color(Color::Muted)
                                 .key_binding(KeyBinding::for_action(&menu::Confirm, cx))
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(menu::Confirm.boxed_clone(), cx);
@@ -759,7 +762,7 @@ mod tests {
         fs.insert_tree(
             path!("/dir"),
             json!({
-                ".zed": {
+                ".unaligned": {
                     "tasks.json": r#"[
                         {
                             "label": "example task",
@@ -932,17 +935,17 @@ mod tests {
         fs.insert_tree(
             path!("/dir"),
             json!({
-                ".zed": {
+                ".unaligned": {
                     "tasks.json": r#"[
                         {
-                            "label": "hello from $ZED_FILE:$ZED_ROW:$ZED_COLUMN",
+                            "label": "hello from $IDE_FILE:$IDE_ROW:$IDE_COLUMN",
                             "command": "echo",
-                            "args": ["hello", "from", "$ZED_FILE", ":", "$ZED_ROW", ":", "$ZED_COLUMN"]
+                            "args": ["hello", "from", "$IDE_FILE", ":", "$IDE_ROW", ":", "$IDE_COLUMN"]
                         },
                         {
-                            "label": "opened now: $ZED_WORKTREE_ROOT",
+                            "label": "opened now: $IDE_WORKTREE_ROOT",
                             "command": "echo",
-                            "args": ["opened", "now:", "$ZED_WORKTREE_ROOT"]
+                            "args": ["opened", "now:", "$IDE_WORKTREE_ROOT"]
                         }
                     ]"#,
                 },
@@ -1152,12 +1155,12 @@ mod tests {
                             ..TaskTemplate::default()
                         },
                         TaskTemplate {
-                            label: "TypeScript task from file $ZED_FILE".to_string(),
+                            label: "TypeScript task from file $IDE_FILE".to_string(),
                             command: "npm run build".to_string(),
                             ..TaskTemplate::default()
                         },
                         TaskTemplate {
-                            label: "Another task from file $ZED_FILE".to_string(),
+                            label: "Another task from file $IDE_FILE".to_string(),
                             command: "npm run lint".to_string(),
                             ..TaskTemplate::default()
                         },

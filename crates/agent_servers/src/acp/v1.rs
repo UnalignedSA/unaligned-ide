@@ -605,7 +605,7 @@ impl AcpConnection {
 
         let (connection_tx, connection_rx) = futures::channel::oneshot::channel();
         let connection_future = connect_client_future(
-            "zed",
+            branding::APP_ID,
             transport,
             dispatch_tx.clone(),
             connection_tx,
@@ -648,7 +648,7 @@ impl AcpConnection {
                 acp::InitializeRequest::new(ProtocolVersion::V1)
                     .client_capabilities(client_capabilities)
                     .client_info(
-                        acp::Implementation::new("zed", version)
+                        acp::Implementation::new(branding::APP_ID, version)
                             .title(release_channel.map(ToOwned::to_owned)),
                     ),
             )
@@ -1880,7 +1880,7 @@ pub mod test_support {
 
     impl crate::AgentServer for FakeAcpAgentServer {
         fn logo(&self) -> ui::IconName {
-            ui::IconName::ZedAgent
+            ui::IconName::AppAgent
         }
 
         fn agent_id(&self) -> AgentId {
@@ -10463,7 +10463,7 @@ fn handle_session_notification(
     ) && !ctx.accepts_subagent_updates
     {
         log::warn!(
-            "Ignoring a subagents update for {session_id:?}: Zed did not advertise the subagents capability"
+            "Ignoring a subagents update for {session_id:?}: the client did not advertise the subagents capability"
         );
         return;
     }

@@ -35,8 +35,8 @@ use editor::{
 use fs::Fs;
 use futures::{FutureExt, channel::mpsc};
 use gpui::{
-    App, Context, Entity, Focusable, Global, HighlightStyle, Subscription, Task, TaskExt,
-    UpdateGlobal, WeakEntity, Window, point,
+    App, Context, Entity, Focusable, Global, HighlightStyle, Subscription, Task, UpdateGlobal,
+    WeakEntity, Window, point,
 };
 use language::{Buffer, Point, Selection, TransactionId};
 use language_model::{ConfigurationError, LanguageModelRegistry};
@@ -50,7 +50,6 @@ use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use ui::prelude::*;
 use util::{RangeExt, ResultExt, maybe};
 use workspace::{Toast, Workspace, dock::Panel, notifications::NotificationId};
-use zed_actions::agent::OpenSettings;
 
 pub fn init(fs: Arc<dyn Fs>, prompt_builder: Arc<PromptBuilder>, cx: &mut App) {
     cx.set_global(InlineAssistant::new(fs, prompt_builder));
@@ -205,7 +204,7 @@ impl InlineAssistant {
 
     pub fn inline_assist(
         workspace: &mut Workspace,
-        action: &zed_actions::assistant::InlineAssist,
+        action: &app_actions::assistant::InlineAssist,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
@@ -260,41 +259,19 @@ impl InlineAssistant {
                 }
             };
 
-        if let Some(error) = configuration_error(cx) {
-            if let ConfigurationError::ProviderNotAuthenticated(provider) = error {
-                cx.spawn(async move |_, cx| {
-                    cx.update(|cx| provider.authenticate(cx)).await?;
-                    anyhow::Ok(())
-                })
-                .detach_and_log_err(cx);
-
-                if configuration_error(cx).is_none() {
-                    handle_assist(window, cx);
-                }
-            } else {
-                cx.spawn_in(window, async move |_, cx| {
-                    let answer = cx
-                        .prompt(
-                            gpui::PromptLevel::Warning,
-                            &error.to_string(),
-                            None,
-                            &["Configure", "Cancel"],
-                        )
-                        .await
-                        .ok();
-                    if let Some(answer) = answer
-                        && answer == 0
-                    {
-                        cx.update(|window, cx| window.dispatch_action(Box::new(OpenSettings), cx))
-                            .ok();
-                    }
-                    anyhow::Ok(())
-                })
-                .detach_and_log_err(cx);
-            }
-        } else {
-            handle_assist(window, cx);
+        // The prompt box opens in every case: without a usable model it shows
+        // how to connect one instead of an error dialog. Stored credentials may
+        // simply not be loaded yet, so ask for them; the box follows the result.
+        if let Some(ConfigurationError::ProviderNotAuthenticated(provider)) =
+            configuration_error(cx)
+        {
+            cx.spawn(async move |_, cx| {
+                cx.update(|cx| provider.authenticate(cx)).await.ok();
+            })
+            .detach();
         }
+
+        handle_assist(window, cx);
     }
 
     fn codegen_ranges(
@@ -611,7 +588,9 @@ impl InlineAssistant {
         let prompt_editor_height = prompt_editor.update(cx, |prompt_editor, cx| {
             prompt_editor
                 .editor
-                .update(cx, |editor, cx| editor.max_point(cx).row().0 + 1 + 2)
+                // The instruction, plus the box's padding and status row; the
+                // editor then fits the block to what is actually rendered.
+                .update(cx, |editor, cx| editor.max_point(cx).row().0 + 1 + 3)
         });
         let assist_blocks = vec![
             BlockProperties {
@@ -638,7 +617,7 @@ impl InlineAssistant {
                         .h_full()
                         .w_full()
                         .border_t_1()
-                        .border_color(cx.theme().status().info_border)
+                        .border_color(cx.theme().colors().border)
                         .into_any_element()
                 }),
                 priority: 0,
@@ -1234,18 +1213,22 @@ impl InlineAssistant {
             return;
         }
 
-        let Some((user_prompt, mention_set)) = assist.user_prompt(cx).zip(assist.mention_set(cx))
+        let Some(((user_prompt, request_prompt), mention_set)) = assist
+            .user_prompt(cx)
+            .zip(assist.request_prompt(cx))
+            .zip(assist.mention_set(cx))
         else {
             return;
         };
 
         self.prompt_history.retain(|prompt| *prompt != user_prompt);
-        self.prompt_history.push_back(user_prompt.clone());
+        self.prompt_history.push_back(user_prompt);
         if self.prompt_history.len() > PROMPT_HISTORY_MAX_LEN {
             self.prompt_history.pop_front();
         }
 
-        let Some(model) = LanguageModelRegistry::read_global(cx).inline_assistant_model() else {
+        // Short selections go to the fast model unless the user chose one.
+        let Some(model) = assist.codegen.read(cx).model(cx) else {
             return;
         };
 
@@ -1253,7 +1236,7 @@ impl InlineAssistant {
         assist
             .codegen
             .update(cx, |codegen, cx| {
-                codegen.start(model, user_prompt, context_task, cx)
+                codegen.start(model, request_prompt, context_task, cx)
             })
             .log_err();
     }
@@ -1318,7 +1301,7 @@ impl InlineAssistant {
             } else {
                 editor.highlight_gutter::<GutterPendingRange>(
                     gutter_pending_ranges,
-                    |cx| cx.theme().status().info_background,
+                    |cx| cx.theme().colors().element_selected,
                     cx,
                 )
             }
@@ -1329,7 +1312,7 @@ impl InlineAssistant {
             } else {
                 editor.highlight_gutter::<GutterTransformedRange>(
                     gutter_transformed_ranges,
-                    |cx| cx.theme().status().info,
+                    |cx| cx.theme().status().created,
                     cx,
                 )
             }
@@ -1350,9 +1333,11 @@ impl InlineAssistant {
 
             editor.clear_row_highlights::<InlineAssist>();
             for row_range in inserted_row_ranges {
+                // Generated lines read as a diff: added here, removed in the
+                // blocks above them.
                 editor.highlight_rows::<InlineAssist>(
                     row_range,
-                    |cx| cx.theme().status().info_background,
+                    |cx| cx.theme().status().created_background,
                     Default::default(),
                     cx,
                 );
@@ -1757,6 +1742,13 @@ impl InlineAssist {
         Some(decorations.prompt_editor.read(cx).prompt(cx))
     }
 
+    /// What is sent to the model: the prompt, with the instructions it
+    /// follows up on.
+    fn request_prompt(&self, cx: &App) -> Option<String> {
+        let decorations = self.decorations.as_ref()?;
+        Some(decorations.prompt_editor.read(cx).request_prompt(cx))
+    }
+
     fn mention_set(&self, cx: &App) -> Option<Entity<MentionSet>> {
         let decorations = self.decorations.as_ref()?;
         Some(decorations.prompt_editor.read(cx).mention_set().clone())
@@ -2070,7 +2062,7 @@ pub mod evals {
                 prompt.clone(),
                 |cx| {
                     // Reconfigure to use a real model instead of the fake one
-                    let model_name = std::env::var("ZED_AGENT_MODEL")
+                    let model_name = std::env::var("IDE_AGENT_MODEL")
                         .unwrap_or("anthropic/claude-sonnet-4-latest".into());
 
                     let selected_model = SelectedModel::from_str(&model_name)

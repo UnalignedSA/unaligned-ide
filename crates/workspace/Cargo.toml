@@ -30,6 +30,7 @@ any_vec.workspace = true
 agent_settings.workspace = true
 anyhow.workspace = true
 async-recursion.workspace = true
+branding.workspace = true
 client.workspace = true
 chrono.workspace = true
 clock.workspace = true
@@ -71,7 +72,7 @@ ui_input.workspace = true
 url.workspace = true
 util.workspace = true
 uuid.workspace = true
-zed_actions.workspace = true
+app_actions.workspace = true
 
 [dev-dependencies]
 client = { workspace = true, features = ["test-support"] }

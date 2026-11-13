@@ -7,9 +7,13 @@ use gpui::{
 };
 use language::{Buffer, BufferEvent, LanguageName, Toolchain, ToolchainScope};
 use project::{Project, ProjectPath, Toolchains, WorktreeId, toolchain_store::ToolchainStoreEvent};
-use ui::{Button, ButtonCommon, Clickable, LabelSize, SharedString, Tooltip};
+use ui::{ButtonCommon, Clickable, SharedString, Tooltip};
 use util::{maybe, rel_path::RelPath};
-use workspace::{HideStatusItem, StatusItemView, Workspace, item::ItemHandle};
+use workspace::{
+    HideStatusItem, StatusItemView, Workspace,
+    active_file_name::{status_bar_item, status_bar_item_content, status_bar_text},
+    item::ItemHandle,
+};
 
 use crate::ToolchainSelector;
 
@@ -237,9 +241,19 @@ impl Render for ActiveToolchain {
             return div().hidden();
         };
 
+        // The bar shows the short name ("Python 3.9.6"); where the toolchain lives
+        // ("(global (Command Line Tools for Xcode))") is in the tooltip.
+        let full_name = active_toolchain.name.clone();
+        let short_name: SharedString = match full_name.split_once(" (") {
+            Some((short, _)) if !short.trim().is_empty() => short.trim().to_string().into(),
+            _ => full_name.clone(),
+        };
+        let tooltip_title = format!("Select {}", self.term);
+
         div().child(
-            Button::new("change-toolchain", active_toolchain.name.clone())
-                .label_size(LabelSize::Small)
+            status_bar_item("change-toolchain", cx)
+                .aria_label(format!("{}: {}", self.term, active_toolchain.name))
+                .child(status_bar_item_content().child(status_bar_text(short_name, cx)))
                 .tab_index(0isize)
                 .on_click(cx.listener(|this, _, window, cx| {
                     if let Some(workspace) = this.workspace.upgrade() {
@@ -248,7 +262,9 @@ impl Render for ActiveToolchain {
                         });
                     }
                 }))
-                .tooltip(Tooltip::text(format!("Select {}", self.term))),
+                .tooltip(move |_window, cx| {
+                    Tooltip::with_meta(tooltip_title.clone(), None, full_name.clone(), cx)
+                }),
         )
     }
 }

@@ -1,6 +1,7 @@
 mod components;
 mod extension_suggestions;
 mod extension_version_selector;
+mod registry_schedule;
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -23,15 +24,16 @@ use gpui::{
 use picker::{Picker, PickerDelegate};
 use project::DirectoryLister;
 
+use app_actions::ExtensionCategoryFilter;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{Settings, SettingsContent};
 use strum::IntoEnumIterator as _;
 use theme_settings::ThemeSettings;
 use ui::{
-    Banner, CommonAnimationExt, ContextMenu, Divider, ListItem, ListItemSpacing, ScrollableHandle,
-    Switch, ToggleButtonGroup, ToggleButtonGroupSize, ToggleButtonGroupStyle, ToggleButtonSimple,
-    WithScrollbar, prelude::*,
+    Banner, ContextMenu, DropdownMenu, DropdownStyle, EmptyState, InputShell, InputShellGround,
+    InputShellSize, ListItem, ListItemSpacing, ScrollableHandle, Switch, TextTab, TextTabSize,
+    TextTabStrip, WithScrollbar, prelude::*,
 };
 use util::ResultExt;
 use vim_mode_setting::VimModeSetting;
@@ -40,7 +42,6 @@ use workspace::{
     item::{Item, ItemEvent},
     workspace_error::{ErrorAction, ErrorSeverity, WorkspaceError},
 };
-use zed_actions::ExtensionCategoryFilter;
 
 use crate::components::{ExtensionCard, extension_provides_label};
 use crate::extension_version_selector::{
@@ -48,7 +49,7 @@ use crate::extension_version_selector::{
 };
 
 actions!(
-    zed,
+    app,
     [
         /// Installs an extension from a local directory for development.
         InstallDevExtension,
@@ -57,7 +58,7 @@ actions!(
 
 /// Rebuilds an installed dev extension.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, gpui::Action)]
-#[action(namespace = zed)]
+#[action(namespace = app)]
 #[serde(deny_unknown_fields)]
 pub struct RebuildDevExtension {
     /// The ID of the dev extension to rebuild.
@@ -110,6 +111,7 @@ pub fn init(cx: &mut App) {
     })
     .detach();
     extension_suggestions::init(cx);
+    registry_schedule::init(cx);
 
     cx.observe_new(move |workspace: &mut Workspace, window, _cx| {
         if window.is_none() {
@@ -117,7 +119,7 @@ pub fn init(cx: &mut App) {
         }
         workspace
             .register_action(
-                move |workspace, action: &zed_actions::Extensions, window, cx| {
+                move |workspace, action: &app_actions::Extensions, window, cx| {
                     let provides_filter = action.category_filter.map(|category| match category {
                         ExtensionCategoryFilter::Themes => ExtensionProvides::Themes,
                         ExtensionCategoryFilter::IconThemes => ExtensionProvides::IconThemes,
@@ -475,6 +477,9 @@ impl ExtensionsPage {
             };
             this.update_local_search_results(cx);
             this.fetch_extensions(FetchDebounce::Immediate, None, cx);
+            // Opening this page is the visible reason to contact the registry:
+            // installed extensions are brought up to date now, not at startup.
+            registry_schedule::page_opened(cx);
             this
         })
     }
@@ -501,7 +506,7 @@ impl ExtensionsPage {
             workspace
                 .update(cx, |_workspace, cx| {
                     window.dispatch_action(
-                        zed_actions::theme_selector::Toggle {
+                        app_actions::theme_selector::Toggle {
                             themes_filter: Some(themes),
                         }
                         .boxed_clone(),
@@ -520,7 +525,7 @@ impl ExtensionsPage {
             workspace
                 .update(cx, |_workspace, cx| {
                     window.dispatch_action(
-                        zed_actions::icon_theme_selector::Toggle {
+                        app_actions::icon_theme_selector::Toggle {
                             themes_filter: Some(icon_themes),
                         }
                         .boxed_clone(),
@@ -860,41 +865,77 @@ impl ExtensionsPage {
         .detach_and_log_err(cx);
     }
 
-    fn render_search(&self, cx: &mut Context<Self>) -> Div {
+    fn render_search(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut key_context = KeyContext::new_with_defaults(cx.platform_info().os);
         key_context.add("BufferSearchBar");
 
-        let editor_border = if self.query_contains_error {
-            Color::Error.color(cx)
-        } else {
-            cx.theme().colors().border
-        };
-
-        h_flex()
-            .key_context(key_context)
-            .h_8()
-            .min_w(rems_from_px(384_f32))
-            .flex_1()
-            .pl_1p5()
-            .pr_2()
-            .gap_2()
-            .border_1()
-            .border_color(editor_border)
-            .rounded_md()
-            .child(Icon::new(IconName::MagnifyingGlass).color(Color::Muted))
-            .child(
-                div()
-                    .flex_1()
-                    .child(self.render_text_input(&self.query_editor, cx)),
+        // The page is on the sheet ground, so the field is raised (D9).
+        InputShell::new()
+            .size(InputShellSize::Medium)
+            .ground(InputShellGround::Raised)
+            .focused(self.query_editor.focus_handle(cx).is_focused(window))
+            .invalid(self.query_contains_error)
+            .start_slot(
+                Icon::new(IconName::MagnifyingGlass)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
             )
             .when(self.fetch_state == ExtensionFetchState::Fetching, |this| {
-                this.child(
-                    Icon::new(IconName::LoadCircle)
-                        .size(IconSize::Small)
-                        .color(Color::Muted)
-                        .with_rotate_animation(2),
+                // Text, not a spinner: nothing on this page animates (D7).
+                this.end_slot(
+                    Label::new("Loading…")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
                 )
             })
+            .key_context(key_context)
+            .flex_1()
+            .min_w_0()
+            .child(self.render_text_input(&self.query_editor, cx))
+    }
+
+    /// Where the list comes from and when the registry is contacted (D10:
+    /// "say what leaves the machine").
+    fn render_provenance(&self) -> impl IntoElement {
+        v_flex().w_full().gap_0p5().child(
+            Label::new(provenance_text(
+                &extension_host::registry_host(),
+                extension_host::registry_is_default(),
+            ))
+            .size(LabelSize::Small)
+            .color(Color::Muted),
+        )
+    }
+
+    /// The kinds of extension, as one menu at the end of the filter strip.
+    fn render_kind_menu(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.provides_filter;
+        let this = cx.weak_entity();
+        let menu = ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
+            let kinds = std::iter::once(None).chain(
+                ExtensionProvides::iter()
+                    .filter(|provides| kind_is_listed(*provides))
+                    .map(Some),
+            );
+            for kind in kinds {
+                let this = this.clone();
+                menu = menu.toggleable_entry(
+                    kind_label(kind),
+                    current == kind,
+                    IconPosition::Start,
+                    None,
+                    move |_window, cx| {
+                        this.update(cx, |this, cx| this.change_provides_filter(kind, cx))
+                            .ok();
+                    },
+                );
+            }
+            menu
+        });
+
+        DropdownMenu::new("extension-kind", kind_label(current), menu)
+            .style(DropdownStyle::Subtle)
+            .trigger_size(ButtonSize::Default)
     }
 
     fn retry_button(&self, cx: &mut Context<Self>) -> Button {
@@ -929,7 +970,7 @@ impl ExtensionsPage {
         EditorElement::new(
             editor,
             EditorStyle {
-                background: cx.theme().colors().editor_background,
+                background: gpui::transparent_black(),
                 local_player: cx.theme().players().local(),
                 text: text_style,
                 ..Default::default()
@@ -992,67 +1033,39 @@ impl ExtensionsPage {
         // The `Installed` filter is fully local, so fetch progress and failure are
         // only relevant to the other filters.
         let fetch_is_relevant = self.filter != ExtensionFilter::Installed;
-        let fetch_failure_is_relevant =
-            self.fetch_state == ExtensionFetchState::Failed && fetch_is_relevant;
+        let fetch_failed = self.fetch_state == ExtensionFetchState::Failed && fetch_is_relevant;
         let is_loading = self.fetch_state == ExtensionFetchState::Fetching && fetch_is_relevant;
-        let message = if is_loading {
-            "Loading extensions…"
-        } else if fetch_failure_is_relevant {
-            "Failed to load extensions. Please check your connection and try again."
+
+        let empty_state = if is_loading {
+            EmptyState::new("Loading extensions…")
+        } else if fetch_failed {
+            EmptyState::new("Could not reach the extension registry")
+                .icon(IconName::Warning)
+                .description(format!(
+                    "{} did not answer. Installed extensions keep working.",
+                    extension_host::registry_host()
+                ))
+                .action(
+                    "Retry",
+                    None,
+                    cx.listener(|this, _, _, cx| {
+                        this.fetch_extensions(FetchDebounce::Immediate, None, cx);
+                    }),
+                )
+        } else if has_search || self.provides_filter.is_some() {
+            EmptyState::new("No extensions match")
+                .description("Try another search, or another kind of extension.")
         } else {
             match self.filter {
-                ExtensionFilter::All => {
-                    if has_search {
-                        "No extensions that match your search."
-                    } else {
-                        "No extensions."
-                    }
-                }
-                ExtensionFilter::Installed => {
-                    if has_search {
-                        "No installed extensions that match your search."
-                    } else {
-                        "No installed extensions."
-                    }
-                }
-                ExtensionFilter::NotInstalled => {
-                    if has_search {
-                        "No not installed extensions that match your search."
-                    } else {
-                        "No not installed extensions."
-                    }
+                ExtensionFilter::Installed => EmptyState::new("No extensions installed")
+                    .description("Extensions you install are listed here."),
+                ExtensionFilter::All | ExtensionFilter::NotInstalled => {
+                    EmptyState::new("No extensions match")
                 }
             }
         };
 
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .when(is_loading, |this| {
-                        this.child(
-                            Icon::new(IconName::LoadCircle)
-                                .size(IconSize::Small)
-                                .color(Color::Accent)
-                                .with_rotate_animation(3),
-                        )
-                    })
-                    .when(fetch_failure_is_relevant, |this| {
-                        this.child(
-                            Icon::new(IconName::Warning)
-                                .size(IconSize::Small)
-                                .color(Color::Warning),
-                        )
-                    })
-                    .child(Label::new(message)),
-            )
-            .when(fetch_failure_is_relevant, |this| {
-                this.child(self.retry_button(cx))
-            })
+        div().size_full().pt_8().child(empty_state.centered(true))
     }
 
     fn update_settings(
@@ -1120,71 +1133,46 @@ impl ExtensionsPage {
     fn render_feature_upsell_banner(
         &self,
         label: &'static str,
-        docs_url: &'static str,
         vim: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let docs_url_button = Button::new("open_docs", "View Documentation")
-            .end_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::Small))
-            .on_click({
-                move |_event, _window, cx| {
-                    telemetry::event!(
-                        "Documentation Viewed",
-                        source = "Feature Upsell",
-                        url = docs_url,
-                    );
-                    cx.open_url(docs_url)
-                }
-            });
-
+        // Upstream added a "View Documentation" button that opened the page of
+        // its manual about the feature. The product has no such pages.
         div()
-            .pt_4()
-            .px_4()
+            .pt_3()
             .child(
                 Banner::new()
-                    .severity(Severity::Success)
+                    .severity(Severity::Info)
                     .child(Label::new(SharedString::new_static(label)).mt_0p5())
                     .map(|this| {
                         if vim {
                             this.action_slot(
-                                h_flex()
-                                    .gap_1()
-                                    .child(docs_url_button)
-                                    .child(Divider::vertical().color(ui::DividerColor::Border))
-                                    .child(
-                                        h_flex()
-                                            .pl_1()
-                                            .gap_1()
-                                            .child(Label::new("Enable Vim mode"))
-                                            .child(
-                                                Switch::new(
-                                                    "enable-vim",
-                                                    if VimModeSetting::get_global(cx).0 {
-                                                        ui::ToggleState::Selected
-                                                    } else {
-                                                        ui::ToggleState::Unselected
-                                                    },
-                                                )
-                                                .on_click(cx.listener(
-                                                    move |this, selection, _, cx| {
-                                                        telemetry::event!(
-                                                            "Vim Mode Toggled",
-                                                            source = "Feature Upsell"
-                                                        );
-                                                        this.update_settings(
-                                                            selection,
-                                                            cx,
-                                                            |setting, value| {
-                                                                setting.vim_mode = Some(value)
-                                                            },
-                                                        );
-                                                    },
-                                                )),
-                                            ),
-                                    ),
+                                h_flex().gap_1().child(Label::new("Enable Vim mode")).child(
+                                    Switch::new(
+                                        "enable-vim",
+                                        if VimModeSetting::get_global(cx).0 {
+                                            ui::ToggleState::Selected
+                                        } else {
+                                            ui::ToggleState::Unselected
+                                        },
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, selection, _, cx| {
+                                            telemetry::event!(
+                                                "Vim Mode Toggled",
+                                                source = "Feature Upsell"
+                                            );
+                                            this.update_settings(
+                                                selection,
+                                                cx,
+                                                |setting, value| setting.vim_mode = Some(value),
+                                            );
+                                        },
+                                    )),
+                                ),
                             )
                         } else {
-                            this.action_slot(docs_url_button)
+                            this
                         }
                     }),
             )
@@ -1192,117 +1180,72 @@ impl ExtensionsPage {
     }
 
     fn render_feature_upsells(&self, cx: &Context<Self>) -> impl IntoElement {
-        v_flex().children(self.upsells.iter().map(|feature| match feature {
-            Feature::AgentClaude => self.render_feature_upsell_banner(
-                "Claude Agent support is built-in to Zed!",
-                "https://zed.dev/docs/ai/external-agents#claude-agent",
-                false,
-                cx,
-            ),
-            Feature::AgentCodex => self.render_feature_upsell_banner(
-                "Codex CLI support is built-in to Zed!",
-                "https://zed.dev/docs/ai/external-agents#codex-cli",
-                false,
-                cx,
-            ),
-            Feature::AgentGemini => self.render_feature_upsell_banner(
-                "Gemini CLI support is built-in to Zed!",
-                "https://zed.dev/docs/ai/external-agents#gemini-cli",
-                false,
-                cx,
-            ),
-            Feature::ExtensionBasedpyright => self.render_feature_upsell_banner(
-                "Basedpyright (Python language server) support is built-in to Zed!",
-                "https://zed.dev/docs/languages/python#basedpyright",
-                false,
-                cx,
-            ),
-            Feature::ExtensionRuff => self.render_feature_upsell_banner(
-                "Ruff (linter for Python) support is built-in to Zed!",
-                "https://zed.dev/docs/languages/python#code-formatting--linting",
-                false,
-                cx,
-            ),
-            Feature::ExtensionTailwind => self.render_feature_upsell_banner(
-                "Tailwind CSS support is built-in to Zed!",
-                "https://zed.dev/docs/languages/tailwindcss",
-                false,
-                cx,
-            ),
-            Feature::ExtensionTy => self.render_feature_upsell_banner(
-                "Ty (Python language server) support is built-in to Zed!",
-                "https://zed.dev/docs/languages/python",
-                false,
-                cx,
-            ),
-            Feature::Git => self.render_feature_upsell_banner(
-                "Zed comes with basic Git support—more features are coming in the future.",
-                "https://zed.dev/docs/git",
-                false,
-                cx,
-            ),
-            Feature::LanguageBash => self.render_feature_upsell_banner(
-                "Shell support is built-in to Zed!",
-                "https://zed.dev/docs/languages/bash",
-                false,
-                cx,
-            ),
-            Feature::LanguageC => self.render_feature_upsell_banner(
-                "C support is built-in to Zed!",
-                "https://zed.dev/docs/languages/c",
-                false,
-                cx,
-            ),
-            Feature::LanguageCpp => self.render_feature_upsell_banner(
-                "C++ support is built-in to Zed!",
-                "https://zed.dev/docs/languages/cpp",
-                false,
-                cx,
-            ),
-            Feature::LanguageGo => self.render_feature_upsell_banner(
-                "Go support is built-in to Zed!",
-                "https://zed.dev/docs/languages/go",
-                false,
-                cx,
-            ),
-            Feature::LanguagePython => self.render_feature_upsell_banner(
-                "Python support is built-in to Zed!",
-                "https://zed.dev/docs/languages/python",
-                false,
-                cx,
-            ),
-            Feature::LanguageReact => self.render_feature_upsell_banner(
-                "React support is built-in to Zed!",
-                "https://zed.dev/docs/languages/typescript",
-                false,
-                cx,
-            ),
-            Feature::LanguageRust => self.render_feature_upsell_banner(
-                "Rust support is built-in to Zed!",
-                "https://zed.dev/docs/languages/rust",
-                false,
-                cx,
-            ),
-            Feature::LanguageTypescript => self.render_feature_upsell_banner(
-                "Typescript support is built-in to Zed!",
-                "https://zed.dev/docs/languages/typescript",
-                false,
-                cx,
-            ),
-            Feature::OpenIn => self.render_feature_upsell_banner(
-                "Zed supports linking to a source line on GitHub and others.",
-                "https://zed.dev/docs/git#git-integrations",
-                false,
-                cx,
-            ),
-            Feature::Vim => self.render_feature_upsell_banner(
-                "Vim support is built-in to Zed!",
-                "https://zed.dev/docs/vim",
-                true,
-                cx,
-            ),
+        v_flex().children(self.upsells.iter().map(|feature| {
+            self.render_feature_upsell_banner(built_in_note(*feature), *feature == Feature::Vim, cx)
         }))
     }
+}
+
+/// What the page says when a search names something that needs no extension.
+/// No product name: "built in" says it (D10).
+fn built_in_note(feature: Feature) -> &'static str {
+    match feature {
+        Feature::AgentClaude => "Claude Agent support is built in.",
+        Feature::AgentCodex => "Codex CLI support is built in.",
+        Feature::AgentGemini => "Gemini CLI support is built in.",
+        Feature::ExtensionBasedpyright => {
+            "Basedpyright (Python language server) support is built in."
+        }
+        Feature::ExtensionRuff => "Ruff (linter for Python) support is built in.",
+        Feature::ExtensionTailwind => "Tailwind CSS support is built in.",
+        Feature::ExtensionTy => "Ty (Python language server) support is built in.",
+        Feature::Git => "Git support is built in.",
+        Feature::LanguageBash => "Shell support is built in.",
+        Feature::LanguageC => "C support is built in.",
+        Feature::LanguageCpp => "C++ support is built in.",
+        Feature::LanguageGo => "Go support is built in.",
+        Feature::LanguagePython => "Python support is built in.",
+        Feature::LanguageReact => "React support is built in.",
+        Feature::LanguageRust => "Rust support is built in.",
+        Feature::LanguageTypescript => "TypeScript support is built in.",
+        Feature::OpenIn => "Links to a source line on GitHub and other hosts are built in.",
+        Feature::Vim => "Vim support is built in.",
+    }
+}
+
+/// The sentence under the search field: where the list comes from, and when
+/// the registry is contacted.
+fn provenance_text(registry_host: &str, registry_is_default: bool) -> String {
+    let source = if registry_is_default {
+        format!(
+            "Extensions come from the Zed extension registry ({registry_host}); \
+             downloads come from its storage host."
+        )
+    } else {
+        format!(
+            "Extensions come from the registry at {registry_host}, set with {}.",
+            extension_host::REGISTRY_URL_ENV_VAR
+        )
+    };
+    format!(
+        "{source} The IDE contacts them when you open this page, when an extension is \
+         installed, and at most once a day to keep installed extensions up to date."
+    )
+}
+
+fn kind_is_listed(provides: ExtensionProvides) -> bool {
+    !matches!(
+        provides,
+        ExtensionProvides::AgentServers
+            // Grammars do not add anything of value to users currently.
+            | ExtensionProvides::Grammars
+            | ExtensionProvides::IndexedDocsProviders
+            | ExtensionProvides::SlashCommands
+    )
+}
+
+fn kind_label(kind: Option<ExtensionProvides>) -> &'static str {
+    kind.map_or("All Kinds", extension_provides_label)
 }
 
 struct DevExtensionRebuildPickerDelegate {
@@ -1470,23 +1413,74 @@ impl PickerDelegate for DevExtensionRebuildPickerDelegate {
     }
 }
 
+/// Pages are a centred column (D4).
+const PAGE_COLUMN_WIDTH: f32 = 720.;
+
 impl Render for ExtensionsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let column_width = rems_from_px(PAGE_COLUMN_WIDTH);
+
+        let filter_tab = |id: &'static str,
+                          label: &'static str,
+                          filter: ExtensionFilter,
+                          this: &Self,
+                          cx: &mut Context<Self>| {
+            TextTab::new(id, label)
+                .selected(this.filter == filter)
+                .on_click(cx.listener(move |this, _event, _, cx| {
+                    this.filter = filter;
+                    this.rebuild_displayed_extensions(cx);
+                    this.scroll_to_top(cx);
+                }))
+        };
+
+        let filters = TextTabStrip::new("extension-filters")
+            .size(TextTabSize::Compact)
+            .tab(filter_tab(
+                "filter-all",
+                "All",
+                ExtensionFilter::All,
+                self,
+                cx,
+            ))
+            .tab(filter_tab(
+                "filter-installed",
+                "Installed",
+                ExtensionFilter::Installed,
+                self,
+                cx,
+            ))
+            .tab(filter_tab(
+                "filter-not-installed",
+                "Not Installed",
+                ExtensionFilter::NotInstalled,
+                self,
+                cx,
+            ))
+            .end_slot(self.render_kind_menu(window, cx));
+
+        let count = self.displayed_extensions.len();
+        let installed_only = self.fetch_state == ExtensionFetchState::Failed
+            && self.filter == ExtensionFilter::All
+            && count > 0;
+
         v_flex()
             .size_full()
+            .items_center()
             .bg(cx.theme().colors().editor_background)
             .child(
                 v_flex()
-                    .gap_4()
-                    .pt_4()
+                    .flex_none()
+                    .w_full()
+                    .max_w(column_width)
+                    .pt_8()
                     .px_4()
-                    .bg(cx.theme().colors().editor_background)
+                    .gap_3()
                     .child(
                         h_flex()
                             .w_full()
-                            .gap_1p5()
-                            .justify_between()
-                            .child(Headline::new("Extensions").size(HeadlineSize::Large))
+                            .gap_2()
+                            .child(self.render_search(window, cx))
                             .child(
                                 Button::new("install-dev-extension", "Install Dev Extension")
                                     .style(ButtonStyle::Outlined)
@@ -1496,145 +1490,54 @@ impl Render for ExtensionsPage {
                                     }),
                             ),
                     )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(self.render_search(cx))
-                            .child(
-                                div().child(
-                                    ToggleButtonGroup::single_row(
-                                        "filter-buttons",
-                                        [
-                                            ToggleButtonSimple::new(
-                                                "All",
-                                                cx.listener(|this, _event, _, cx| {
-                                                    this.filter = ExtensionFilter::All;
-                                                    this.rebuild_displayed_extensions(cx);
-                                                    this.scroll_to_top(cx);
-                                                }),
-                                            ),
-                                            ToggleButtonSimple::new(
-                                                "Installed",
-                                                cx.listener(|this, _event, _, cx| {
-                                                    this.filter = ExtensionFilter::Installed;
-                                                    this.rebuild_displayed_extensions(cx);
-                                                    this.scroll_to_top(cx);
-                                                }),
-                                            ),
-                                            ToggleButtonSimple::new(
-                                                "Not Installed",
-                                                cx.listener(|this, _event, _, cx| {
-                                                    this.filter = ExtensionFilter::NotInstalled;
-                                                    this.rebuild_displayed_extensions(cx);
-                                                    this.scroll_to_top(cx);
-                                                }),
-                                            ),
-                                        ],
+                    .child(self.render_provenance())
+                    .child(filters)
+                    .child(self.render_feature_upsells(cx))
+                    .when(installed_only, |this| {
+                        this.child(
+                            Banner::new()
+                                .severity(Severity::Warning)
+                                .child(
+                                    Label::new(
+                                        "Could not reach the extension registry. \
+                                         Showing installed extensions only.",
                                     )
-                                    .style(ToggleButtonGroupStyle::Outlined)
-                                    .size(ToggleButtonGroupSize::Custom(rems_from_px(30_f32))) // Perfectly matches the input
-                                    .label_size(LabelSize::Default)
-                                    .auto_width()
-                                    .selected_index(match self.filter {
-                                        ExtensionFilter::All => 0,
-                                        ExtensionFilter::Installed => 1,
-                                        ExtensionFilter::NotInstalled => 2,
-                                    })
-                                    .into_any_element(),
-                                ),
-                            ),
-                    ),
+                                    .mt_0p5(),
+                                )
+                                .action_slot(self.retry_button(cx)),
+                        )
+                    }),
             )
             .child(
-                h_flex()
-                    .id("filter-row")
-                    .gap_2()
-                    .py_2p5()
-                    .px_4()
-                    .border_b_1()
-                    .border_color(cx.theme().colors().border_variant)
-                    .overflow_x_scroll()
-                    .child(
-                        Button::new("filter-all-categories", "All")
-                            .when(self.provides_filter.is_none(), |button| {
-                                button.style(ButtonStyle::Filled)
-                            })
-                            .when(self.provides_filter.is_some(), |button| {
-                                button.style(ButtonStyle::Subtle)
-                            })
-                            .toggle_state(self.provides_filter.is_none())
-                            .on_click(cx.listener(|this, _event, _, cx| {
-                                this.change_provides_filter(None, cx);
-                            })),
-                    )
-                    .children(
-                        ExtensionProvides::iter()
-                            .filter(|provides| match provides {
-                                ExtensionProvides::AgentServers
-                                | ExtensionProvides::Grammars // grammars do not add anything of value to users currently
-                                | ExtensionProvides::IndexedDocsProviders
-                                | ExtensionProvides::SlashCommands => false,
-                                _ => true,
-                            })
-                            .map(|provides| {
-                                let label = extension_provides_label(provides);
-                                let button_id =
-                                    SharedString::from(format!("filter-category-{}", label));
-
-                                Button::new(button_id, label)
-                                    .style(if self.provides_filter == Some(provides) {
-                                        ButtonStyle::Filled
-                                    } else {
-                                        ButtonStyle::Subtle
-                                    })
-                                    .toggle_state(self.provides_filter == Some(provides))
-                                    .on_click({
-                                        cx.listener(move |this, _event, _, cx| {
-                                            this.change_provides_filter(Some(provides), cx);
-                                        })
-                                    })
-                            }),
-                    ),
-            )
-            .child(self.render_feature_upsells(cx))
-            .child(v_flex().px_4().size_full().overflow_y_hidden().map(|this| {
-                let count = self.displayed_extensions.len();
-
-                if count == 0 {
-                    this.child(self.render_empty_state(cx)).into_any_element()
-                } else {
-                    let scroll_handle = &self.list;
-                    this.when(
-                        self.fetch_state == ExtensionFetchState::Failed
-                            && self.filter == ExtensionFilter::All,
-                        |this| {
+                v_flex()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .items_center()
+                    .overflow_y_hidden()
+                    .map(|this| {
+                        if count == 0 {
+                            this.child(self.render_empty_state(cx)).into_any_element()
+                        } else {
+                            let scroll_handle = &self.list;
                             this.child(
-                                div().pt_4().child(
-                                    Banner::new()
-                                        .severity(Severity::Warning)
-                                        .child(
-                                            Label::new(
-                                                "Failed to load extensions. Showing installed extensions only.",
-                                            )
-                                            .mt_0p5(),
-                                        )
-                                        .action_slot(self.retry_button(cx)),
-                                ),
+                                uniform_list(
+                                    "entries",
+                                    count,
+                                    cx.processor(Self::render_extensions),
+                                )
+                                .w_full()
+                                .max_w(column_width)
+                                .flex_1()
+                                .min_h_0()
+                                .pb_4()
+                                .track_scroll(scroll_handle),
                             )
-                        },
-                    )
-                    .child(
-                        uniform_list("entries", count, cx.processor(Self::render_extensions))
-                            .flex_grow_1()
-                            .pb_4()
-                            .track_scroll(scroll_handle),
-                    )
-                    .vertical_scrollbar_for(scroll_handle, window, cx)
-                    .into_any_element()
-                }
-            }))
+                            .vertical_scrollbar_for(scroll_handle, window, cx)
+                            .into_any_element()
+                        }
+                    }),
+            )
     }
 }
 
@@ -1663,5 +1566,67 @@ impl Item for ExtensionsPage {
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
         f(*event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_provenance_names_the_registry_and_when_it_is_contacted() {
+        let text = provenance_text("api.zed.dev", true);
+        assert_eq!(
+            text,
+            "Extensions come from the Zed extension registry (api.zed.dev); downloads come \
+             from its storage host. The IDE contacts them when you open this page, when an \
+             extension is installed, and at most once a day to keep installed extensions up \
+             to date."
+        );
+        assert!(
+            text.contains("Zed extension registry (api.zed.dev)"),
+            "{text}"
+        );
+        // The archives come from a second host: the sentence must not suggest
+        // that the registry's host is the only one contacted.
+        assert!(
+            text.contains("downloads come from its storage host"),
+            "{text}"
+        );
+        assert!(text.contains("when you open this page"), "{text}");
+        assert!(text.contains("at most once a day"), "{text}");
+
+        // An override is named as such, and not called Zed's registry.
+        let text = provenance_text("127.0.0.1:9", false);
+        assert!(text.contains("the registry at 127.0.0.1:9"), "{text}");
+        assert!(
+            text.contains(extension_host::REGISTRY_URL_ENV_VAR),
+            "{text}"
+        );
+        assert!(!text.contains("Zed"), "{text}");
+    }
+
+    #[test]
+    fn test_built_in_notes_do_not_name_a_product() {
+        for feature in keywords_by_feature().keys() {
+            let note = built_in_note(*feature);
+            assert!(!note.contains("Zed"), "{note}");
+            assert!(note.ends_with("built in."), "{note}");
+        }
+    }
+
+    #[test]
+    fn test_kind_menu_lists_the_kinds_users_can_install() {
+        let labels = std::iter::once(None)
+            .chain(
+                ExtensionProvides::iter()
+                    .filter(|provides| kind_is_listed(*provides))
+                    .map(Some),
+            )
+            .map(kind_label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels[0], "All Kinds");
+        assert!(labels.contains(&"Themes") && labels.contains(&"Languages"));
+        assert!(!labels.contains(&"Grammars") && !labels.contains(&"Slash Commands"));
     }
 }

@@ -134,7 +134,7 @@ impl DockerExecConnection {
     /// using unique delimiters, so that shell initialization noise (e.g. from
     /// BASH_ENV or .bashrc) does not corrupt the result.
     async fn run_docker_exec_delimited(&self, script: &str) -> Result<String> {
-        const MARKER: &str = "=====ZED_DELIM_7f3a9c=====";
+        const MARKER: &str = "=====IDE_DELIM_7f3a9c=====";
         let wrapped =
             format!("printf '{MARKER}'; {script}; __exit=$?; printf '{MARKER}'; exit $__exit");
         let output = self
@@ -225,7 +225,8 @@ impl DockerExecConnection {
             _ => version.to_string(),
         };
         let binary_name = format!(
-            "zed-remote-server-{}-{}",
+            "{}-remote-server-{}-{}",
+            branding::APP_ID,
             release_channel.dev_name(),
             version_str
         );
@@ -279,7 +280,7 @@ impl DockerExecConnection {
             ReleaseChannel::Nightly => Ok(None),
             ReleaseChannel::Dev => {
                 anyhow::bail!(
-                    "ZED_BUILD_REMOTE_SERVER is not set and no remote server exists at ({:?})",
+                    "IDE_BUILD_REMOTE_SERVER is not set and no remote server exists at ({:?})",
                     dst_path
                 )
             }
@@ -478,7 +479,7 @@ impl DockerExecConnection {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::debug!("failed to change ownership for via chown: {stderr}",);
         anyhow::bail!(
-            "failed to change ownership for zed_remote_server via chown: {}",
+            "failed to change ownership for the remote server via chown: {}",
             stderr,
         );
     }
@@ -689,7 +690,7 @@ impl RemoteConnection for DockerExecConnection {
         let mut docker_args = vec!["exec".to_string()];
 
         push_environment(&mut docker_args, &self.connection_options.remote_env);
-        for env_var in ["RUST_LOG", "RUST_BACKTRACE", "ZED_GENERATE_MINIDUMPS"] {
+        for env_var in ["RUST_LOG", "RUST_BACKTRACE", "IDE_GENERATE_MINIDUMPS"] {
             if let Some(value) = std::env::var(env_var).ok() {
                 docker_args.push("-e".to_string());
                 docker_args.push(format!("{env_var}={value}"));

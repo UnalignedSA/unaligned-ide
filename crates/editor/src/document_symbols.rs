@@ -371,6 +371,7 @@ mod tests {
         time::Duration,
     };
 
+    use app_actions::editor::MoveDown;
     use futures::StreamExt as _;
     use gpui::{
         App, AppContext as _, FontWeight, HighlightStyle, Hsla, SharedString, TestAppContext, font,
@@ -386,7 +387,6 @@ mod tests {
     use theme::SyntaxTheme;
     use util::path;
     use workspace::item::{Item, ItemEvent};
-    use zed_actions::editor::MoveDown;
 
     use super::highlights_from_buffer;
     use crate::{

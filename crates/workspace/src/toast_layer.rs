@@ -3,12 +3,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use app_actions::toast;
 use gpui::{
     AnyView, DismissEvent, Entity, EntityId, FocusHandle, ManagedView, MouseButton, Subscription,
     Task,
 };
 use ui::{animation::DefaultAnimations, prelude::*};
-use zed_actions::toast;
 
 use crate::Workspace;
 
@@ -223,6 +223,9 @@ impl ToastLayer {
     }
 }
 
+/// The layer covers the status bar too: toasts sit just above it.
+const TOAST_BOTTOM_OFFSET: gpui::Pixels = px(32.);
+
 impl Render for ToastLayer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(active_toast) = &self.active_toast else {
@@ -237,7 +240,10 @@ impl Render for ToastLayer {
                 .bottom(px(0.))
                 .flex()
                 .flex_col()
-                .items_center()
+                // Bottom right corner, clear of the status bar.
+                .items_end()
+                .pr_2()
+                .pb(TOAST_BOTTOM_OFFSET)
                 .track_focus(&active_toast.focus_handle)
                 .child(
                     h_flex()

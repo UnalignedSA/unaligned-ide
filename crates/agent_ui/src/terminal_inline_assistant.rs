@@ -96,7 +96,7 @@ impl TerminalInlineAssistant {
         });
         let prompt_editor_render = prompt_editor.clone();
         let block = terminal_view::BlockProperties {
-            height: 4,
+            height: prompt_editor.read(cx).height_in_lines(),
             render: Box::new(move |_| prompt_editor_render.clone().into_any_element()),
         };
         terminal_view.update(cx, |terminal_view, cx| {
@@ -214,8 +214,7 @@ impl TerminalInlineAssistant {
         assist_id: TerminalInlineAssistId,
         cx: &mut App,
     ) -> Result<Task<LanguageModelRequest>> {
-        let model = LanguageModelRegistry::read_global(cx)
-            .inline_assistant_model()
+        let model = crate::buffer_codegen::inline_assist_model(0, cx)
             .context("No inline assistant model")?;
 
         let assist = self.assists.get(&assist_id).context("invalid assist")?;
@@ -237,7 +236,8 @@ impl TerminalInlineAssistant {
         let prompt_editor = assist.prompt_editor.clone().context("invalid assist")?;
 
         let prompt = self.prompt_builder.generate_terminal_assistant_prompt(
-            &prompt_editor.read(cx).prompt(cx),
+            // Includes the instructions this one follows up on.
+            &prompt_editor.read(cx).request_prompt(cx),
             shell.as_deref(),
             working_directory.as_deref(),
             &latest_output,

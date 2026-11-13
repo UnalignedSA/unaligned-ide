@@ -9,6 +9,7 @@ use crate::{
 };
 use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result, anyhow};
+use app_actions::agent::ReviewBranchDiff;
 use editor::{
     Addon, Editor, EditorEvent, HiddenDiffHunkRenderer, SplittableEditor,
     actions::SendReviewToAgent,
@@ -31,7 +32,7 @@ use std::{
     any::{Any, TypeId},
     sync::Arc,
 };
-use ui::{DiffStat, Divider, PopoverMenu, Tooltip, prelude::*};
+use ui::{Divider, PopoverMenu, Tooltip, prelude::*};
 use workspace::{
     ItemHandle, ItemNavHistory, SerializableItem, ToolbarItemEvent, ToolbarItemLocation,
     ToolbarItemView, Workspace,
@@ -39,7 +40,6 @@ use workspace::{
     notifications::NotifyTaskExt,
     searchable::SearchableItemHandle,
 };
-use zed_actions::agent::ReviewBranchDiff;
 
 /// The workspace item for a branch (merge-base) diff: "Changes since {branch}".
 /// It wraps a single [`DiffMultibuffer`] over [`DiffBase::Merge`] and delegates
@@ -801,10 +801,11 @@ impl Render for BranchDiffToolbar {
             .flex_wrap()
             .justify_between()
             .when(!is_multibuffer_empty, |this| {
-                this.child(DiffStat::new(
+                this.child(crate::diff_stat_text(
                     "branch-diff-stat",
                     additions as usize,
                     deletions as usize,
+                    cx,
                 ))
             })
             .child(Divider::vertical().ml_1())
@@ -872,7 +873,7 @@ impl Render for BranchDiffToolbar {
                 this.child(Divider::vertical()).child(
                     Button::new("review-diff", "Review Diff")
                         .start_icon(
-                            Icon::new(IconName::ZedAssistant)
+                            Icon::new(IconName::AppAssistant)
                                 .size(IconSize::Small)
                                 .color(Color::Muted),
                         )
@@ -929,6 +930,10 @@ mod tests {
             cx.update_global::<SettingsStore, _>(|store, cx| {
                 store.update_user_settings(cx, |settings| {
                     settings.editor.diff_view_style = Some(DiffViewStyle::Unified);
+                    // Unaligned default is "staging"; the expected file
+                    // order of this suite is upstream's "status" grouping.
+                    settings.git_panel.get_or_insert_default().group_by =
+                        Some(settings::GitPanelGroupBy::Status);
                 });
             });
             theme_settings::init(theme::LoadThemes::JustBase, cx);

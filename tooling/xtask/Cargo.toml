@@ -15,7 +15,6 @@ backtrace.workspace = true
 cargo_metadata.workspace = true
 cargo_toml.workspace = true
 clap.workspace = true
-compliance = { workspace = true, features = ["octo-client"] }
 gh-workflow.workspace = true
 guppy = "0.18"
 indoc.workspace = true

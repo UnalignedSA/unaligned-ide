@@ -24,6 +24,7 @@ test-support = ["fs/test-support"]
 
 [dependencies]
 anyhow.workspace = true
+branding.workspace = true
 async-channel.workspace = true
 askpass.workspace = true
 clap.workspace = true

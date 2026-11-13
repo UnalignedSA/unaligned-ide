@@ -71,33 +71,23 @@ impl RenderOnce for Banner {
             .when(self.wrap_content, |this| this.flex_wrap())
             .justify_between()
             .rounded_sm()
-            .border_1();
+            // The severity is a bar on the left edge, not a tinted box.
+            .border_l_2();
 
-        let (icon, icon_color, bg_color, border_color) = match self.severity {
+        let bg_color = cx.theme().colors().surface_background;
+        let (icon, icon_color, border_color) = match self.severity {
             Severity::Info => (
                 IconName::Info,
                 Color::Muted,
-                cx.theme().status().info_background.opacity(0.5),
-                cx.theme().colors().border.opacity(0.5),
+                cx.theme().colors().border_focused,
             ),
-            Severity::Success => (
-                IconName::Check,
-                Color::Success,
-                cx.theme().status().success.opacity(0.1),
-                cx.theme().status().success.opacity(0.2),
-            ),
+            Severity::Success => (IconName::Check, Color::Success, cx.theme().status().success),
             Severity::Warning => (
                 IconName::Warning,
                 Color::Warning,
-                cx.theme().status().warning_background.opacity(0.5),
-                cx.theme().status().warning_border.opacity(0.4),
+                cx.theme().status().warning,
             ),
-            Severity::Error => (
-                IconName::XCircle,
-                Color::Error,
-                cx.theme().status().error.opacity(0.1),
-                cx.theme().status().error.opacity(0.2),
-            ),
+            Severity::Error => (IconName::XCircle, Color::Error, cx.theme().status().error),
         };
 
         let mut banner = banner.bg(bg_color).border_color(border_color);

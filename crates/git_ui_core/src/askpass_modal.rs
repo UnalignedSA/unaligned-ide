@@ -3,10 +3,10 @@ use editor::Editor;
 use futures::channel::oneshot;
 use gpui::{AppContext, DismissEvent, Entity, EventEmitter, Focusable, Styled, Task};
 use ui::{
-    ActiveTheme, AnyElement, App, Button, Clickable, Color, Context, DynamicSpacing, Headline,
-    HeadlineSize, Icon, IconName, IconSize, InteractiveElement, IntoElement, Label, LabelCommon,
-    LabelSize, ParentElement, Render, SharedString, StyledExt, StyledTypography, Window, div,
-    h_flex, v_flex,
+    ActiveTheme, AnyElement, App, Button, ButtonCommon, ButtonStyle, Clickable, Context,
+    DynamicSpacing, Headline, HeadlineSize, Icon, IconName, IconSize, InteractiveElement,
+    IntoElement, Label, LabelCommon, LabelSize, ParentElement, Render, SharedString, StyledExt,
+    StyledTypography, Window, div, h_flex, v_flex,
 };
 use util::maybe;
 use workspace::ModalView;
@@ -81,7 +81,7 @@ impl AskPassModal {
     }
 
     fn render_hint(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let color = cx.theme().status().info_background;
+        let color = cx.theme().colors().surface_background;
         if (self.prompt.contains("Password") || self.prompt.contains("Username"))
             && self.prompt.contains("github.com")
         {
@@ -90,7 +90,7 @@ impl AskPassModal {
                 .p_2()
                 .bg(color)
                 .border_t_1()
-                .border_color(cx.theme().status().info_border)
+                .border_color(cx.theme().colors().border)
                 .child(
                     h_flex().gap_2()
                         .child(
@@ -100,7 +100,7 @@ impl AskPassModal {
                             Label::new("You may need to configure git for Github.")
                                 .size(LabelSize::Small),
                         )
-                        .child(Button::new("learn-more", "Learn more").color(Color::Accent).label_size(LabelSize::Small).on_click(|_, _, cx| {
+                        .child(Button::new("learn-more", "Learn more").style(ButtonStyle::Outlined).label_size(LabelSize::Small).on_click(|_, _, cx| {
                             cx.open_url("https://docs.github.com/en/get-started/git-basics/set-up-git#authenticating-with-github-from-git")
                         })),
                 )

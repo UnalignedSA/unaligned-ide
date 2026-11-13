@@ -235,7 +235,16 @@ impl Serialize for ConnectionQualityDTO {
     }
 }
 
-#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
+#[cfg_attr(
+    any(
+        test,
+        feature = "test-support",
+        all(target_os = "windows", target_env = "gnu"),
+        target_os = "freebsd",
+        not(feature = "webrtc")
+    ),
+    allow(dead_code)
+)]
 struct TrackContext {
     participant_id: String,
     participant_name: String,
@@ -250,7 +259,16 @@ struct PollResult {
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
+#[cfg_attr(
+    any(
+        test,
+        feature = "test-support",
+        all(target_os = "windows", target_env = "gnu"),
+        target_os = "freebsd",
+        not(feature = "webrtc")
+    ),
+    allow(dead_code)
+)]
 struct InboundCounters {
     packets_received: u64,
     packets_lost: i64,
@@ -310,7 +328,8 @@ fn compute_network_stats(stats: &livekit_client::SessionStats) -> ComputedNetwor
         test,
         feature = "test-support",
         all(target_os = "windows", target_env = "gnu"),
-        target_os = "freebsd"
+        target_os = "freebsd",
+        not(feature = "webrtc")
     )
 ))]
 fn compute_remote_audio_stats(
@@ -330,7 +349,8 @@ fn compute_remote_audio_stats(
         test,
         feature = "test-support",
         all(target_os = "windows", target_env = "gnu"),
-        target_os = "freebsd"
+        target_os = "freebsd",
+        not(feature = "webrtc")
     ))
 ))]
 fn compute_remote_audio_stats(
@@ -463,7 +483,8 @@ fn compute_remote_audio_stats(
         test,
         feature = "test-support",
         all(target_os = "windows", target_env = "gnu"),
-        target_os = "freebsd"
+        target_os = "freebsd",
+        not(feature = "webrtc")
     )
 ))]
 fn extract_metrics(
@@ -481,7 +502,8 @@ fn extract_metrics(
         test,
         feature = "test-support",
         all(target_os = "windows", target_env = "gnu"),
-        target_os = "freebsd"
+        target_os = "freebsd",
+        not(feature = "webrtc")
     ))
 ))]
 fn extract_metrics(

@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use gpui::{Action, FocusHandle, Focusable};
-use ui::{ContextMenu, Divider, FluentBuilder, KeyBinding, PopoverMenu, Tooltip, prelude::*};
+use ui::{ContextMenu, Divider, FluentBuilder, PopoverMenu, Tooltip, prelude::*};
 
 use crate::Picker;
 use crate::PickerDelegate;
@@ -10,6 +10,7 @@ use crate::SetPreviewRight;
 use crate::ToggleActionsMenu;
 use crate::TogglePreview;
 use crate::preview;
+use crate::surface;
 
 /// Line in the Actions menu on the default footer.
 pub enum PickerAction {
@@ -106,12 +107,7 @@ impl<D: PickerDelegate> Picker<D> {
         let focus_handle = self.focus_handle(cx);
 
         Some(
-            h_flex()
-                .w_full()
-                .p_1p5()
-                .justify_between()
-                .border_t_1()
-                .border_color(cx.theme().colors().border_variant)
+            surface::footer(cx)
                 .when(self.preview.is_some(), |this| {
                     this.child(self.render_preview_controls(window, cx))
                 })
@@ -141,12 +137,13 @@ impl<D: PickerDelegate> Picker<D> {
 
         h_flex()
             .child(
-                Button::new("picker-preview-toggle", "Preview")
-                    .when(preview_visible, |this| this.color(Color::Accent))
-                    .key_binding(
-                        KeyBinding::for_action_in(&TogglePreview, &focus_handle, cx)
-                            .size(rems_from_px(12_f32)),
-                    )
+                surface::footer_button("picker-preview-toggle", "Preview")
+                    .color(if preview_visible {
+                        Color::Default
+                    } else {
+                        Color::Muted
+                    })
+                    .key_binding(surface::footer_key_cap(&TogglePreview, &focus_handle, cx))
                     .on_click(
                         cx.listener(|this, _, window, cx| this.toggle_preview_visible(window, cx)),
                     ),
@@ -198,12 +195,9 @@ impl<D: PickerDelegate> Picker<D> {
         PopoverMenu::new("picker-actions-menu")
             .with_handle(self.actions_menu_handle.clone())
             .trigger(
-                Button::new("picker-actions-trigger", "Actions…")
-                    .key_binding(
-                        KeyBinding::for_action_in(&ToggleActionsMenu, &focus_handle, cx)
-                            .size(rems_from_px(12_f32)),
-                    )
-                    .selected_style(ui::ButtonStyle::Tinted(ui::TintColor::Accent)),
+                surface::footer_button("picker-actions-trigger", "Actions…").key_binding(
+                    surface::footer_key_cap(&ToggleActionsMenu, &focus_handle, cx),
+                ),
             )
             .menu(move |window, cx| {
                 let actions = Rc::clone(&actions);

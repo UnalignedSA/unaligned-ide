@@ -42,7 +42,7 @@ impl Settings for TabSwitcherSettings {
     }
 }
 
-const PANEL_WIDTH_REMS: f32 = 28.;
+const PANEL_WIDTH_REMS: f32 = 34.;
 
 /// Toggles the tab switcher interface.
 #[derive(PartialEq, Clone, Deserialize, JsonSchema, Default, Action)]
@@ -864,11 +864,6 @@ impl PickerDelegate for TabSwitcherDelegate {
         let icon = tab_match.icon(&self.project, selected, window, cx);
 
         let indicator = render_item_indicator(tab_match.item.boxed_clone(), cx);
-        let indicator_color = if let Some(ref indicator) = indicator {
-            indicator.color
-        } else {
-            Color::default()
-        };
         let indicator = h_flex()
             .flex_shrink_0()
             .children(indicator)
@@ -888,7 +883,7 @@ impl PickerDelegate for TabSwitcherDelegate {
             .child(
                 IconButton::new("close_tab", IconName::Close)
                     .icon_size(IconSize::Small)
-                    .icon_color(indicator_color)
+                    .icon_color(Color::Muted)
                     .tooltip(Tooltip::for_action_title("Close", &CloseSelectedItem))
                     .on_click(cx.listener(move |picker, _, window, cx| {
                         cx.stop_propagation();
@@ -899,7 +894,7 @@ impl PickerDelegate for TabSwitcherDelegate {
 
         Some(
             ListItem::new(ix)
-                .spacing(ListItemSpacing::Sparse)
+                .spacing(ListItemSpacing::Dense)
                 .inset(true)
                 .toggle_state(selected)
                 .child(

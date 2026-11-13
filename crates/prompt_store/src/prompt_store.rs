@@ -25,7 +25,13 @@ use uuid::Uuid;
 /// Init starts loading the PromptStore in the background and assigns
 /// a shared future to a global.
 pub fn init(cx: &mut App) {
-    let db_path = paths::prompts_dir().join("prompts-library-db.0.mdb");
+    init_with_db_path(paths::prompts_dir().join("prompts-library-db.0.mdb"), cx)
+}
+
+/// As [`init`], with the database at a path of the caller's choice. Tests use
+/// it so that they never open (and create) the library in the user's own
+/// configuration directory.
+pub fn init_with_db_path(db_path: PathBuf, cx: &mut App) {
     let prompt_store_task = PromptStore::new(db_path, cx);
     let prompt_store_entity_task = cx
         .spawn(async move |cx| {

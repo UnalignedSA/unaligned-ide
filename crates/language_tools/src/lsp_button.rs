@@ -27,7 +27,9 @@ use ui::{
 };
 
 use util::{ResultExt, paths::PathExt, rel_path::RelPath};
-use workspace::{StatusItemView, ToggleWorktreeSecurity, Workspace};
+use workspace::{
+    StatusItemView, ToggleWorktreeSecurity, Workspace, active_file_name::status_bar_icon_button,
+};
 
 use crate::lsp_log_view;
 
@@ -1461,12 +1463,12 @@ impl Render for LspButton {
                         .ok()
                         .flatten()
                 })
-                .anchor(Anchor::BottomLeft)
+                // The button sits on the right half of the status bar.
+                .anchor(Anchor::BottomRight)
                 .with_handle(self.popover_menu_handle.clone())
                 .trigger_with_tooltip(
-                    IconButton::new("zed-lsp-tool-button", IconName::BoltOutlined)
+                    status_bar_icon_button("lsp-tool-button", IconName::BoltOutlined)
                         .when_some(indicator, IconButton::indicator)
-                        .icon_size(IconSize::Small)
                         .tab_index(0isize)
                         .aria_label("Language Servers")
                         .when(is_restricted, |s| s.icon_color(Color::Warning))

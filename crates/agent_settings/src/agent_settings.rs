@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use settings::{
     DockPosition, DockSide, IntoGpui, LanguageModelParameters, LanguageModelSelection,
     NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, RegisterSetting, Settings, SettingsContent,
-    SettingsStore, SidebarDockPosition, SidebarSide, ThinkingBlockDisplay, ToolPermissionMode,
-    update_settings_file, update_settings_file_with_completion,
+    SettingsStore, SidebarDockPosition, SidebarSide, TerminalDockPosition, ThinkingBlockDisplay,
+    ToolPermissionMode, update_settings_file, update_settings_file_with_completion,
 };
 use util::ResultExt as _;
 
@@ -37,6 +37,12 @@ pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt"
 pub const THREADS_LIST_MIN_WIDTH: Pixels = px(200.0);
 pub const THREADS_LIST_MAX_WIDTH: Pixels = px(800.0);
 
+/// Which dock each of the seven built-in panels lives in.
+///
+/// This is the only definition of the layout presets: "Classic"
+/// ([`PanelLayout::EDITOR`]) and "AI first" ([`PanelLayout::AGENT`]). A field
+/// that is `None` means "not set at this level" when the layout is read from
+/// the user's settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PanelLayout {
     pub(crate) agent_dock: Option<DockPosition>,
@@ -44,23 +50,34 @@ pub struct PanelLayout {
     pub(crate) outline_panel_dock: Option<DockSide>,
     pub(crate) collaboration_panel_dock: Option<DockPosition>,
     pub(crate) git_panel_dock: Option<DockPosition>,
+    pub(crate) terminal_dock: Option<TerminalDockPosition>,
+    pub(crate) debugger_dock: Option<DockPosition>,
 }
 
 impl PanelLayout {
+    /// "AI first": the chat on the left, the tree panels on the right, the
+    /// terminal and the debugger at the bottom.
     const AGENT: Self = Self {
         agent_dock: Some(DockPosition::Left),
         project_panel_dock: Some(DockSide::Right),
         outline_panel_dock: Some(DockSide::Right),
         collaboration_panel_dock: Some(DockPosition::Right),
         git_panel_dock: Some(DockPosition::Right),
+        terminal_dock: Some(TerminalDockPosition::Bottom),
+        debugger_dock: Some(DockPosition::Bottom),
     };
 
+    /// "Classic": the tree panels on the left, the chat on the right, the
+    /// terminal and the debugger at the bottom. These are also the defaults of
+    /// `assets/settings/default.json`, so "Reset layout" lands here.
     const EDITOR: Self = Self {
         agent_dock: Some(DockPosition::Right),
         project_panel_dock: Some(DockSide::Left),
         outline_panel_dock: Some(DockSide::Left),
         collaboration_panel_dock: Some(DockPosition::Left),
         git_panel_dock: Some(DockPosition::Left),
+        terminal_dock: Some(TerminalDockPosition::Bottom),
+        debugger_dock: Some(DockPosition::Bottom),
     };
 
     pub fn is_agent_layout(&self) -> bool {
@@ -78,6 +95,8 @@ impl PanelLayout {
             outline_panel_dock: content.outline_panel.as_ref().and_then(|p| p.dock),
             collaboration_panel_dock: content.collaboration_panel.as_ref().and_then(|p| p.dock),
             git_panel_dock: content.git_panel.as_ref().and_then(|p| p.dock),
+            terminal_dock: content.terminal.as_ref().and_then(|t| t.dock),
+            debugger_dock: content.debugger.as_ref().and_then(|d| d.dock),
         }
     }
 
@@ -87,6 +106,8 @@ impl PanelLayout {
         settings.outline_panel.get_or_insert_default().dock = self.outline_panel_dock;
         settings.collaboration_panel.get_or_insert_default().dock = self.collaboration_panel_dock;
         settings.git_panel.get_or_insert_default().dock = self.git_panel_dock;
+        settings.terminal.get_or_insert_default().dock = self.terminal_dock;
+        settings.debugger.get_or_insert_default().dock = self.debugger_dock;
     }
 
     fn write_diff_to(&self, current_merged: &PanelLayout, settings: &mut SettingsContent) {
@@ -105,6 +126,12 @@ impl PanelLayout {
         }
         if self.git_panel_dock != current_merged.git_panel_dock {
             settings.git_panel.get_or_insert_default().dock = self.git_panel_dock;
+        }
+        if self.terminal_dock != current_merged.terminal_dock {
+            settings.terminal.get_or_insert_default().dock = self.terminal_dock;
+        }
+        if self.debugger_dock != current_merged.debugger_dock {
+            settings.debugger.get_or_insert_default().dock = self.debugger_dock;
         }
     }
 
@@ -125,6 +152,45 @@ impl PanelLayout {
         if user_layout.git_panel_dock.is_none() {
             settings.git_panel.get_or_insert_default().dock = self.git_panel_dock;
         }
+        if user_layout.terminal_dock.is_none() {
+            settings.terminal.get_or_insert_default().dock = self.terminal_dock;
+        }
+        if user_layout.debugger_dock.is_none() {
+            settings.debugger.get_or_insert_default().dock = self.debugger_dock;
+        }
+    }
+
+    /// Removes everything the user's settings say about the layout: the seven
+    /// `dock` keys, `bottom_dock_layout` and the two `flexible` flags. The
+    /// window then falls back to the defaults, which are the Classic layout.
+    ///
+    /// Sections the user never wrote are left alone, so that no empty
+    /// `"terminal": {}` appears in their file.
+    fn clear_from(settings: &mut SettingsContent) {
+        if let Some(agent) = settings.agent.as_mut() {
+            agent.dock = None;
+            agent.flexible = None;
+        }
+        if let Some(project_panel) = settings.project_panel.as_mut() {
+            project_panel.dock = None;
+        }
+        if let Some(outline_panel) = settings.outline_panel.as_mut() {
+            outline_panel.dock = None;
+        }
+        if let Some(collaboration_panel) = settings.collaboration_panel.as_mut() {
+            collaboration_panel.dock = None;
+        }
+        if let Some(git_panel) = settings.git_panel.as_mut() {
+            git_panel.dock = None;
+        }
+        if let Some(terminal) = settings.terminal.as_mut() {
+            terminal.dock = None;
+            terminal.flexible = None;
+        }
+        if let Some(debugger) = settings.debugger.as_mut() {
+            debugger.dock = None;
+        }
+        settings.workspace.bottom_dock_layout = None;
     }
 }
 
@@ -374,6 +440,9 @@ impl AgentSettings {
         });
     }
 
+    /// Writes a layout to the user's settings, every key in one update of the
+    /// file. A preset (`Agent(None)`, `Editor(None)`) only writes the keys that
+    /// differ from what the merged settings already say.
     pub fn set_layout(
         layout: WindowLayout,
         fs: Arc<dyn Fs>,
@@ -400,6 +469,20 @@ impl AgentSettings {
                 })
             }
         }
+    }
+
+    /// "Reset layout": removes the user's layout keys in one update of the
+    /// settings file (see [`Self::clear_layout`]).
+    pub fn reset_layout(fs: Arc<dyn Fs>, cx: &App) -> oneshot::Receiver<anyhow::Result<()>> {
+        update_settings_file_with_completion(fs, cx, |settings, _cx| {
+            Self::clear_layout(settings);
+        })
+    }
+
+    /// Removes the seven `dock` keys, `bottom_dock_layout`, `agent.flexible`
+    /// and `terminal.flexible` from a user's settings.
+    pub fn clear_layout(settings: &mut SettingsContent) {
+        PanelLayout::clear_from(settings);
     }
 }
 
@@ -1185,11 +1268,15 @@ mod tests {
                 },
                 "{content}"
             );
-            assert_eq!(settings.default_width, px(640.), "{content}");
-            assert!(settings.threads_sidebar.auto_open, "{content}");
+            // Unaligned default: 400 (upstream: 640).
+            assert_eq!(settings.default_width, px(400.), "{content}");
+            // Unaligned default: the threads list does not open by itself
+            // (upstream: true).
+            assert!(!settings.threads_sidebar.auto_open, "{content}");
         }
 
-        for (value, expected) in [("false", false), ("true", true), ("null", true)] {
+        // Unaligned default: `null` falls back to false (upstream: true).
+        for (value, expected) in [("false", false), ("true", true), ("null", false)] {
             SettingsStore::update_global(cx, |store, cx| {
                 store
                     .set_user_settings(
@@ -1305,7 +1392,10 @@ mod tests {
                 Field::DefaultWidth => px(300.),
                 Field::Position | Field::AutoOpen => px(360.),
             };
-            let expected_auto_open = matches!(field, Field::AutoOpen);
+            // Unaligned default: `auto_open` is false, so resetting it gives
+            // false as well (upstream: true). The other two fields leave the
+            // nested `"auto_open": false` in place.
+            let expected_auto_open = false;
             for rewritten in [reset_text, reset_after_set_text] {
                 SettingsStore::update_global(cx, |store, cx| {
                     let result = store.set_user_settings(&rewritten, cx);
@@ -2003,31 +2093,34 @@ mod tests {
         project::DisableAiSettings::register(cx);
         AgentSettings::register(cx);
 
-        // Should be Agent with an empty user layout (user hasn't customized).
+        // Unaligned default: the Classic layout (upstream: Agentic). The user
+        // has not customized anything, so the user layout is empty.
         let layout = AgentSettings::get_layout(cx);
-        let WindowLayout::Agent(Some(user_layout)) = layout else {
-            panic!("expected Agent(Some), got {:?}", layout);
+        let WindowLayout::Editor(Some(user_layout)) = layout else {
+            panic!("expected Editor(Some), got {:?}", layout);
         };
         assert_eq!(user_layout, PanelLayout::default());
 
-        // User explicitly sets agent dock to left (matching the default).
-        // The merged result is still agent, but the user layout captures
+        // User explicitly sets agent dock to right (matching the default).
+        // The merged result is still Classic, but the user layout captures
         // only what the user wrote.
         SettingsStore::update_global(cx, |store, cx| {
             store
-                .set_user_settings(r#"{ "agent": { "dock": "left" } }"#, cx)
+                .set_user_settings(r#"{ "agent": { "dock": "right" } }"#, cx)
                 .unwrap();
         });
 
         let layout = AgentSettings::get_layout(cx);
-        let WindowLayout::Agent(Some(user_layout)) = layout else {
-            panic!("expected Agent(Some), got {:?}", layout);
+        let WindowLayout::Editor(Some(user_layout)) = layout else {
+            panic!("expected Editor(Some), got {:?}", layout);
         };
-        assert_eq!(user_layout.agent_dock, Some(DockPosition::Left));
+        assert_eq!(user_layout.agent_dock, Some(DockPosition::Right));
         assert_eq!(user_layout.project_panel_dock, None);
         assert_eq!(user_layout.outline_panel_dock, None);
         assert_eq!(user_layout.collaboration_panel_dock, None);
         assert_eq!(user_layout.git_panel_dock, None);
+        assert_eq!(user_layout.terminal_dock, None);
+        assert_eq!(user_layout.debugger_dock, None);
 
         // User sets a combination that doesn't match either preset:
         // agent on the left but project panel also on the left.
@@ -2049,6 +2142,395 @@ mod tests {
         };
         assert_eq!(user_layout.agent_dock, Some(DockPosition::Left));
         assert_eq!(user_layout.project_panel_dock, Some(DockSide::Left));
+    }
+
+    #[gpui::test]
+    fn test_get_layout_detects_presets_over_seven_docks(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        project::DisableAiSettings::register(cx);
+        AgentSettings::register(cx);
+
+        let ai_first = r#"
+            "agent": { "dock": "left" },
+            "project_panel": { "dock": "right" },
+            "outline_panel": { "dock": "right" },
+            "git_panel": { "dock": "right" },
+            "collaboration_panel": { "dock": "right" }
+        "#;
+
+        let mut layout_for = |content: String| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.set_user_settings(&content, cx).unwrap();
+            });
+            AgentSettings::get_layout(cx)
+        };
+
+        // The terminal and the debugger are at the bottom by default, so the
+        // five side keys are enough for "AI first".
+        assert!(matches!(
+            layout_for(format!("{{ {ai_first} }}")),
+            WindowLayout::Agent(_)
+        ));
+        assert!(matches!(
+            layout_for(format!(
+                r#"{{ {ai_first}, "terminal": {{ "dock": "bottom" }}, "debugger": {{ "dock": "bottom" }} }}"#
+            )),
+            WindowLayout::Agent(_)
+        ));
+
+        // A terminal or a debugger that left the bottom makes either preset
+        // a custom layout.
+        for moved in [
+            r#""terminal": { "dock": "left" }"#,
+            r#""terminal": { "dock": "right" }"#,
+            r#""debugger": { "dock": "left" }"#,
+            r#""debugger": { "dock": "right" }"#,
+        ] {
+            let layout = layout_for(format!("{{ {ai_first}, {moved} }}"));
+            assert!(
+                matches!(layout, WindowLayout::Custom(_)),
+                "AI first with {moved}: {layout:?}"
+            );
+            let layout = layout_for(format!("{{ {moved} }}"));
+            assert!(
+                matches!(layout, WindowLayout::Custom(_)),
+                "Classic with {moved}: {layout:?}"
+            );
+        }
+
+        // One tree panel on the other side is not a preset either.
+        let layout = layout_for(r#"{ "git_panel": { "dock": "right" } }"#.to_string());
+        let WindowLayout::Custom(user_layout) = layout else {
+            panic!("expected Custom, got {:?}", layout);
+        };
+        assert_eq!(user_layout.git_panel_dock, Some(DockPosition::Right));
+        assert_eq!(user_layout.terminal_dock, None);
+    }
+
+    #[gpui::test]
+    fn test_presets_round_trip_seven_docks(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        project::DisableAiSettings::register(cx);
+        AgentSettings::register(cx);
+
+        const DOCK_KEYS: [&str; 7] = [
+            "agent",
+            "project_panel",
+            "outline_panel",
+            "collaboration_panel",
+            "git_panel",
+            "terminal",
+            "debugger",
+        ];
+        let dock_of = |text: &str, section: &str| -> Option<String> {
+            let value: serde_json_lenient::Value =
+                serde_json_lenient::from_str(text).expect("settings are valid");
+            value
+                .get(section)
+                .and_then(|section| section.get("dock"))
+                .and_then(serde_json_lenient::Value::as_str)
+                .map(str::to_string)
+        };
+
+        // Start from a layout that matches neither preset on any key they
+        // differ on, with the terminal and the debugger away from the bottom.
+        let scattered = r#"{
+            "agent": { "dock": "bottom" },
+            "terminal": { "dock": "left" },
+            "debugger": { "dock": "right" }
+        }"#;
+
+        for (preset, is_agent, side_of_chat, side_of_trees) in [
+            (PanelLayout::AGENT, true, "left", "right"),
+            (PanelLayout::EDITOR, false, "right", "left"),
+        ] {
+            // Every one of the seven keys is written, in one update.
+            let text = SettingsStore::update_global(cx, |store, _| {
+                store
+                    .new_text_for_update(scattered.to_string(), |settings| {
+                        preset.write_to(settings);
+                    })
+                    .expect("settings update should succeed")
+            });
+            for section in DOCK_KEYS {
+                let expected = match section {
+                    "agent" => side_of_chat,
+                    "terminal" | "debugger" => "bottom",
+                    _ => side_of_trees,
+                };
+                assert_eq!(
+                    dock_of(&text, section).as_deref(),
+                    Some(expected),
+                    "{section}.dock in {text}"
+                );
+            }
+
+            // Reading the text back gives the preset, key for key.
+            SettingsStore::update_global(cx, |store, cx| {
+                store.set_user_settings(&text, cx).unwrap();
+            });
+            let store = cx.global::<SettingsStore>();
+            assert_eq!(PanelLayout::read_from(store.merged_settings()), preset);
+            let user_layout = store
+                .raw_user_settings()
+                .map(|user| PanelLayout::read_from(user.content.as_ref()))
+                .unwrap_or_default();
+            assert_eq!(user_layout, preset);
+            match AgentSettings::get_layout(cx) {
+                WindowLayout::Agent(Some(saved)) if is_agent => assert_eq!(saved, preset),
+                WindowLayout::Editor(Some(saved)) if !is_agent => assert_eq!(saved, preset),
+                other => panic!("the preset was not recognized: {other:?}"),
+            }
+        }
+    }
+
+    #[gpui::test]
+    async fn test_set_layout_moves_terminal_and_debugger_back(cx: &mut TestAppContext) {
+        let fs = fs::FakeFs::new(cx.background_executor.clone());
+        let content = r#"{
+            "terminal": { "dock": "left" },
+            "debugger": { "dock": "right" }
+        }"#;
+        fs.save(
+            paths::settings_file().as_path(),
+            &content.into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            project::DisableAiSettings::register(cx);
+            AgentSettings::register(cx);
+            SettingsStore::update_global(cx, |store, cx| {
+                store.set_user_settings(content, cx).unwrap();
+            });
+            assert!(matches!(
+                AgentSettings::get_layout(cx),
+                WindowLayout::Custom(_)
+            ));
+
+            AgentSettings::set_layout(WindowLayout::agent(), fs.clone(), cx)
+        })
+        .await
+        .ok();
+        cx.run_until_parked();
+
+        let written = fs.load(paths::settings_file().as_path()).await.unwrap();
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.set_user_settings(&written, cx).unwrap();
+            });
+            let store = cx.global::<SettingsStore>();
+            assert_eq!(
+                PanelLayout::read_from(store.merged_settings()),
+                PanelLayout::AGENT,
+                "{written}"
+            );
+            assert!(matches!(
+                AgentSettings::get_layout(cx),
+                WindowLayout::Agent(_)
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn test_reset_layout_removes_keys_and_keeps_comments(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        project::DisableAiSettings::register(cx);
+        AgentSettings::register(cx);
+
+        let content = r#"{
+  // My theme, do not touch.
+  "theme": "One Dark",
+  "bottom_dock_layout": "full",
+  "project_panel": {
+    // The tree lives on the right.
+    "dock": "right",
+    "default_width": 300
+  },
+  "outline_panel": { "dock": "right" },
+  "git_panel": {
+    "dock": "right" // next to the tree
+  },
+  "collaboration_panel": { "dock": "right", "button": false },
+  "agent": {
+    "dock": "left",
+    "flexible": true,
+    // Keep this width.
+    "default_width": 520
+  },
+  "terminal": {
+    "dock": "left",
+    "flexible": true,
+    "font_size": 13
+  },
+  "debugger": { "dock": "right" },
+  "unrelated": { "keep": true }
+}
+"#;
+
+        let reset_text = SettingsStore::update_global(cx, |store, _| {
+            store
+                .new_text_for_update(content.to_string(), AgentSettings::clear_layout)
+                .expect("settings update should succeed")
+        });
+
+        let value: serde_json_lenient::Value =
+            serde_json_lenient::from_str(&reset_text).expect("the reset settings are valid");
+        let root = value.as_object().expect("settings are an object");
+        assert!(
+            !root.contains_key("bottom_dock_layout"),
+            "bottom_dock_layout was not removed: {reset_text}"
+        );
+        for section in [
+            "project_panel",
+            "outline_panel",
+            "git_panel",
+            "collaboration_panel",
+            "agent",
+            "terminal",
+            "debugger",
+        ] {
+            if let Some(section_value) = root.get(section) {
+                let object = section_value
+                    .as_object()
+                    .unwrap_or_else(|| panic!("{section} should stay an object: {reset_text}"));
+                assert!(
+                    !object.contains_key("dock"),
+                    "{section}.dock was not removed: {reset_text}"
+                );
+                assert!(
+                    !object.contains_key("flexible"),
+                    "{section}.flexible was not removed: {reset_text}"
+                );
+            }
+        }
+        assert!(!reset_text.contains("\"dock\""), "{reset_text}");
+        assert!(!reset_text.contains("\"flexible\""), "{reset_text}");
+
+        // What the user wrote beside the layout is still there, comments
+        // included.
+        let number = |section: &str, key: &str| {
+            root.get(section)
+                .and_then(|section| section.get(key))
+                .and_then(serde_json_lenient::Value::as_f64)
+        };
+        assert_eq!(number("project_panel", "default_width"), Some(300.));
+        assert_eq!(number("agent", "default_width"), Some(520.));
+        assert_eq!(number("terminal", "font_size"), Some(13.));
+        assert_eq!(
+            root.get("collaboration_panel")
+                .and_then(|section| section.get("button"))
+                .and_then(serde_json_lenient::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            root.get("theme")
+                .and_then(serde_json_lenient::Value::as_str),
+            Some("One Dark")
+        );
+        assert_eq!(
+            root.get("unrelated")
+                .and_then(|section| section.get("keep"))
+                .and_then(serde_json_lenient::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            reset_text.contains("// My theme, do not touch."),
+            "{reset_text}"
+        );
+        assert!(reset_text.contains("// Keep this width."), "{reset_text}");
+
+        // The window is back on the defaults, which are the Classic layout.
+        SettingsStore::update_global(cx, |store, cx| {
+            let result = store.set_user_settings(&reset_text, cx);
+            assert!(result.parse_error().is_none(), "settings should parse");
+        });
+        let layout = AgentSettings::get_layout(cx);
+        let WindowLayout::Editor(Some(user_layout)) = layout else {
+            panic!("expected Editor(Some), got {:?}", layout);
+        };
+        assert_eq!(user_layout, PanelLayout::default());
+        let settings = AgentSettings::get_global(cx);
+        assert!(!settings.flexible);
+        assert_eq!(settings.default_width, px(520.));
+
+        // Resetting a file that says nothing about the layout changes nothing
+        // and adds no empty section.
+        let untouched = r#"{
+  // Only a theme.
+  "theme": "One Dark"
+}
+"#;
+        let reset_untouched = SettingsStore::update_global(cx, |store, _| {
+            store
+                .new_text_for_update(untouched.to_string(), AgentSettings::clear_layout)
+                .expect("settings update should succeed")
+        });
+        assert_eq!(reset_untouched, untouched);
+    }
+
+    #[gpui::test]
+    async fn test_reset_layout_writes_the_settings_file_once(cx: &mut TestAppContext) {
+        let fs = fs::FakeFs::new(cx.background_executor.clone());
+        let content = r#"{
+  // Chat on the left.
+  "agent": { "dock": "left", "flexible": true },
+  "project_panel": { "dock": "right" },
+  "terminal": { "dock": "right", "flexible": true },
+  "debugger": { "dock": "left" },
+  "bottom_dock_layout": "left_aligned"
+}
+"#;
+        fs.save(
+            paths::settings_file().as_path(),
+            &content.into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            project::DisableAiSettings::register(cx);
+            AgentSettings::register(cx);
+            SettingsStore::update_global(cx, |store, cx| {
+                store.set_user_settings(content, cx).unwrap();
+            });
+            assert!(matches!(
+                AgentSettings::get_layout(cx),
+                WindowLayout::Custom(_)
+            ));
+
+            AgentSettings::reset_layout(fs.clone(), cx)
+        })
+        .await
+        .expect("the update was not dropped")
+        .expect("the settings file was written");
+        cx.run_until_parked();
+
+        let written = fs.load(paths::settings_file().as_path()).await.unwrap();
+        assert!(!written.contains("\"dock\""), "{written}");
+        assert!(!written.contains("\"flexible\""), "{written}");
+        assert!(!written.contains("bottom_dock_layout"), "{written}");
+        assert!(written.contains("// Chat on the left."), "{written}");
+
+        // The store was updated by the write itself, without waiting for the
+        // file watcher.
+        cx.update(|cx| {
+            let layout = AgentSettings::get_layout(cx);
+            let WindowLayout::Editor(Some(user_layout)) = layout else {
+                panic!("expected Editor(Some), got {:?}", layout);
+            };
+            assert_eq!(user_layout, PanelLayout::default());
+        });
     }
 
     #[gpui::test]
@@ -2174,8 +2656,18 @@ mod tests {
 
             assert_eq!(user_layout.agent_dock, Some(DockPosition::Left));
             assert_eq!(user_layout.project_panel_dock, Some(DockSide::Right));
-            // Other fields weren't in user settings and didn't need changing.
-            assert_eq!(user_layout.outline_panel_dock, None);
+            // Unaligned default: the other tree panels are on the left, so
+            // they had to move as well (upstream: they were already right).
+            assert_eq!(user_layout.outline_panel_dock, Some(DockSide::Right));
+            assert_eq!(user_layout.git_panel_dock, Some(DockPosition::Right));
+            assert_eq!(
+                user_layout.collaboration_panel_dock,
+                Some(DockPosition::Right)
+            );
+            // The terminal and the debugger weren't in user settings and
+            // didn't need changing.
+            assert_eq!(user_layout.terminal_dock, None);
+            assert_eq!(user_layout.debugger_dock, None);
 
             // And the merged result should now match agent.
             let layout = AgentSettings::get_layout(cx);
@@ -2249,6 +2741,11 @@ mod tests {
                 Some(DockPosition::Left)
             );
             assert_eq!(user_layout.git_panel_dock, Some(DockPosition::Left));
+            assert_eq!(
+                user_layout.terminal_dock,
+                Some(TerminalDockPosition::Bottom)
+            );
+            assert_eq!(user_layout.debugger_dock, Some(DockPosition::Bottom));
 
             // Even though defaults are now agent, the backfilled user settings
             // keep everything in the editor layout. The user's experience

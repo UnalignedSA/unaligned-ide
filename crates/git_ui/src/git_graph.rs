@@ -1,13 +1,17 @@
 pub use crate::commit_context_menu::{CopyCommitSha, CopyCommitTag, OpenCommitView};
 use crate::{
     commit_context_menu::{
-        CUSTOM_GIT_COMMANDS_DOCS_SLUG, CommitContextMenuData, CommitContextMenuSource,
-        commit_context_menu, git_context_menu_tasks, git_task_context,
+        CommitContextMenuData, CommitContextMenuSource, commit_context_menu,
+        git_context_menu_tasks, git_task_context,
     },
     commit_tooltip::CommitAvatar,
     commit_view::{CommitView, CommitViewOptions},
     git_status_icon,
     git_timestamp::format_git_timestamp,
+};
+use app_actions::{
+    buffer_search,
+    search::{SelectNextMatch, SelectPreviousMatch, ToggleCaseSensitive},
 };
 use collections::{BTreeMap, HashMap, IndexSet};
 use editor::Editor;
@@ -48,17 +52,13 @@ use std::{
     time::{Duration, Instant},
 };
 use task::ResolvedTask;
-use zed_actions::{
-    buffer_search,
-    search::{SelectNextMatch, SelectPreviousMatch, ToggleCaseSensitive},
-};
 
 use theme::AccentColors;
 use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
 use ui::{
-    Chip, ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, ContextMenuEntry, DiffStat,
-    Disclosure, Divider, HeaderResizeInfo, HighlightedLabel, IndentGuideColors, ListItem,
-    ListItemSpacing, RedistributableColumnsState, ScrollableHandle, Table, TableInteractionState,
+    Chip, ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, ContextMenuEntry, Disclosure,
+    Divider, HeaderResizeInfo, HighlightedLabel, IndentGuideColors, ListItem, ListItemSpacing,
+    RedistributableColumnsState, ScrollableHandle, Table, TableInteractionState,
     TableRenderContext, TableResizeBehavior, Tooltip, WithScrollbar, bind_redistributable_columns,
     prelude::*, redistribute_hidden_fractions, redistribute_hidden_widths,
     render_redistributable_columns_resize_handles, render_table_header, table_row::TableRow,
@@ -1413,28 +1413,25 @@ impl RefMenuEntry {
         git_graph: &Entity<GitGraph>,
         window: &mut Window,
     ) -> ContextMenu {
+        let has_ref_name = self.ref_name.is_some();
         if let Some(ref_name) = self.ref_name {
             menu = menu.entry("Copy Ref Name", None, move |_window, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(ref_name.to_string()));
             });
         }
 
-        menu = menu.separator().header("Custom Commands");
-
+        // Upstream showed the section even when empty, with a "Learn More"
+        // entry that opened its manual. The product has no such page: the
+        // section appears once a custom command exists.
         if self.git_tasks.is_empty() {
-            return menu.item(
-                ContextMenuEntry::new("Learn More")
-                    .icon(IconName::ArrowUpRight)
-                    .icon_color(Color::Muted)
-                    .icon_position(IconPosition::End)
-                    .handler(|_window, cx| {
-                        cx.open_url(&release_channel::docs_url(
-                            CUSTOM_GIT_COMMANDS_DOCS_SLUG,
-                            cx,
-                        ));
-                    }),
-            );
+            if !has_ref_name {
+                // A detached HEAD has no name to copy: never an empty menu.
+                menu = menu.item(ContextMenuEntry::new("No Actions").disabled(true));
+            }
+            return menu;
         }
+
+        menu = menu.separator().header("Custom Commands");
 
         for (task_source_kind, resolved_task) in self.git_tasks {
             let label = resolved_task.display_label().to_string();
@@ -3458,10 +3455,11 @@ impl GitGraph {
                                     .child(Divider::vertical())
                                     .child(view_toggle),
                             )
-                            .child(DiffStat::new(
+                            .child(crate::diff_stat_text(
                                 "commit-diff-stat",
                                 total_lines_added,
                                 total_lines_removed,
+                                cx,
                             )),
                     )
                     .child(
@@ -8195,12 +8193,12 @@ mod tests {
                         &serde_json::to_string(&json!([
                             // Tagged global task that should be scheduled from the Git graph context menu.
                             {
-                                "label": "Git Show $ZED_GIT_SHA_SHORT",
+                                "label": "Git Show $IDE_GIT_SHA_SHORT",
                                 "command": "git",
-                                "args": ["show", "$ZED_GIT_SHA"],
-                                "cwd": "$ZED_GIT_REPOSITORY_PATH",
+                                "args": ["show", "$IDE_GIT_SHA"],
+                                "cwd": "$IDE_GIT_REPOSITORY_PATH",
                                 "env": {
-                                    "REPOSITORY": "$ZED_GIT_REPOSITORY_NAME",
+                                    "REPOSITORY": "$IDE_GIT_REPOSITORY_NAME",
                                 },
                                 "tags": [GIT_COMMAND_TASK_TAG],
                             },
@@ -8213,9 +8211,9 @@ mod tests {
                             // Tagged task that still should not appear because Git graph task contexts
                             // do not provide editor-specific variables.
                             {
-                                "label": "Print File $ZED_FILE",
+                                "label": "Print File $IDE_FILE",
                                 "command": "echo",
-                                "args": ["$ZED_FILE"],
+                                "args": ["$IDE_FILE"],
                                 "tags": [GIT_COMMAND_TASK_TAG],
                             },
                         ]))
@@ -8348,10 +8346,10 @@ mod tests {
                     Some(
                         &serde_json::to_string(&json!([
                             {
-                                "label": "Check out $ZED_GIT_REF",
+                                "label": "Check out $IDE_GIT_REF",
                                 "command": "git",
-                                "args": ["checkout", "$ZED_GIT_REF"],
-                                "cwd": "$ZED_GIT_REPOSITORY_PATH",
+                                "args": ["checkout", "$IDE_GIT_REF"],
+                                "cwd": "$IDE_GIT_REPOSITORY_PATH",
                                 "tags": [GIT_COMMAND_TASK_TAG],
                             },
                         ]))

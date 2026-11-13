@@ -63,7 +63,7 @@ pub struct ProjectTerminalSettingsContent {
     /// }
     /// ```
     ///
-    /// Use `"..."` to add regexes without repeating Zed's defaults. In project
+    /// Use `"..."` to add regexes without repeating the built-in defaults. In project
     /// settings, it extends the user or parent configuration value. Omit
     /// `"..."` to replace the inherited list. Set `[]` to clear it. Omitting this
     /// setting keeps the inherited list.
@@ -186,11 +186,11 @@ pub struct TerminalSettingsContent {
     pub starts_open: Option<bool>,
     /// Whether the terminal panel should use flexible (proportional) sizing.
     ///
-    /// Default: true
+    /// Default: false
     pub flexible: Option<bool>,
     /// Default width when the terminal is docked to the left or right.
     ///
-    /// Default: 640
+    /// Default: 480
     pub default_width: Option<crate::PixelSetting>,
     /// Default height when the terminal is docked to the bottom.
     ///

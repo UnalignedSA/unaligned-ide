@@ -75,7 +75,7 @@ fn init_test(cx: &mut TestAppContext) {
         ThreadMetadataStore::init_global(cx);
         TerminalThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 }
 
@@ -498,7 +498,7 @@ fn save_thread_metadata(
         let metadata = ThreadMetadata {
             thread_id,
             session_id: Some(session_id),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::IDE_AGENT_ID.clone(),
             title,
             title_override: None,
             updated_at,
@@ -534,7 +534,7 @@ fn save_thread_metadata_with_main_paths(
     let metadata = ThreadMetadata {
         thread_id,
         session_id: Some(session_id),
-        agent_id: agent::ZED_AGENT_ID.clone(),
+        agent_id: agent::IDE_AGENT_ID.clone(),
         title: Some(title),
         title_override: None,
         updated_at,
@@ -561,7 +561,7 @@ fn save_draft_metadata_with_main_paths(
     let metadata = ThreadMetadata {
         thread_id,
         session_id: None,
-        agent_id: agent::ZED_AGENT_ID.clone(),
+        agent_id: agent::IDE_AGENT_ID.clone(),
         title,
         title_override: None,
         updated_at,
@@ -1534,7 +1534,7 @@ async fn test_neighboring_activatable_entry_stays_within_project(cx: &mut TestAp
                 archived: false,
                 remote_connection: None,
             },
-            icon: IconName::ZedAgent,
+            icon: IconName::AppAgent,
             icon_from_external_svg: None,
             status: AgentThreadStatus::Completed,
             workspace: ThreadEntryWorkspace::Open(workspace.clone()),
@@ -1626,7 +1626,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     archived: false,
                     remote_connection: None,
                 },
-                icon: IconName::ZedAgent,
+                icon: IconName::AppAgent,
                 icon_from_external_svg: None,
                 status: AgentThreadStatus::Completed,
                 workspace: ThreadEntryWorkspace::Open(workspace.clone()),
@@ -1653,7 +1653,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     archived: false,
                     remote_connection: None,
                 },
-                icon: IconName::ZedAgent,
+                icon: IconName::AppAgent,
                 icon_from_external_svg: None,
                 status: AgentThreadStatus::Running,
                 workspace: ThreadEntryWorkspace::Open(workspace.clone()),
@@ -1680,7 +1680,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     archived: false,
                     remote_connection: None,
                 },
-                icon: IconName::ZedAgent,
+                icon: IconName::AppAgent,
                 icon_from_external_svg: None,
                 status: AgentThreadStatus::Error,
                 workspace: ThreadEntryWorkspace::Open(workspace.clone()),
@@ -1708,7 +1708,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     archived: false,
                     remote_connection: None,
                 },
-                icon: IconName::ZedAgent,
+                icon: IconName::AppAgent,
                 icon_from_external_svg: None,
                 status: AgentThreadStatus::WaitingForConfirmation,
                 workspace: ThreadEntryWorkspace::Open(workspace.clone()),
@@ -1736,7 +1736,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     archived: false,
                     remote_connection: None,
                 },
-                icon: IconName::ZedAgent,
+                icon: IconName::AppAgent,
                 icon_from_external_svg: None,
                 status: AgentThreadStatus::Completed,
                 workspace: ThreadEntryWorkspace::Open(workspace.clone()),
@@ -2384,7 +2384,7 @@ async fn init_test_project_with_agent_panel(
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -2596,7 +2596,7 @@ async fn test_terminal_metadata_is_deduped_across_project_groups(cx: &mut TestAp
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -2677,7 +2677,7 @@ async fn test_agent_panel_terminal_shows_project_and_linked_worktree(cx: &mut Te
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -5645,7 +5645,7 @@ async fn test_confirm_on_historical_thread_in_new_project_group_opens_real_threa
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -6441,9 +6441,20 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
             workspace.panel::<AgentPanel>(cx).is_some(),
             "Agent panel should exist"
         );
-        let dock = workspace.left_dock().read(cx);
+        // Unaligned default: the chat panel docks on the right (upstream: on the left),
+        // so look at whichever dock holds it instead of naming a side.
+        let agent_dock_is_open = [
+            workspace.left_dock(),
+            workspace.right_dock(),
+            workspace.bottom_dock(),
+        ]
+        .into_iter()
+        .any(|dock| {
+            let dock = dock.read(cx);
+            dock.panel::<AgentPanel>().is_some() && dock.is_open()
+        });
         assert!(
-            dock.is_open(),
+            agent_dock_is_open,
             "Clicking a thread should open the agent panel dock"
         );
     });
@@ -7187,7 +7198,7 @@ async fn test_cmd_n_shows_new_thread_entry_in_absorbed_worktree(cx: &mut TestApp
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -7321,7 +7332,7 @@ async fn test_only_actively_viewed_empty_draft_is_visible_in_sidebar(cx: &mut Te
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -7976,7 +7987,7 @@ async fn test_absorbed_worktree_running_thread_shows_live_status(cx: &mut TestAp
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -8077,7 +8088,7 @@ async fn test_absorbed_worktree_completion_triggers_notification(cx: &mut TestAp
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -8559,7 +8570,7 @@ async fn test_sidebar_keeps_multi_root_thread_with_stale_main_paths(cx: &mut Tes
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -8660,7 +8671,7 @@ async fn test_sidebar_keeps_multi_root_thread_with_stale_main_paths(cx: &mut Tes
                 ThreadMetadata {
                     thread_id,
                     session_id: Some(session_id.clone()),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
+                    agent_id: agent::IDE_AGENT_ID.clone(),
                     title: Some("Stale Multi-Root Thread".into()),
                     title_override: None,
                     updated_at: Utc::now(),
@@ -8741,7 +8752,7 @@ async fn test_activate_archived_thread_with_saved_paths_activates_matching_works
             ThreadMetadata {
                 thread_id: ThreadId::new(),
                 session_id: Some(session_id.clone()),
-                agent_id: agent::ZED_AGENT_ID.clone(),
+                agent_id: agent::IDE_AGENT_ID.clone(),
                 title: Some("Archived Thread".into()),
                 title_override: None,
                 updated_at: Utc::now(),
@@ -8811,7 +8822,7 @@ async fn test_activate_archived_thread_cwd_fallback_with_matching_workspace(
             ThreadMetadata {
                 thread_id: ThreadId::new(),
                 session_id: Some(acp::SessionId::new(Arc::from("unknown-session"))),
-                agent_id: agent::ZED_AGENT_ID.clone(),
+                agent_id: agent::IDE_AGENT_ID.clone(),
                 title: Some("CWD Thread".into()),
                 title_override: None,
                 updated_at: Utc::now(),
@@ -8879,7 +8890,7 @@ async fn test_activate_archived_thread_no_paths_no_cwd_uses_active_workspace(
             ThreadMetadata {
                 thread_id: ThreadId::new(),
                 session_id: Some(acp::SessionId::new(Arc::from("no-context-session"))),
-                agent_id: agent::ZED_AGENT_ID.clone(),
+                agent_id: agent::IDE_AGENT_ID.clone(),
                 title: Some("Contextless Thread".into()),
                 title_override: None,
                 updated_at: Utc::now(),
@@ -8937,7 +8948,7 @@ async fn test_activate_archived_thread_saved_paths_opens_new_workspace(cx: &mut 
             ThreadMetadata {
                 thread_id: ThreadId::new(),
                 session_id: Some(session_id.clone()),
-                agent_id: agent::ZED_AGENT_ID.clone(),
+                agent_id: agent::IDE_AGENT_ID.clone(),
                 title: Some("New WS Thread".into()),
                 title_override: None,
                 updated_at: Utc::now(),
@@ -8994,7 +9005,7 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
             ThreadMetadata {
                 thread_id: ThreadId::new(),
                 session_id: Some(session_id.clone()),
-                agent_id: agent::ZED_AGENT_ID.clone(),
+                agent_id: agent::IDE_AGENT_ID.clone(),
                 title: Some("Cross Window Thread".into()),
                 title_override: None,
                 updated_at: Utc::now(),
@@ -9073,7 +9084,7 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
     let metadata = ThreadMetadata {
         thread_id: ThreadId::new(),
         session_id: Some(session_id.clone()),
-        agent_id: agent::ZED_AGENT_ID.clone(),
+        agent_id: agent::IDE_AGENT_ID.clone(),
         title: Some("Cross Window Thread".into()),
         title_override: None,
         updated_at: Utc::now(),
@@ -9156,7 +9167,7 @@ async fn test_activate_archived_thread_prefers_current_window_for_matching_paths
     let metadata = ThreadMetadata {
         thread_id: ThreadId::new(),
         session_id: Some(session_id.clone()),
-        agent_id: agent::ZED_AGENT_ID.clone(),
+        agent_id: agent::IDE_AGENT_ID.clone(),
         title: Some("Current Window Thread".into()),
         title_override: None,
         updated_at: Utc::now(),
@@ -9217,7 +9228,7 @@ async fn test_archive_thread_uses_next_threads_own_workspace(cx: &mut TestAppCon
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -9488,7 +9499,7 @@ async fn test_archive_last_worktree_thread_removes_workspace(cx: &mut TestAppCon
         let metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(acp::SessionId::new(Arc::from("remote-thread"))),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::IDE_AGENT_ID.clone(),
             title: Some("Remote Thread".into()),
             title_override: None,
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 3, 0, 0, 0).unwrap(),
@@ -10142,7 +10153,7 @@ async fn test_archive_last_worktree_thread_not_blocked_by_remote_thread_at_same_
         let metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(acp::SessionId::new(Arc::from("remote-wt-thread"))),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::IDE_AGENT_ID.clone(),
             title: Some("Remote Worktree Thread".into()),
             title_override: None,
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
@@ -10222,7 +10233,7 @@ async fn test_linked_worktree_threads_not_duplicated_across_groups(cx: &mut Test
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
     let fs = FakeFs::new(cx.executor());
 
@@ -10755,7 +10766,7 @@ async fn test_archive_thread_active_entry_management(cx: &mut TestAppContext) {
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -10930,7 +10941,7 @@ async fn test_unarchive_first_thread_in_group_does_not_create_spurious_draft(
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -10957,7 +10968,7 @@ async fn test_unarchive_first_thread_in_group_does_not_create_spurious_draft(
                 ThreadMetadata {
                     thread_id,
                     session_id: Some(session_id.clone()),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
+                    agent_id: agent::IDE_AGENT_ID.clone(),
                     title: Some("Unarchived Thread".into()),
                     title_override: None,
                     updated_at: Utc::now(),
@@ -11026,7 +11037,7 @@ async fn test_unarchive_into_new_workspace_does_not_create_duplicate_real_thread
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -11051,7 +11062,7 @@ async fn test_unarchive_into_new_workspace_does_not_create_duplicate_real_thread
                 ThreadMetadata {
                     thread_id: original_thread_id,
                     session_id: Some(session_id.clone()),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
+                    agent_id: agent::IDE_AGENT_ID.clone(),
                     title: Some("Unarchived Thread".into()),
                     title_override: None,
                     updated_at: Utc::now(),
@@ -11170,7 +11181,7 @@ async fn test_unarchive_into_existing_workspace_replaces_draft(cx: &mut TestAppC
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -11241,7 +11252,7 @@ async fn test_unarchive_into_inactive_existing_workspace_does_not_leave_active_d
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -11278,7 +11289,7 @@ async fn test_unarchive_into_inactive_existing_workspace_does_not_leave_active_d
                 ThreadMetadata {
                     thread_id,
                     session_id: Some(session_id.clone()),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
+                    agent_id: agent::IDE_AGENT_ID.clone(),
                     title: Some("Restored In Inactive Workspace".into()),
                     title_override: None,
                     updated_at: Utc::now(),
@@ -11372,7 +11383,7 @@ async fn test_unarchive_after_removing_parent_project_group_restores_real_thread
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -11512,7 +11523,7 @@ async fn test_unarchive_does_not_create_duplicate_real_thread_metadata(cx: &mut 
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -11616,7 +11627,7 @@ async fn test_switch_to_workspace_with_archived_thread_shows_no_active_entry(
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -11765,7 +11776,7 @@ async fn test_archive_last_thread_on_linked_worktree_does_not_create_new_thread_
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -11937,7 +11948,7 @@ async fn test_archive_last_thread_on_linked_worktree_with_no_siblings_leaves_gro
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -12060,7 +12071,7 @@ async fn test_unarchive_linked_worktree_thread_into_project_group_shows_only_res
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -12129,7 +12140,7 @@ async fn test_unarchive_linked_worktree_thread_into_project_group_shows_only_res
                 ThreadMetadata {
                     thread_id: original_thread_id,
                     session_id: Some(session_id.clone()),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
+                    agent_id: agent::IDE_AGENT_ID.clone(),
                     title: Some("Unarchived Linked Thread".into()),
                     title_override: None,
                     updated_at: Utc::now(),
@@ -12239,7 +12250,7 @@ async fn test_archive_thread_on_linked_worktree_selects_sibling_thread(cx: &mut 
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -12467,7 +12478,7 @@ async fn init_multi_project_test(
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
     let fs = FakeFs::new(cx.executor());
     for path in paths {
@@ -12680,7 +12691,7 @@ async fn test_legacy_thread_with_canonical_path_opens_main_repo_workspace(cx: &m
         let metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(legacy_session.clone()),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::IDE_AGENT_ID.clone(),
             title: Some("Legacy Main Thread".into()),
             title_override: None,
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
@@ -12753,7 +12764,7 @@ async fn test_linked_worktree_workspace_reachable_after_adding_unrelated_project
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
 
         cx.observe_new(
             |workspace: &mut Workspace,
@@ -13269,7 +13280,7 @@ async fn test_worktree_add_only_regroups_threads_for_changed_workspace(cx: &mut 
         ThreadStore::init_global(cx);
         ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
-        prompt_store::init(cx);
+        init_test_prompt_store(cx);
     });
 
     let fs = FakeFs::new(cx.executor());
@@ -13670,7 +13681,7 @@ mod property_test {
         let metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(session_id),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::IDE_AGENT_ID.clone(),
             title: Some(title),
             title_override: None,
             updated_at,
@@ -14398,7 +14409,7 @@ mod property_test {
             ThreadStore::init_global(cx);
             ThreadMetadataStore::init_global(cx);
             language_model::LanguageModelRegistry::test(cx);
-            prompt_store::init(cx);
+            init_test_prompt_store(cx);
 
             // Auto-add an AgentPanel to every workspace so that implicitly
             // created workspaces (e.g. from thread activation) also have one.
@@ -14606,7 +14617,7 @@ async fn test_remote_project_integration_does_not_briefly_render_as_separate_pro
         let metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(remote_thread_id.clone()),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::IDE_AGENT_ID.clone(),
             title: Some("Worktree Thread".into()),
             title_override: None,
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 1).unwrap(),
@@ -15570,7 +15581,7 @@ async fn test_remote_archive_thread_with_active_connection(
         let metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(wt_thread_id.clone()),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::IDE_AGENT_ID.clone(),
             title: Some("Worktree Thread".into()),
             title_override: None,
             updated_at: chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 1, 1, 0, 0, 0)
@@ -15712,7 +15723,7 @@ async fn test_remote_linked_worktree_workspace_to_remove_uses_remote_connection(
         let metadata = ThreadMetadata {
             thread_id: worktree_thread_id,
             session_id: Some(worktree_session_id.clone()),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::IDE_AGENT_ID.clone(),
             title: Some("Remote Worktree Thread".into()),
             title_override: None,
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
@@ -16448,4 +16459,16 @@ fn header_search_offsets(
         hidden,
         fullscreen,
     }
+}
+
+/// The prompt library in a temporary directory: `prompt_store::init` would open
+/// (and create) the one in the user's real configuration directory.
+fn init_test_prompt_store(cx: &mut App) {
+    let db_path = std::env::temp_dir()
+        .join(format!(
+            "unaligned-ide-sidebar-tests-{}",
+            std::process::id()
+        ))
+        .join("prompts-library-db.0.mdb");
+    prompt_store::init_with_db_path(db_path, cx);
 }

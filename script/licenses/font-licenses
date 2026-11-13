@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+
+# Prints the "FONT LICENSES" block of assets/licenses.md: for every font
+# family under assets/fonts/, a heading with the family's name followed by the
+# licence files found in its directory (the SIL Open Font License asks that the
+# copyright notice and the licence accompany the fonts, and the fonts are
+# embedded in the binary).
+#
+# Called by script/generate-licenses. It needs nothing but a shell, so it can
+# be run alone to look at the block:
+#
+#     script/licenses/font-licenses [fonts directory]
+#
+# It fails when a family has no licence file, so that a font added without its
+# licence stops the packaging instead of shipping without a notice.
+# script/generate-licenses.ps1 holds the same logic for Windows: change both.
+
+set -euo pipefail
+
+FONTS_DIR="${1:-assets/fonts}"
+
+# The family's name as its authors write it. A directory that is not listed
+# is printed under its own name.
+family_name() {
+    case "$1" in
+        ibm-plex-sans) echo "IBM Plex Sans" ;;
+        jetbrains-mono) echo "JetBrains Mono" ;;
+        lilex) echo "Lilex" ;;
+        onest) echo "Onest" ;;
+        unbounded) echo "Unbounded" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+if [ ! -d "$FONTS_DIR" ]; then
+    echo "font-licenses: no such directory: $FONTS_DIR" >&2
+    exit 1
+fi
+
+printf '# ###### FONT LICENSES ######\n'
+
+family_count=0
+for family_dir in "$FONTS_DIR"/*/; do
+    [ -d "$family_dir" ] || continue
+    family_dir="${family_dir%/}"
+    family="$(basename "$family_dir")"
+
+    license_files="$(find "$family_dir" -maxdepth 1 -type f \
+        \( -iname 'OFL*' -o -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' \) | LC_ALL=C sort)"
+    if [ -z "$license_files" ]; then
+        echo "font-licenses: $family_dir has no licence file (OFL.txt, LICENSE*, license.txt)" >&2
+        exit 1
+    fi
+
+    printf '\n## %s\n' "$(family_name "$family")"
+    while IFS= read -r license_file; do
+        printf '\n'
+        cat "$license_file"
+        # Some licence files end without a newline: always finish the line.
+        if [ -n "$(tail -c 1 "$license_file")" ]; then
+            printf '\n'
+        fi
+    done <<<"$license_files"
+    printf '\n********************************************************************************\n'
+    family_count=$((family_count + 1))
+done
+
+if [ "$family_count" -eq 0 ]; then
+    echo "font-licenses: no font family under $FONTS_DIR" >&2
+    exit 1
+fi

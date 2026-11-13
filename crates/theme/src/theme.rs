@@ -141,6 +141,7 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
             .unwrap()
     });
     let icon_theme = themes.default_icon_theme().unwrap();
+    gpui::set_corner_radius_scale(theme.corners().scale());
     cx.set_global(GlobalTheme { theme, icon_theme });
 }
 
@@ -294,6 +295,12 @@ impl Theme {
         self.styles.window_background_appearance
     }
 
+    /// Returns the [`CornerStyle`] for the theme.
+    #[inline(always)]
+    pub fn corners(&self) -> CornerStyle {
+        self.styles.corners
+    }
+
     /// Darkens the color by reducing its lightness.
     /// The resulting lightness is clamped to ensure it doesn't go below 0.0.
     ///
@@ -332,7 +339,10 @@ impl GlobalTheme {
     }
 
     /// Updates the active theme.
+    ///
+    /// Also applies the theme's corner style to the process-wide corner radius scale.
     pub fn update_theme(cx: &mut App, theme: Arc<Theme>) {
+        gpui::set_corner_radius_scale(theme.corners().scale());
         cx.update_global::<Self, _>(|this, _| this.theme = theme);
     }
 

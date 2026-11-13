@@ -31,7 +31,7 @@ const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const OAUTH_SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
 
 /// Keychain slot. Must not collide with the xAI API-key provider (`https://api.x.ai/v1`).
-const CREDENTIALS_KEY: &str = "https://auth.x.ai/zed-supergrok";
+const CREDENTIALS_KEY: &str = "https://auth.x.ai/supergrok";
 const TOKEN_REFRESH_BUFFER_MS: u64 = Duration::from_secs(120).as_millis() as u64;
 
 const CALLBACK_HOST: &str = "127.0.0.1";

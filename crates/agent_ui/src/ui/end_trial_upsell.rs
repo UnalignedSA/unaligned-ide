@@ -35,7 +35,8 @@ impl RenderOnce for EndTrialUpsell {
             .child(
                 Button::new("cta-button", "Upgrade to Zed Pro")
                     .full_width()
-                    .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                    // Zed's own plan is not this product's primary action.
+                    .style(ButtonStyle::Outlined)
                     .on_click(move |_, _window, cx| {
                         telemetry::event!("Upgrade To Pro Clicked", state = "end-of-trial");
                         cx.open_url(&zed_urls::upgrade_to_zed_pro_url(cx))

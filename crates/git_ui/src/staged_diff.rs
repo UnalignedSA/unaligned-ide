@@ -25,7 +25,7 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use ui::{DiffStat, Divider, Icon, Tooltip, Window, prelude::*};
+use ui::{Divider, Icon, Tooltip, Window, prelude::*};
 use workspace::{
     ItemNavHistory, SerializableItem, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
     Workspace,
@@ -594,10 +594,11 @@ impl Render for StagedDiffToolbar {
             .flex_wrap()
             .justify_between()
             .when(!is_multibuffer_empty, |this| {
-                this.child(DiffStat::new(
+                this.child(crate::diff_stat_text(
                     "staged-diff-stat",
                     additions as usize,
                     deletions as usize,
+                    cx,
                 ))
                 .child(Divider::vertical().ml_1())
             })

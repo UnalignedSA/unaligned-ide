@@ -39,41 +39,21 @@ impl Display for ElevationIndex {
 
 impl ElevationIndex {
     /// Returns an appropriate shadow for the given elevation index.
+    ///
+    /// The design language is flat: surfaces are separated by 1px lines, so
+    /// only modal surfaces, which float over unrelated content, keep a single
+    /// neutral shadow.
     pub fn shadow(self, cx: &App) -> Vec<BoxShadow> {
         let is_light = cx.theme().appearance() == Appearance::Light;
 
         match self {
-            ElevationIndex::Surface => vec![],
-            ElevationIndex::EditorSurface => vec![],
-
-            ElevationIndex::ElevatedSurface => vec![
-                BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.12)).blur_radius(px(3.)),
-                BoxShadow::new(
-                    px(0.),
-                    px(1.),
-                    hsla(0., 0., 0., if is_light { 0.03 } else { 0.06 }),
-                ),
-            ],
-
             ElevationIndex::ModalSurface => vec![
                 BoxShadow::new(
                     px(0.),
-                    px(2.),
-                    hsla(0., 0., 0., if is_light { 0.06 } else { 0.12 }),
+                    px(8.),
+                    hsla(0., 0., 0., if is_light { 0.12 } else { 0.36 }),
                 )
-                .blur_radius(px(3.)),
-                BoxShadow::new(
-                    px(0.),
-                    px(3.),
-                    hsla(0., 0., 0., if is_light { 0.06 } else { 0.08 }),
-                )
-                .blur_radius(px(6.)),
-                BoxShadow::new(px(0.), px(6.), hsla(0., 0., 0., 0.04)).blur_radius(px(12.)),
-                BoxShadow::new(
-                    px(0.),
-                    px(1.),
-                    hsla(0., 0., 0., if is_light { 0.04 } else { 0.12 }),
-                ),
+                .blur_radius(px(24.)),
             ],
 
             _ => vec![],
@@ -114,4 +94,41 @@ impl ElevationIndex {
             ElevationIndex::ModalSurface => cx.theme().colors().editor_background,
         }
     }
+}
+
+/// The backdrop drawn over the window behind a modal: the theme's background,
+/// see-through enough to keep the context visible.
+pub fn scrim(cx: &App) -> Hsla {
+    let opacity = match cx.theme().appearance() {
+        Appearance::Light => 0.4,
+        Appearance::Dark => 0.6,
+    };
+    cx.theme().colors().background.opacity(opacity)
+}
+
+/// The ring drawn on keyboard focus: 2px, inset so that scrolling and
+/// clipping parents can never cut it off.
+pub fn focus_ring(cx: &App) -> Vec<BoxShadow> {
+    vec![
+        BoxShadow::new(px(0.), px(0.), cx.theme().colors().border_focused)
+            .spread_radius(px(2.))
+            .inset(),
+    ]
+}
+
+/// The fill of the one primary action of a view (the theme's `accent.background`).
+pub fn accent_fill(cx: &App) -> Hsla {
+    cx.theme().colors().accent_background
+}
+
+/// The fill of the primary action under the pointer (the theme's `accent.hover`).
+pub fn accent_fill_hover(cx: &App) -> Hsla {
+    cx.theme().colors().accent_hover
+}
+
+/// Text and icons sitting on [`accent_fill`] (the theme's `accent.foreground`).
+/// A theme that does not set it gets black or white, whichever reads better
+/// on its accent.
+pub fn on_accent(cx: &App) -> Hsla {
+    cx.theme().colors().accent_foreground
 }

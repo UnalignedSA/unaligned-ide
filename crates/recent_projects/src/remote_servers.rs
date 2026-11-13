@@ -2374,7 +2374,7 @@ impl RemoteServerProjects {
                                                 .color(Color::Muted)
                                                 .size(IconSize::Small),
                                         )
-                                        .child(Label::new("Open Zed Log"))
+                                        .child(Label::new("Open Log"))
                                         .on_click(cx.listener(|_, _, window, cx| {
                                             window.dispatch_action(Box::new(OpenLog), cx);
                                             cx.emit(DismissEvent);
@@ -2522,30 +2522,13 @@ impl RemoteServerProjects {
                             )
                         } else {
                             this.child(
-                                h_flex()
-                                    .p_2()
-                                    .w_full()
-                                    .gap_1()
-                                    .child(
-                                        Label::new(
-                                            "Enter the command you use to SSH into this server.",
-                                        )
-                                        .color(Color::Muted)
-                                        .size(LabelSize::Small),
+                                h_flex().p_2().w_full().gap_1().child(
+                                    Label::new(
+                                        "Enter the command you use to SSH into this server.",
                                     )
-                                    .child(
-                                        Button::new("learn-more", "Learn More")
-                                            .label_size(LabelSize::Small)
-                                            .end_icon(
-                                                Icon::new(IconName::ArrowUpRight)
-                                                    .size(IconSize::XSmall),
-                                            )
-                                            .on_click(|_, _, cx| {
-                                                cx.open_url(
-                                                    "https://zed.dev/docs/remote-development",
-                                                );
-                                            }),
-                                    ),
+                                    .color(Color::Muted)
+                                    .size(LabelSize::Small),
+                                ),
                             )
                         }
                     }),

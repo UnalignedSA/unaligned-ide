@@ -66,6 +66,8 @@ impl HighlightedMatchWithPaths {
                 .single_line()
                 .size(LabelSize::Small)
                 .color(Color::Muted)
+                // A long absolute path keeps its two ends: the root and the folder's name.
+                .truncate_middle()
         }))
     }
 

@@ -1046,6 +1046,8 @@ impl VsCodeSettings {
             unnecessary_code_fade: None,
             experimental_theme_overrides: None,
             theme_overrides: Default::default(),
+            corners: None,
+            accent: None,
         }
     }
 

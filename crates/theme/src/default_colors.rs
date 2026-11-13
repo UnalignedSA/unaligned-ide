@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 
 use crate::ColorScale;
 use crate::scale::{ColorScaleSet, ColorScales};
-use crate::{SystemColors, ThemeColors};
+use crate::{Appearance, SystemColors, ThemeColors};
 
 pub(crate) fn neutral() -> &'static ColorScaleSet {
     static NEUTRAL: LazyLock<ColorScaleSet> = LazyLock::new(sand);
@@ -50,8 +50,16 @@ impl ThemeColors {
     /// Themes that do not specify all colors are refined off of these defaults.
     pub fn light() -> Self {
         let system = SystemColors::default();
+        // Same rules as a theme file that sets none of the derived tokens: the accent is the
+        // local player's cursor colour (see `PlayerColors::light`).
+        let accent_background = blue().light().step_9();
 
         Self {
+            accent_background,
+            accent_hover: Self::accent_hover_for(accent_background, Appearance::Light),
+            accent_foreground: Self::accent_foreground_for(accent_background),
+            border_strong: neutral().light().step_6(),
+            text_faint: neutral().light().step_10(),
             border: neutral().light().step_6(),
             border_variant: neutral().light().step_5(),
             border_focused: blue().light().step_5(),
@@ -204,8 +212,16 @@ impl ThemeColors {
     /// Themes that do not specify all colors are refined off of these defaults.
     pub fn dark() -> Self {
         let system = SystemColors::default();
+        // Same rules as a theme file that sets none of the derived tokens: the accent is the
+        // local player's cursor colour (see `PlayerColors::dark`).
+        let accent_background = blue().dark().step_9();
 
         Self {
+            accent_background,
+            accent_hover: Self::accent_hover_for(accent_background, Appearance::Dark),
+            accent_foreground: Self::accent_foreground_for(accent_background),
+            border_strong: neutral().dark().step_6(),
+            text_faint: neutral().dark().step_11(),
             border: neutral().dark().step_6(),
             border_variant: neutral().dark().step_5(),
             border_focused: blue().dark().step_5(),

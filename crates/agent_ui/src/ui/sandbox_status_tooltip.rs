@@ -176,7 +176,7 @@ impl RenderOnce for SandboxStatusTooltip {
                 .gap_1()
                 .child(div().opacity(0.5).child(settings.render(cx)))
                 .child(Divider::horizontal())
-                .child(Label::new("Sandboxing is disabled for this thread").size(LabelSize::Small))
+                .child(Label::new("Sandboxing is disabled for this chat").size(LabelSize::Small))
                 .into_any_element(),
             SandboxStatusTooltip::Enabled { settings, thread } => v_flex()
                 .gap_2()
@@ -224,7 +224,7 @@ impl Component for SandboxStatusTooltip {
                 SandboxRow::domain("*.npmjs.org"),
             ]));
 
-        let thread_section = SandboxSection::new("Allowed for this thread:")
+        let thread_section = SandboxSection::new("Allowed for this chat:")
             .group(
                 SandboxGroup::new("Write Access").row(SandboxRow::path("/Users/you/project/build")),
             )

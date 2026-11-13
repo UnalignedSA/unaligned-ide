@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""A stand-in for the Unaligned API, for screenshots of the AI screens with no real key.
+
+    script/unaligned/fake-api [port [log file]]   prints the port it listens on (127.0.0.1 only), then serves
+
+`shot` starts it for scenes with "fake_api": true and points the instance at it
+(settings language_models.unaligned.api_url, environment UNALIGNED_API_KEY=sk-unal-screenshot).
+
+    GET  /v1/models                     the model list, in the API's own shape (public, like the real one):
+                                        id, name, org, context, max_output, price, status, vision,
+                                        reasoning, uncensored. One model is "down", one "degraded".
+    GET  /v1/balance                    {"balance": 20.5} for the key sent as `Authorization: Bearer <key>`
+    POST /openai/v1/chat/completions    a canned answer, streamed. Chat: a `read_file` tool call, then
+                                        a Markdown answer. Inline assist: a `rewrite_section` call.
+                                        A short title when the app asks for one.
+
+The text of the key chooses the state to play, so a scene picks one with `shot --fake-api-key <text>`
+(or by typing a fake key into the connection form). A key that contains:
+
+    bad     is refused: 401 on the balance and on chat                  (sk-unal-bad)
+    low     has $0.04 left: the balance says so and chat answers 402    (sk-unal-low)
+            "Balance too low for this request: $0.04 available."
+    slow    is answered after three seconds, balance and chat alike     (sk-unal-slow)
+    err     gets a 500 on chat; its balance is fine                     (sk-unal-err)
+    fail    gets a 500 with `Retry-After: 1` on chat, so the app's      (sk-unal-fail)
+            retries are over within a few seconds
+    rate    is rate limited: 429 with `Retry-After: 1` on chat          (sk-unal-rate)
+    gone    asks for a model that does not exist: 404 on chat           (sk-unal-gone)
+    busy    finds the service overloaded: 503 with `Retry-After: 1`     (sk-unal-busy)
+            on chat
+    drop    has its connection closed on chat, with no answer           (sk-unal-drop)
+    policy  has its prompt rejected: 400 "flagged by the content        (sk-unal-policy)
+            policy" on chat: the card that offers Edit Prompt
+    filter  has the answer cut by the model's filter                    (sk-unal-filter)
+            (finish_reason "content_filter"): the refusal card, with
+            the prompt back in the message box
+    nomodels    gets a 500 on the model list                            (sk-unal-nomodels)
+    slowmodels  gets the model list after three seconds                 (sk-unal-slowmodels)
+
+Four more words choose the turn the chat plays instead of the canned answer (balance and model list are
+fine); they need a folder open, because the app offers the model no file or terminal tool without one
+(the stand-in then gives the canned answer):
+
+    edit        the agent reads src/store.rs, then edits it and          (sk-unal-edit)
+                README.md with two `edit_file` calls, then says what it
+                did: the review bar ("2 files changed", Undo All / Keep All)
+    terminal    the agent asks to run `cargo test search` with the       (sk-unal-terminal)
+                `terminal` tool: the permission prompt (Allow / Deny)
+    stream      the agent reads src/store.rs, then the answer comes six  (sk-unal-stream)
+                characters every 0.4 s (about half a minute): the chat
+                while it is being written, Stop in place of Send
+    hang        the agent reads src/store.rs, then nothing for a minute: (sk-unal-hang)
+                a finished tool row followed by the waiting indicator
+
+The two edits match the generated sample project (`script/unaligned/make-sample`, folder `skiff`).
+
+"slow" combines with the others (sk-unal-slow-bad: refused after three seconds); it does not count as
+"low" by itself, and "slowmodels" delays the model list only, not the balance or chat. The balance of
+all the new keys is fine. Any other key, `sk-unal-screenshot` included, has $20.50 and gets the canned
+answers. A request without a key is refused like a bad one, as the real API does. The model list is
+public and depends on the key only for "nomodels" and "slowmodels" (the app sends its key with that
+request; before a key is stored, the list is the normal one).
+
+Nothing is sent anywhere and every request is ignored except for what is needed to pick an answer.
+Never use a real key with this script: it has no use for one.
+"""
+import json
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+def model(id, name, org, context, max_output, input, output, cached, vision=True, status="up", uncensored=False):
+    # Prices are US dollars per million tokens. "tokens" repeats the input price, as the real API does.
+    return {
+        "id": id,
+        "name": name,
+        "org": org,
+        "context": context,
+        "max_output": max_output,
+        "price": {"input": input, "output": output, "cached": cached, "tokens": input},
+        "status": status,
+        "vision": vision,
+        "reasoning": True,
+        "uncensored": uncensored,
+    }
+
+
+MODELS = [
+    model("claude-sonnet-5-5", "Claude Sonnet 5.5", "Anthropic", 400000, 64000, 1.25, 6.25, 0.125),
+    model("claude-opus-5", "Claude Opus 5", "Anthropic", 400000, 64000, 2.0, 10.0, 0.2),
+    model("claude-haiku-5", "Claude Haiku 5", "Anthropic", 200000, 32000, 0.375, 1.875, 0.0375),
+    model("gpt-5.2", "GPT-5.2", "OpenAI", 400000, 128000, 0.75, 6.0, 0.075),
+    model("gpt-5.2-mini", "GPT-5.2 mini", "OpenAI", 400000, 128000, 0.125, 1.0, 0.0125),
+    model("gemini-3-pro", "Gemini 3 Pro", "Google", 1000000, 65000, 1.125, 6.75, 0.1125, status="degraded"),
+    model("deepseek-v4", "DeepSeek V4", "DeepSeek", 128000, 32000, 0.25, 0.5, 0.025, vision=False),
+    model("deepseek-v4.1-flash", "DeepSeek V4.1 Flash", "DeepSeek", 128000, 16384, 0.05, 0.2, 0.005, vision=False),
+    model("qwen3-coder", "Qwen3 Coder", "Alibaba", 256000, 32000, 0.15, 0.6, 0.015, vision=False, status="down"),
+]
+
+GOOD_BALANCE = 20.5
+LOW_BALANCE = 0.04
+SLOW_SECONDS = 3
+
+ANSWER = """`Store::search` only looks at the title. To match tags as well, compare the query with each tag in the same filter:
+
+```rust
+pub fn search<'a>(&'a self, query: &'a str) -> impl Iterator<Item = &'a Task> {
+    let query = query.to_lowercase();
+    self.tasks.iter().filter(move |task| {
+        task.title.to_lowercase().contains(&query)
+            || task.tags.iter().any(|tag| tag.to_lowercase() == query)
+    })
+}
+```
+
+Two things to check before merging:
+
+1. Tags are compared exactly, titles by substring. That matches what the web view does in `matches()`.
+2. `README.md` says `skiff search notes`: add an example with a tag.
+"""
+
+# The turn played for a key that contains "edit": the same change as ANSWER describes, as two edits
+# of the sample project.
+STORE_OLD = "            .filter(move |task| task.title.to_lowercase().contains(&query))\n"
+STORE_NEW = (
+    "            .filter(move |task| {\n"
+    "                task.title.to_lowercase().contains(&query)\n"
+    "                    || task.tags.iter().any(|tag| tag.to_lowercase() == query)\n"
+    "            })\n"
+)
+README_OLD = "skiff search notes\n"
+README_NEW = "skiff search notes\nskiff search urgent   # also matches the tag `urgent`\n"
+STREAM_SECONDS = 0.4
+HANG_SECONDS = 60
+
+INLINE_ANSWER = """        let path = path.into();
+        if path.as_os_str().is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "the task file path is empty"));
+        }
+"""
+
+
+def text_of(message):
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+    return ""
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_):
+        pass
+
+    def send_json(self, status, body, retry_after=None):
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        if retry_after is not None:
+            self.send_header("Retry-After", str(retry_after))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_error_json(self, status, code, message, retry_after=None):
+        self.send_json(status, {"error": {"code": code, "message": message}}, retry_after)
+
+    def key_states(self):
+        """The states the request's key asks for (see the docstring), and whether a key was sent."""
+        authorization = self.headers.get("Authorization") or ""
+        key = authorization[len("Bearer ") :] if authorization.startswith("Bearer ") else self.headers.get("x-api-key") or ""
+        key = key.strip().lower()
+        # The two model-list words are taken out first: "slowmodels" contains "slow" and "low".
+        slow_models = "slowmodels" in key
+        no_models = "nomodels" in key
+        rest = key.replace("slowmodels", "").replace("nomodels", "")
+        slow = "slow" in rest
+        rest = rest.replace("slow", "")
+        return {
+            "none": not key,
+            "slow": slow,
+            "bad": "bad" in rest,
+            "low": "low" in rest,
+            "err": "err" in rest,
+            "fail": "fail" in rest,
+            "rate": "rate" in rest,
+            "gone": "gone" in rest,
+            "busy": "busy" in rest,
+            "drop": "drop" in rest,
+            "policy": "policy" in rest,
+            "filter": "filter" in rest,
+            "nomodels": no_models,
+            "slowmodels": slow_models,
+            # The played turns. None of these words contains another state's word.
+            "edit": "edit" in rest,
+            "terminal": "terminal" in rest,
+            "stream": "stream" in rest,
+            "hang": "hang" in rest,
+        }
+
+    def stream(self, request, answer, tool_calls=(), delay=0.01, step=24, finish=None):
+        """One streamed assistant message: text, then tool calls (name, arguments), then the usage."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        def event(delta, finish=None, usage=None):
+            chunk = {
+                "id": "chatcmpl-screenshot",
+                "object": "chat.completion.chunk",
+                "created": 1760000000,
+                "model": request.get("model", MODELS[0]["id"]),
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+            if usage:
+                chunk["usage"] = usage
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            self.wfile.flush()
+
+        try:
+            event({"role": "assistant", "content": ""})
+            for start in range(0, len(answer), step):
+                event({"content": answer[start : start + step]})
+                time.sleep(delay)
+            for index, (name, arguments) in enumerate(tool_calls):
+                call = {
+                    "index": index,
+                    # Unique within a conversation: a played turn calls tools more than once.
+                    "id": f"call_screenshot_{name}_{index}_{int(time.time() * 1000)}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(arguments)},
+                }
+                event({"tool_calls": [call]})
+            usage = {"prompt_tokens": 1840, "completion_tokens": 212, "total_tokens": 2052}
+            event({}, finish=finish or ("tool_calls" if tool_calls else "stop"), usage=usage)
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        self.close_connection = True
+
+    def play_turn(self, request, states, tools, tool_results):
+        """The turns of the keys "edit", "terminal", "stream" and "hang". True when one was played."""
+        read = ("read_file", {"path": "skiff/src/store.rs"})
+        if states["edit"] and "edit_file" in tools:
+            if tool_results == 0:
+                self.stream(request, "I'll read the store first.", [read])
+            elif tool_results == 1:
+                self.stream(
+                    request,
+                    "The filter only looks at the title. I'll compare the tags too and add an example to the README.",
+                    [
+                        ("edit_file", {"path": "skiff/src/store.rs", "edits": [{"old_text": STORE_OLD, "new_text": STORE_NEW}]}),
+                        ("edit_file", {"path": "skiff/README.md", "edits": [{"old_text": README_OLD, "new_text": README_NEW}]}),
+                    ],
+                )
+            else:
+                self.stream(request, "`Store::search` now matches tags as well as titles, and the README shows it.")
+            return True
+        if states["terminal"] and "terminal" in tools:
+            if tool_results == 0:
+                self.stream(request, "I'll run the tests first.", [("terminal", {"command": "cargo test search", "cd": "skiff"})])
+            else:
+                self.stream(request, "The tests pass.")
+            return True
+        if states["stream"] and "read_file" in tools:
+            if tool_results == 0:
+                self.stream(request, "I'll read the store first.", [read])
+            else:
+                self.stream(request, ANSWER, delay=STREAM_SECONDS, step=6)
+            return True
+        if states["hang"] and "read_file" in tools:
+            if tool_results == 0:
+                self.stream(request, "I'll read the store first.", [read])
+            else:
+                time.sleep(HANG_SECONDS)
+                self.stream(request, "Done.")
+            return True
+        return False
+
+    def refuse(self):
+        self.send_json(401, {"error": {"code": "unauthorized", "message": "Missing or invalid credentials."}})
+
+    def do_GET(self):
+        path = self.path.split("?")[0].rstrip("/")
+        if path == "/v1/models":
+            states = self.key_states()
+            if states["slowmodels"]:
+                time.sleep(SLOW_SECONDS)
+            if states["nomodels"]:
+                return self.send_error_json(500, "internal", "Internal server error.")
+            self.send_json(200, {"models": MODELS})
+        elif path == "/v1/balance":
+            trace("GET /v1/balance")
+            states = self.key_states()
+            if states["slow"]:
+                time.sleep(SLOW_SECONDS)
+            if states["none"] or states["bad"]:
+                self.refuse()
+            else:
+                self.send_json(200, {"balance": LOW_BALANCE if states["low"] else GOOD_BALANCE})
+        else:
+            self.send_json(404, {"error": {"message": "not found"}})
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            request = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            request = {}
+        if not self.path.endswith("/chat/completions"):
+            return self.send_json(404, {"error": {"message": "not found"}})
+
+        trace("POST " + self.path)
+        if LOG:
+            with open(LOG, "a") as log:
+                log.write(json.dumps(request)[:20000] + "\n")
+        states = self.key_states()
+        if states["slow"]:
+            time.sleep(SLOW_SECONDS)
+        if states["none"] or states["bad"]:
+            return self.refuse()
+        if states["low"]:
+            message = f"Balance too low for this request: ${LOW_BALANCE:.2f} available."
+            return self.send_json(402, {"error": {"code": "insufficient_balance", "message": message}})
+        if states["err"]:
+            return self.send_json(500, {"error": {"code": "internal", "message": "Internal server error."}})
+        if states["fail"]:
+            return self.send_error_json(500, "internal", "Internal server error.", 1)
+        if states["rate"]:
+            return self.send_error_json(429, "rate_limited", "Too many requests. Slow down.", 1)
+        if states["gone"]:
+            return self.send_error_json(404, "model_not_found", "Model not found.")
+        if states["busy"]:
+            return self.send_error_json(503, "overloaded", "The service is overloaded.", 1)
+        if states["drop"]:
+            # The request was read in full above: closing now is a server that hangs up.
+            self.close_connection = True
+            self.connection.close()
+            return
+
+        messages = request.get("messages", [])
+        everything = " ".join(text_of(message) for message in messages)
+        tools = [tool.get("function", {}).get("name") for tool in request.get("tools") or []]
+        tool_results = sum(1 for message in messages if message.get("role") == "tool")
+        if "Generate a concise 3-7 word title" in everything:
+            return self.stream(request, "Search tasks by tag")
+        if states["policy"]:
+            return self.send_error_json(400, "content_policy", "Your request was flagged by the content policy.")
+        if states["filter"]:
+            return self.stream(request, "", finish="content_filter")
+        if self.play_turn(request, states, tools, tool_results):
+            return
+        if "read_file" in tools and tool_results == 0:
+            return self.stream(request, "I'll read the store first.", [("read_file", {"path": "skiff/src/store.rs"})])
+        if "rewrite_section" in tools:
+            # Inline assist (Cmd+K): the edit comes as the argument of this tool.
+            return self.stream(request, "", [("rewrite_section", {"replacement_text": INLINE_ANSWER})])
+        # No file tool is offered while no folder is open: the answer comes at once.
+        self.stream(request, ANSWER)
+
+
+LOG = None
+
+
+def trace(what):
+    """One line per request, with the time, in `<log>.requests`: lets a test
+    see when the balance was read relative to the chat requests."""
+    if LOG:
+        with open(LOG + ".requests", "a") as requests:
+            requests.write(time.strftime("%H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d} {what}\n")
+
+
+
+def main():
+    global LOG
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+    LOG = sys.argv[2] if len(sys.argv) > 2 else None
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    print(server.server_address[1], flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

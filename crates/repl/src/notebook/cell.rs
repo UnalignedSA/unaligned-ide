@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use app_actions::notebook::InterruptKernel;
 use editor::{Editor, EditorMode, MultiBuffer, SizingBehavior};
 use futures::{StreamExt as _, future::Shared};
 use gpui::{
@@ -14,7 +15,6 @@ use nbformat::v4::{CellId, CellMetadata, CellType};
 use settings::Settings as _;
 use ui::{CommonAnimationExt, IconButtonShape, prelude::*};
 use util::ResultExt;
-use zed_actions::notebook::InterruptKernel;
 
 use crate::{
     notebook::{CODE_BLOCK_INSET, GUTTER_WIDTH},

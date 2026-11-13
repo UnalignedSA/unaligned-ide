@@ -49,7 +49,9 @@ async fn test_debug_panel_default_size(cx: &mut TestAppContext) {
     workspace
         .update(cx, |workspace, window, cx| {
             let panel = workspace.panel::<DebugPanel>(cx).unwrap();
-            assert_eq!(panel.read(cx).default_size(window, cx), px(300.));
+            // Unaligned default: `debugger.default_height` is 320, the terminal's
+            // height, so the bottom dock does not jump between its two tabs.
+            assert_eq!(panel.read(cx).default_size(window, cx), px(320.));
 
             for (dock, expected_size) in [
                 (settings::DockPosition::Left, px(495.)),
@@ -1351,7 +1353,7 @@ async fn test_send_breakpoints_when_editor_has_been_saved(
     });
 
     editor.update_in(cx, |editor, window, cx| {
-        editor.move_down(&zed_actions::editor::MoveDown, window, cx);
+        editor.move_down(&app_actions::editor::MoveDown, window, cx);
         editor.toggle_breakpoint(&actions::ToggleBreakpoint, window, cx);
     });
 
@@ -1389,7 +1391,7 @@ async fn test_send_breakpoints_when_editor_has_been_saved(
     });
 
     editor.update_in(cx, |editor, window, cx| {
-        editor.move_up(&zed_actions::editor::MoveUp, window, cx);
+        editor.move_up(&app_actions::editor::MoveUp, window, cx);
         editor.insert("new text\n", window, cx);
     });
 
@@ -1484,18 +1486,18 @@ async fn test_unsetting_breakpoints_on_clear_breakpoint_action(
     });
 
     first_editor.update_in(cx, |editor, window, cx| {
-        editor.move_down(&zed_actions::editor::MoveDown, window, cx);
+        editor.move_down(&app_actions::editor::MoveDown, window, cx);
         editor.toggle_breakpoint(&actions::ToggleBreakpoint, window, cx);
-        editor.move_down(&zed_actions::editor::MoveDown, window, cx);
-        editor.move_down(&zed_actions::editor::MoveDown, window, cx);
+        editor.move_down(&app_actions::editor::MoveDown, window, cx);
+        editor.move_down(&app_actions::editor::MoveDown, window, cx);
         editor.toggle_breakpoint(&actions::ToggleBreakpoint, window, cx);
     });
 
     second_editor.update_in(cx, |editor, window, cx| {
         editor.toggle_breakpoint(&actions::ToggleBreakpoint, window, cx);
-        editor.move_down(&zed_actions::editor::MoveDown, window, cx);
-        editor.move_down(&zed_actions::editor::MoveDown, window, cx);
-        editor.move_down(&zed_actions::editor::MoveDown, window, cx);
+        editor.move_down(&app_actions::editor::MoveDown, window, cx);
+        editor.move_down(&app_actions::editor::MoveDown, window, cx);
+        editor.move_down(&app_actions::editor::MoveDown, window, cx);
         editor.toggle_breakpoint(&actions::ToggleBreakpoint, window, cx);
     });
 

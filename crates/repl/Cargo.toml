@@ -17,6 +17,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+branding.workspace = true
 async-dispatcher.workspace = true
 async-task.workspace = true
 async-tungstenite = { workspace = true, features = ["tokio", "tokio-rustls-manual-roots", "tokio-runtime"] }
@@ -58,7 +59,7 @@ util.workspace = true
 uuid.workspace = true
 workspace.workspace = true
 picker.workspace = true
-zed_actions.workspace = true
+app_actions.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

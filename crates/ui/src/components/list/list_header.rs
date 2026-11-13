@@ -121,8 +121,8 @@ impl RenderOnce for ListHeader {
                     .map(|this| match self.height {
                         Some(height) => this.h(height),
                         None => match ui_density {
-                            UiDensity::Comfortable => this.h_5(),
-                            _ => this.h_7(),
+                            UiDensity::Comfortable => this.h(rems_from_px(26_f32)),
+                            _ => this.h(rems_from_px(22_f32)),
                         },
                     })
                     .when(self.inset, |this| this.px_2())
@@ -162,7 +162,13 @@ impl RenderOnce for ListHeader {
                                     .gap(DynamicSpacing::Base04.rems(cx))
                                     .items_center()
                                     .children(self.start_slot)
-                                    .child(Label::new(self.label.clone()).color(Color::Muted))
+                                    // Section header: mono, uppercase, quiet.
+                                    .child(
+                                        Label::new(self.label.to_uppercase())
+                                            .color(Color::Muted)
+                                            .size(LabelSize::XSmall)
+                                            .buffer_font(cx),
+                                    )
                                     .when_some(self.on_toggle, |this, on_toggle| {
                                         this.on_click(move |event, window, cx| {
                                             on_toggle(event, window, cx)

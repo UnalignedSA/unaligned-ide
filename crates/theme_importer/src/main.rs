@@ -17,8 +17,6 @@ use theme::{Appearance, AppearanceContent};
 use crate::vscode::VsCodeTheme;
 use crate::vscode::VsCodeThemeConverter;
 
-const ZED_THEME_SCHEMA_URL: &str = "https://zed.dev/schema/themes/v0.2.0.json";
-
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeAppearanceJson {
@@ -110,11 +108,9 @@ fn main() -> Result<()> {
     let converter = VsCodeThemeConverter::new(vscode_theme, theme_metadata, IndexMap::default());
 
     let theme = converter.convert()?;
-    let mut theme = serde_json::to_value(theme).unwrap();
-    theme.as_object_mut().unwrap().insert(
-        "$schema".to_string(),
-        serde_json::Value::String(ZED_THEME_SCHEMA_URL.to_string()),
-    );
+    // No `$schema` key: the only published schema for this format is hosted on zed.dev and does
+    // not know this fork's keys (`corners`, `accent.*`, `border.strong`, `text.faint`). The
+    // current one is printed by `cargo run -p schema_generator -- theme`.
     let theme_json = serde_json::to_string_pretty(&theme).unwrap();
 
     if let Some(output) = args.output {

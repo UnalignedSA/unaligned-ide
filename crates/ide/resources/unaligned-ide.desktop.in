@@ -1,0 +1,21 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=@APP_NAME@
+GenericName=Code Editor
+Comment=A fast editor made for coding with AI
+TryExec=@APP_CLI@
+StartupNotify=true
+StartupWMClass=@APP_WM_CLASS@
+Exec=@APP_CLI@ %U
+Icon=@APP_ICON@
+Categories=Development;IDE;TextEditor;Utility;
+Keywords=@APP_KEYWORDS@
+# To list the editor under "Open Folder With...", add `inode/directory` to MimeType (separated by semicolons).
+# It is left out on purpose: on some desktops the last application installed for that type becomes the file manager.
+MimeType=text/plain;application/x-zerosize;x-scheme-handler/@APP_URL_SCHEME@;
+Actions=NewWindow;
+
+[Desktop Action NewWindow]
+Exec=@APP_CLI@ --new %U
+Name=New Window

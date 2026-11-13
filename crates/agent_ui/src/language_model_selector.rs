@@ -1,6 +1,7 @@
 use std::{cmp::Reverse, sync::Arc};
 
 use agent_settings::AgentSettings;
+use app_actions::agent::OpenSettings;
 use collections::{HashMap, HashSet, IndexMap};
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
@@ -11,13 +12,203 @@ use language_model::{
     IconOrSvg, LanguageModel, LanguageModelId, LanguageModelProvider, LanguageModelProviderId,
     LanguageModelRegistry,
 };
+use language_models::provider::unaligned::{ModelStatus, UnalignedLanguageModelProvider};
 use ordered_float::OrderedFloat;
 use picker::{Picker, PickerDelegate};
+use project::AgentId;
 use settings::Settings;
 use ui::prelude::*;
-use zed_actions::agent::OpenSettings;
 
-use crate::ui::{ModelSelectorFooter, ModelSelectorHeader, ModelSelectorListItem};
+use crate::connections::{self, Backing};
+use crate::favorite_models::{
+    MAX_RECENT_MODELS, note_recent_model, recent_model_key, recent_models,
+};
+use crate::ui::{
+    ModelHealth, ModelSelectorFooter, ModelSelectorHeader, ModelSelectorListItem,
+    NOTHING_CONNECTED, PRICE_UNIT, connect_a_model_action, context_hint,
+};
+
+/// The label of the group of models chosen last.
+pub(crate) const RECENT_GROUP: &str = "Recent";
+/// The label of the group of models the user starred.
+pub(crate) const FAVORITES_GROUP: &str = "Favorites";
+/// The label of the group of agents that bring their own subscription.
+pub(crate) const AGENTS_GROUP: &str = "Agents with their own subscription";
+
+/// What the picker shows of a model besides its name and price, read once
+/// when the list is built.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ModelFacts {
+    /// The provider that serves the model, by id.
+    pub provider_id: Option<LanguageModelProviderId>,
+    /// The title of the connection the model belongs to ("Unaligned",
+    /// "ChatGPT Plus or Pro"), the group's label.
+    pub connection: Option<SharedString>,
+    /// Who made the model, when the provider says so (Unaligned does).
+    pub org: Option<SharedString>,
+    pub health: ModelHealth,
+    /// The context window as a short hint ("400K").
+    pub context: Option<SharedString>,
+    /// "Recommended" on the model its provider would choose, "Fast" on the
+    /// one it uses for small jobs: the two a newcomer can pick without
+    /// reading prices.
+    pub tag: Option<&'static str>,
+}
+
+/// The models of a connected provider with what the picker shows of each.
+pub(crate) fn provider_models(
+    provider: &dyn LanguageModelProvider,
+    connection: &SharedString,
+    cx: &App,
+) -> Vec<(LanguageModel, ModelFacts)> {
+    let recommended = provider.default_model(cx).map(|model| model.id);
+    let fast = provider.default_fast_model(cx).map(|model| model.id);
+    provider
+        .provided_models(cx)
+        .into_iter()
+        .map(|model| {
+            let mut facts = ModelFacts::of(&model, Some(connection.clone()), cx);
+            facts.tag = if facts.health == ModelHealth::Down {
+                None
+            } else if recommended.as_ref() == Some(&model.id) {
+                Some("Recommended")
+            } else if fast.as_ref() == Some(&model.id) {
+                Some("Fast")
+            } else {
+                None
+            };
+            (model, facts)
+        })
+        .collect()
+}
+
+impl ModelFacts {
+    pub(crate) fn of(model: &LanguageModel, connection: Option<SharedString>, cx: &App) -> Self {
+        let details = if model.provider_id.0.as_ref() == crate::UNALIGNED_PROVIDER_ID {
+            UnalignedLanguageModelProvider::global(cx)
+                .and_then(|provider| provider.model_details(&model.id, cx))
+        } else {
+            None
+        };
+        let health = match details.as_ref().map(|details| &details.status) {
+            Some(ModelStatus::Down) => ModelHealth::Down,
+            Some(ModelStatus::Degraded) => ModelHealth::Degraded,
+            Some(ModelStatus::Up | ModelStatus::Unknown) | None => ModelHealth::Up,
+        };
+        Self {
+            provider_id: Some(model.provider_id.clone()),
+            connection,
+            org: details.and_then(|details| details.org),
+            health,
+            context: context_hint(model.max_token_count),
+            tag: None,
+        }
+    }
+
+    pub(crate) fn is_unaligned(&self) -> bool {
+        self.provider_id
+            .as_ref()
+            .is_some_and(|id| id.0.as_ref() == crate::UNALIGNED_PROVIDER_ID)
+    }
+}
+
+/// The connected providers in the order of the connection catalog (Unaligned
+/// first), each with the title of its connection. Providers are matched by
+/// id; one the catalog does not know comes last under its own name.
+pub(crate) fn connected_providers(cx: &App) -> Vec<(Arc<dyn LanguageModelProvider>, SharedString)> {
+    let catalog = connections::catalog(cx);
+    let spec_position = |id: &LanguageModelProviderId| {
+        catalog
+            .iter()
+            .position(|spec| matches!(&spec.backing, Backing::Provider(spec_id) if spec_id == id))
+    };
+
+    let mut providers = LanguageModelRegistry::read_global(cx)
+        .visible_providers()
+        .into_iter()
+        .filter(|provider| provider.is_authenticated(cx))
+        .map(|provider| {
+            let position = spec_position(&provider.id());
+            let title = position
+                .map(|position| catalog[position].title.clone())
+                .unwrap_or_else(|| provider.name().0);
+            (position.unwrap_or(usize::MAX), provider, title)
+        })
+        .collect::<Vec<_>>();
+    providers.sort_by_key(|(position, _, _)| *position);
+    providers
+        .into_iter()
+        .map(|(_, provider, title)| (provider, title))
+        .collect()
+}
+
+/// An agent that answers with the user's own subscription, as a row of the
+/// model picker.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AgentRow {
+    pub id: AgentId,
+    pub name: SharedString,
+    pub icon: IconName,
+}
+
+/// The agents that are set up, in catalog order; none while external agents
+/// are switched off.
+pub(crate) fn set_up_agents(cx: &App) -> Vec<AgentRow> {
+    if !crate::show_external_agents() {
+        return Vec::new();
+    }
+    connections::catalog(cx)
+        .into_iter()
+        .filter(|spec| connections::state(spec, cx).is_connected())
+        .filter_map(|spec| match &spec.backing {
+            Backing::Agent(id) => Some(AgentRow {
+                name: crate::agent_display_name(id, Some(spec.title.clone())),
+                id: id.clone(),
+                icon: spec.icon,
+            }),
+            Backing::Provider(_) => None,
+        })
+        .collect()
+}
+
+/// Splits the models of one connection by who made them: makers in
+/// alphabetical order, models without a known maker after them, and inside a
+/// maker the models that are down after those that answer. A maker with no
+/// model that answers goes last, so the list never opens on a dead row. A
+/// connection that names no maker stays one group.
+pub(crate) fn split_by_maker<T>(
+    models: Vec<T>,
+    maker: impl Fn(&T) -> Option<SharedString>,
+    is_down: impl Fn(&T) -> bool,
+) -> Vec<(Option<SharedString>, Vec<T>)> {
+    let mut groups: Vec<(Option<SharedString>, Vec<T>)> = Vec::new();
+    for model in models {
+        let maker = maker(&model);
+        match groups.iter_mut().find(|(group, _)| *group == maker) {
+            Some((_, group)) => group.push(model),
+            None => groups.push((maker, vec![model])),
+        }
+    }
+    for (_, group) in &mut groups {
+        group.sort_by_key(|model| is_down(model));
+    }
+    groups.sort_by_cached_key(|(maker, group)| {
+        let all_down = group.iter().all(|model| is_down(model));
+        match maker {
+            Some(maker) => (all_down, false, maker.to_lowercase()),
+            None => (all_down, true, String::new()),
+        }
+    });
+    groups
+}
+
+/// The label of a maker's group inside a connection: "Unaligned · Anthropic".
+pub(crate) fn maker_group_title(connection: &str, maker: Option<&SharedString>) -> SharedString {
+    match maker {
+        Some(maker) => format!("{connection} · {maker}").into(),
+        None => format!("{connection} · Other").into(),
+    }
+}
 
 type OnModelChanged = Arc<dyn Fn(LanguageModel, &mut App) + 'static>;
 type GetActiveModel = Arc<dyn Fn(&App) -> Option<LanguageModel> + 'static>;
@@ -47,7 +238,7 @@ pub fn language_model_selector(
     if popover_styles {
         Picker::list(delegate, window, cx)
             .show_scrollbar(true)
-            .initial_width(rems(20.))
+            .initial_width(rems(crate::model_selector::PICKER_WIDTH_REMS))
             .popover()
     } else {
         Picker::list(delegate, window, cx)
@@ -56,9 +247,22 @@ pub fn language_model_selector(
     }
 }
 
-fn all_models(cx: &App) -> GroupedModels {
-    let lm_registry = LanguageModelRegistry::global(cx).read(cx);
-    let providers = lm_registry.visible_providers();
+fn all_models(cx: &mut App) -> GroupedModels {
+    let recents = recent_models(cx);
+    let cx: &App = cx;
+    let providers = if crate::simple_mode() {
+        // Only what is connected, in the order of the connection catalog.
+        connected_providers(cx)
+    } else {
+        LanguageModelRegistry::read_global(cx)
+            .visible_providers()
+            .into_iter()
+            .map(|provider| {
+                let name = provider.name().0;
+                (provider, name)
+            })
+            .collect()
+    };
 
     let mut favorites_index = FavoritesIndex::default();
 
@@ -69,27 +273,34 @@ fn all_models(cx: &App) -> GroupedModels {
             .insert(sel.model.clone().into());
     }
 
+    // With one group per provider, a cross-provider "Recommended" group only
+    // repeats models, so the simple chat does not build it.
     let recommended = providers
         .iter()
-        .flat_map(|provider| {
+        .filter(|_| !crate::simple_mode())
+        .flat_map(|(provider, title)| {
             provider
                 .recommended_models(cx)
                 .into_iter()
-                .map(|model| ModelInfo::new(&**provider, model, &favorites_index))
+                .map(|model| {
+                    let facts = ModelFacts::of(&model, Some(title.clone()), cx);
+                    ModelInfo::new(&**provider, model, facts, &favorites_index)
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
     let all = providers
         .iter()
-        .flat_map(|provider| {
-            provider
-                .provided_models(cx)
+        .flat_map(|(provider, title)| {
+            provider_models(&**provider, title, cx)
                 .into_iter()
-                .map(|model| ModelInfo::new(&**provider, model, &favorites_index))
+                .map(|(model, facts)| ModelInfo::new(&**provider, model, facts, &favorites_index))
+                .collect::<Vec<_>>()
         })
         .collect();
 
-    GroupedModels::new(all, recommended)
+    GroupedModels::new(all, recommended).with_recents(&recents)
 }
 
 type FavoritesIndex = HashMap<LanguageModelProviderId, HashSet<LanguageModelId>>;
@@ -99,12 +310,17 @@ struct ModelInfo {
     model: LanguageModel,
     icon: IconOrSvg,
     is_favorite: bool,
+    facts: ModelFacts,
+    /// Whether the row carries its provider's icon: only where the group
+    /// label does not already say who answers.
+    shows_icon: bool,
 }
 
 impl ModelInfo {
     fn new(
         provider: &dyn LanguageModelProvider,
         model: LanguageModel,
+        facts: ModelFacts,
         favorites_index: &FavoritesIndex,
     ) -> Self {
         let is_favorite = favorites_index
@@ -112,10 +328,29 @@ impl ModelInfo {
             .map_or(false, |set| set.contains(&model.id()));
 
         Self {
+            facts,
             model,
             icon: provider.icon(),
             is_favorite,
+            shows_icon: true,
         }
+    }
+
+    fn with_icon(mut self, shows_icon: bool) -> Self {
+        self.shows_icon = shows_icon;
+        self
+    }
+
+    /// A row of "Recent" or "Favorites": the user's own choice, which needs
+    /// no recommendation; the icon says who answers when several could.
+    fn in_mixed_group(mut self, mixes_connections: bool) -> Self {
+        self.shows_icon = mixes_connections;
+        self.facts.tag = None;
+        self
+    }
+
+    fn is_disabled(&self) -> bool {
+        self.model.disabled_reason.is_some()
     }
 }
 
@@ -239,12 +474,47 @@ impl LanguageModelPickerDelegate {
 }
 
 struct GroupedModels {
+    /// The models chosen last, most recent first. Empty while a query is
+    /// typed: a search answers with its matches only.
+    recents: Vec<ModelInfo>,
     favorites: Vec<ModelInfo>,
     recommended: Vec<ModelInfo>,
     all: IndexMap<LanguageModelProviderId, Vec<ModelInfo>>,
+    /// Whether the list is shown as it is (no query): only then are the
+    /// models of Unaligned split by maker and the ones that are down put last.
+    /// Matches of a query stay in the order of their score.
+    is_browsing: bool,
 }
 
 impl GroupedModels {
+    /// Adds the "Recent" group: the models of `recents` (keys of
+    /// [`recent_model_key`], most recent first) that are still offered.
+    fn with_recents(mut self, recents: &[SharedString]) -> Self {
+        self.recents = recents
+            .iter()
+            .filter_map(|recent| {
+                self.all
+                    .values()
+                    .flatten()
+                    .find(|info| &recent_model_key(&info.model) == recent)
+                    .cloned()
+            })
+            .take(MAX_RECENT_MODELS)
+            .collect();
+        self
+    }
+
+    /// The matches of a query: no "Recent" group, score order kept.
+    fn filtered(mut self) -> Self {
+        self.recents.clear();
+        self.is_browsing = false;
+        self
+    }
+
+    fn is_empty(&self) -> bool {
+        self.all.values().all(|models| models.is_empty())
+    }
+
     pub fn new(all: Vec<ModelInfo>, recommended: Vec<ModelInfo>) -> Self {
         let favorites = all
             .iter()
@@ -263,38 +533,95 @@ impl GroupedModels {
         }
 
         Self {
+            recents: Vec::new(),
             favorites,
             recommended,
             all: all_by_provider,
+            is_browsing: true,
         }
     }
 
     fn entries(&self) -> Vec<LanguageModelPickerEntry> {
         let mut entries = Vec::new();
 
+        // Under a connection's label a row needs no icon. In the groups that
+        // mix connections it says who answers, when there is more than one.
+        let mixes_connections = self.all.len() > 1;
+
+        if !self.recents.is_empty() {
+            entries.push(LanguageModelPickerEntry::Separator(RECENT_GROUP.into()));
+            for info in &self.recents {
+                entries.push(LanguageModelPickerEntry::Model(
+                    info.clone().in_mixed_group(mixes_connections),
+                ));
+            }
+        }
+
         if !self.favorites.is_empty() {
-            entries.push(LanguageModelPickerEntry::Separator("Favorite".into()));
+            entries.push(LanguageModelPickerEntry::Separator(FAVORITES_GROUP.into()));
             for info in &self.favorites {
-                entries.push(LanguageModelPickerEntry::Model(info.clone()));
+                entries.push(LanguageModelPickerEntry::Model(
+                    info.clone().in_mixed_group(mixes_connections),
+                ));
             }
         }
 
         if !self.recommended.is_empty() {
             entries.push(LanguageModelPickerEntry::Separator("Recommended".into()));
             for info in &self.recommended {
-                entries.push(LanguageModelPickerEntry::Model(info.clone()));
+                entries.push(LanguageModelPickerEntry::Model(
+                    info.clone().in_mixed_group(mixes_connections),
+                ));
             }
         }
 
         for models in self.all.values() {
-            if models.is_empty() {
+            let Some(first) = models.first() else {
+                continue;
+            };
+            let connection = first
+                .facts
+                .connection
+                .clone()
+                .unwrap_or_else(|| first.model.provider_name().0);
+
+            let models = models
+                .iter()
+                .map(|info| info.clone().with_icon(false))
+                .collect::<Vec<_>>();
+
+            if !self.is_browsing {
+                entries.push(LanguageModelPickerEntry::Separator(connection));
+                for info in models {
+                    entries.push(LanguageModelPickerEntry::Model(info));
+                }
                 continue;
             }
-            entries.push(LanguageModelPickerEntry::Separator(
-                models[0].model.provider_name().0,
-            ));
-            for info in models {
-                entries.push(LanguageModelPickerEntry::Model(info.clone()));
+
+            let by_maker = split_by_maker(
+                models,
+                |info| info.facts.org.clone(),
+                |info| info.facts.health == ModelHealth::Down,
+            );
+            let names_makers =
+                first.facts.is_unaligned() && by_maker.iter().any(|(maker, _)| maker.is_some());
+            if !names_makers {
+                entries.push(LanguageModelPickerEntry::Separator(connection));
+                for info in by_maker.into_iter().flat_map(|(_, models)| models) {
+                    entries.push(LanguageModelPickerEntry::Model(info));
+                }
+                continue;
+            }
+            for (index, (maker, models)) in by_maker.into_iter().enumerate() {
+                let title = maker_group_title(&connection, maker.as_ref());
+                entries.push(if index == 0 {
+                    LanguageModelPickerEntry::Separator(title)
+                } else {
+                    LanguageModelPickerEntry::SubSeparator(title)
+                });
+                for info in models {
+                    entries.push(LanguageModelPickerEntry::Model(info));
+                }
             }
         }
 
@@ -304,7 +631,11 @@ impl GroupedModels {
 
 enum LanguageModelPickerEntry {
     Model(ModelInfo),
+    /// The label of a group, under a rule when it is not the first.
     Separator(SharedString),
+    /// The label of a group that continues the connection above it (its next
+    /// maker): no rule.
+    SubSeparator(SharedString),
 }
 
 struct ModelMatcher {
@@ -404,13 +735,33 @@ impl PickerDelegate for LanguageModelPickerDelegate {
 
     fn can_select(&self, ix: usize, _window: &mut Window, _cx: &mut Context<Picker<Self>>) -> bool {
         match self.filtered_entries.get(ix) {
-            Some(LanguageModelPickerEntry::Model(_)) => true,
-            Some(LanguageModelPickerEntry::Separator(_)) | None => false,
+            Some(LanguageModelPickerEntry::Model(info)) => !info.is_disabled(),
+            Some(
+                LanguageModelPickerEntry::Separator(_) | LanguageModelPickerEntry::SubSeparator(_),
+            )
+            | None => false,
         }
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
         "Select a model…".into()
+    }
+
+    fn no_matches_text(&self, _window: &mut Window, _cx: &mut App) -> Option<SharedString> {
+        // An empty catalogue is not a failed search: say what is missing.
+        if self.all_models.is_empty() {
+            Some(NOTHING_CONNECTED.into())
+        } else {
+            Some("No matches".into())
+        }
+    }
+
+    fn no_matches_action(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Picker<Self>>,
+    ) -> Option<picker::PickerEmptyAction> {
+        self.all_models.is_empty().then(connect_a_model_action)
     }
 
     fn update_matches(
@@ -462,6 +813,16 @@ impl PickerDelegate for LanguageModelPickerDelegate {
         let all = matcher_all.fuzzy_search(&query);
 
         let filtered_models = GroupedModels::new(all, recommended);
+        let filtered_models = if query.is_empty() {
+            let recents = all_models
+                .recents
+                .iter()
+                .map(|info| recent_model_key(&info.model))
+                .collect::<Vec<_>>();
+            filtered_models.with_recents(&recents)
+        } else {
+            filtered_models.filtered()
+        };
 
         cx.spawn_in(window, async move |this, cx| {
             this.update_in(cx, |this, window, cx| {
@@ -477,14 +838,29 @@ impl PickerDelegate for LanguageModelPickerDelegate {
     }
 
     fn confirm(&mut self, _secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
+        if self.all_models.is_empty() {
+            // Nothing to choose from: Enter takes the way out the empty
+            // state offers.
+            window.dispatch_action(Box::new(crate::ManageProviders), cx);
+            cx.emit(DismissEvent);
+            return;
+        }
+
         if let Some(LanguageModelPickerEntry::Model(model_info)) =
             self.filtered_entries.get(self.selected_index)
+            && !model_info.is_disabled()
         {
             let model = model_info.model.clone();
+            let recent_key = recent_model_key(&model);
             (self.on_model_changed)(model, cx);
 
             let current_index = self.selected_index;
             self.set_selected_index(current_index, window, cx);
+
+            if note_recent_model(recent_key, cx) {
+                self.all_models = Arc::new(all_models(cx));
+                cx.defer_in(window, |picker, window, cx| picker.refresh(window, cx));
+            }
 
             cx.emit(DismissEvent);
         }
@@ -503,8 +879,29 @@ impl PickerDelegate for LanguageModelPickerDelegate {
     ) -> Option<Self::ListItem> {
         match self.filtered_entries.get(ix)? {
             LanguageModelPickerEntry::Separator(title) => {
-                Some(ModelSelectorHeader::new(title, ix > 1).into_any_element())
+                // The unit of the prices, said once on the first label.
+                let lists_token_prices = ix == 0
+                    && self.filtered_entries.iter().any(|entry| {
+                        matches!(
+                            entry,
+                            LanguageModelPickerEntry::Model(info)
+                                if matches!(
+                                    info.model.cost_info,
+                                    Some(language_model::LanguageModelCostInfo::TokenCost { .. })
+                                )
+                        )
+                    });
+                Some(
+                    ModelSelectorHeader::new(title, ix > 0)
+                        .detail(lists_token_prices.then_some(PRICE_UNIT))
+                        .into_any_element(),
+                )
             }
+            LanguageModelPickerEntry::SubSeparator(title) => Some(
+                ModelSelectorHeader::new(title, false)
+                    .sub_group(true)
+                    .into_any_element(),
+            ),
             LanguageModelPickerEntry::Model(model_info) => {
                 let active_model = (self.get_active_model)(cx);
                 let active_provider_id = active_model.as_ref().map(|m| m.provider_id());
@@ -531,15 +928,19 @@ impl PickerDelegate for LanguageModelPickerDelegate {
 
                 Some(
                     ModelSelectorListItem::new(ix, model_info.model.name().0)
-                        .map(|this| match &model_info.icon {
+                        .when(model_info.shows_icon, |this| match &model_info.icon {
                             IconOrSvg::Icon(icon_name) => this.icon(*icon_name),
                             IconOrSvg::Svg(icon_path) => this.icon_path(icon_path.clone()),
                         })
+                        .tag(model_info.facts.tag)
+                        .disabled(model_info.model.disabled_reason.clone())
+                        .health(model_info.facts.health)
                         .is_selected(is_selected)
                         .is_focused(selected)
                         .is_latest(model_info.model.is_latest())
                         .is_favorite(is_favorite)
                         .cost_info(model_cost)
+                        .context_hint(model_info.facts.context.clone())
                         .on_toggle_favorite(handle_action_click)
                         .into_any_element(),
                 )
@@ -554,8 +955,17 @@ impl PickerDelegate for LanguageModelPickerDelegate {
     ) -> Option<gpui::AnyElement> {
         let focus_handle = self.focus_handle.clone();
 
+        // With nothing connected the empty state already offers the way out.
+        if self.all_models.is_empty() {
+            return None;
+        }
+
         if !self.popover_styles {
             return None;
+        }
+
+        if crate::simple_mode() {
+            return Some(ModelSelectorFooter::connections(focus_handle).into_any_element());
         }
 
         Some(ModelSelectorFooter::new(OpenSettings.boxed_clone(), focus_handle).into_any_element())
@@ -598,8 +1008,10 @@ mod tests {
                     .any(|(fav_provider, fav_name)| *fav_provider == provider && *fav_name == name);
                 ModelInfo {
                     model: test_language_model(name, provider),
-                    icon: IconOrSvg::Icon(IconName::ZedAgent),
+                    icon: IconOrSvg::Icon(IconName::AppAgent),
                     is_favorite,
+                    facts: ModelFacts::default(),
+                    shows_icon: true,
                 }
             })
             .collect()
@@ -620,6 +1032,135 @@ mod tests {
                 i
             );
         }
+    }
+
+    fn unaligned_model(name: &str, org: &str, health: ModelHealth) -> ModelInfo {
+        let mut info = create_models(vec![(crate::UNALIGNED_PROVIDER_ID, name)]).remove(0);
+        info.facts = ModelFacts {
+            provider_id: Some(info.model.provider_id.clone()),
+            connection: Some("Unaligned".into()),
+            org: Some(org.to_string().into()),
+            health,
+            context: None,
+            tag: None,
+        };
+        info
+    }
+
+    /// Group labels in brackets (a label that continues its connection in
+    /// parentheses), models by `provider/model`.
+    fn entry_labels(entries: &[LanguageModelPickerEntry]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|entry| match entry {
+                LanguageModelPickerEntry::Separator(title) => format!("[{title}]"),
+                LanguageModelPickerEntry::SubSeparator(title) => format!("({title})"),
+                LanguageModelPickerEntry::Model(info) => info.model.telemetry_id().to_string(),
+            })
+            .collect()
+    }
+
+    fn mixed_models() -> Vec<ModelInfo> {
+        let mut models = vec![
+            unaligned_model("qwen", "Alibaba", ModelHealth::Down),
+            unaligned_model("gpt", "OpenAI", ModelHealth::Up),
+            unaligned_model("haiku", "Anthropic", ModelHealth::Down),
+            unaligned_model("sonnet", "Anthropic", ModelHealth::Up),
+            unaligned_model("flash", "DeepSeek", ModelHealth::Degraded),
+        ];
+        models.extend(create_models_with_favorites(
+            vec![("openai", "gpt-own")],
+            vec![("openai", "gpt-own")],
+        ));
+        models
+    }
+
+    #[gpui::test]
+    fn test_model_selector_order_recent_favorites_then_connections(_cx: &mut TestAppContext) {
+        let grouped_models = GroupedModels::new(mixed_models(), Vec::new()).with_recents(&[
+            SharedString::from("unaligned/sonnet"),
+            // No longer offered: skipped.
+            SharedString::from("gone/model"),
+            SharedString::from("unaligned/gpt"),
+        ]);
+
+        assert_eq!(
+            entry_labels(&grouped_models.entries()),
+            [
+                "[Recent]",
+                "unaligned/sonnet",
+                "unaligned/gpt",
+                "[Favorites]",
+                "openai/gpt-own",
+                // Unaligned by maker, makers in alphabetical order, the model
+                // that is down after the one that answers.
+                "[Unaligned · Anthropic]",
+                "unaligned/sonnet",
+                "unaligned/haiku",
+                "(Unaligned · DeepSeek)",
+                "unaligned/flash",
+                "(Unaligned · OpenAI)",
+                "unaligned/gpt",
+                // A maker with no model that answers comes last.
+                "(Unaligned · Alibaba)",
+                "unaligned/qwen",
+                "[openai]",
+                "openai/gpt-own",
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn test_model_selector_query_matches_keep_their_order(_cx: &mut TestAppContext) {
+        let grouped_models = GroupedModels::new(mixed_models(), Vec::new())
+            .with_recents(&[SharedString::from("unaligned/sonnet")])
+            .filtered();
+
+        // No "Recent" group and no split by maker: the best match stays first.
+        assert_eq!(
+            entry_labels(&grouped_models.entries()),
+            [
+                "[Favorites]",
+                "openai/gpt-own",
+                "[Unaligned]",
+                "unaligned/qwen",
+                "unaligned/gpt",
+                "unaligned/haiku",
+                "unaligned/sonnet",
+                "unaligned/flash",
+                "[openai]",
+                "openai/gpt-own",
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn test_model_selector_matches_unaligned_by_id_not_by_name(_cx: &mut TestAppContext) {
+        // A provider that calls itself "Unaligned" under another id is an
+        // ordinary connection: one group, not split by maker.
+        let mut impostor = create_models(vec![("acme", "claude"), ("acme", "gpt")]);
+        for (info, org) in impostor.iter_mut().zip(["Anthropic", "OpenAI"]) {
+            info.facts = ModelFacts {
+                provider_id: Some(info.model.provider_id.clone()),
+                connection: Some("Unaligned".into()),
+                org: Some(org.into()),
+                health: ModelHealth::Up,
+                context: None,
+                tag: None,
+            };
+        }
+
+        let grouped_models = GroupedModels::new(impostor, Vec::new());
+        assert_eq!(
+            entry_labels(&grouped_models.entries()),
+            ["[Unaligned]", "acme/claude", "acme/gpt"]
+        );
+    }
+
+    #[gpui::test]
+    fn test_model_selector_empty_catalogue(_cx: &mut TestAppContext) {
+        assert!(GroupedModels::new(Vec::new(), Vec::new()).is_empty());
+        assert!(!GroupedModels::new(mixed_models(), Vec::new()).is_empty());
     }
 
     #[gpui::test]
@@ -752,7 +1293,7 @@ mod tests {
 
         assert!(matches!(
             entries.first(),
-            Some(LanguageModelPickerEntry::Separator(s)) if s == "Favorite"
+            Some(LanguageModelPickerEntry::Separator(s)) if s == FAVORITES_GROUP
         ));
 
         assert_models_eq(grouped_models.favorites, vec!["zed/gemini"]);

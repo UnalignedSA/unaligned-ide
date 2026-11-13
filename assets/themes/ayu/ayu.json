@@ -1,5 +1,4 @@
 {
-  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
   "name": "Ayu",
   "author": "Zed Industries",
   "themes": [
@@ -8,6 +7,7 @@
       "appearance": "dark",
       "style": {
         "border": "#3f4043ff",
+        "border.strong": "#57585bff",
         "border.variant": "#2d2f34ff",
         "border.focused": "#1b4a6eff",
         "border.selected": "#1b4a6eff",
@@ -415,6 +415,7 @@
       "appearance": "light",
       "style": {
         "border": "#cfd1d2ff",
+        "border.strong": "#b3b5b6ff",
         "border.variant": "#dfe0e1ff",
         "border.focused": "#c4daf6ff",
         "border.selected": "#c4daf6ff",
@@ -822,6 +823,7 @@
       "appearance": "dark",
       "style": {
         "border": "#53565dff",
+        "border.strong": "#6b6e75ff",
         "border.variant": "#43464fff",
         "border.focused": "#24556fff",
         "border.selected": "#24556fff",

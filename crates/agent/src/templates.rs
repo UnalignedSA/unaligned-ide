@@ -61,6 +61,14 @@ pub struct SystemPromptTemplate<'a> {
     pub is_linux: bool,
     /// Whether sandboxed terminal commands run through WSL on Windows.
     pub is_windows: bool,
+    /// The product's name, for the first sentence ("You are the coding agent
+    /// of …"). Always `branding::PRODUCT_NAME` outside tests.
+    pub product_name: &'static str,
+    /// Whether no folder is open in the window. The prompt then says that
+    /// nothing can be read, edited or run, instead of listing root
+    /// directories; the file and terminal tools are not offered either (see
+    /// `Thread::enabled_tools`).
+    pub no_folder: bool,
 }
 
 impl Template for SystemPromptTemplate<'_> {
@@ -108,13 +116,70 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
-        assert!(rendered.contains("You are the Zed coding agent"));
+        // Unaligned: the agent introduces itself with the product's name.
+        assert!(rendered.contains(&format!(
+            "You are the coding agent of {}",
+            branding::PRODUCT_NAME
+        )));
+        assert!(!rendered.contains("Zed"));
+        assert!(rendered.contains("root directories"));
         assert!(rendered.contains("Today's Date: 2026-01-01"));
         assert!(rendered.contains("## Fixing Diagnostics"));
         assert!(rendered.contains("test-model"));
+    }
+
+    #[test]
+    fn test_system_prompt_without_a_folder() {
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["fetch".into()],
+            model_name: None,
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: true,
+        };
+        let rendered = template.render(&Templates::new()).unwrap();
+        assert!(rendered.contains("No folder is open"));
+        assert!(!rendered.contains("root directories:"));
+
+        // The skill catalog names a tool (`skill`) and file locations the
+        // agent has no use for without a folder: it is left out, and comes
+        // back with a folder.
+        let project =
+            prompt_store::ProjectContext::default().with_skills(vec![agent_skills::SkillSummary {
+                name: "make-notes".to_string(),
+                description: "Takes notes.".to_string(),
+                location: "/skills/make-notes/SKILL.md".to_string(),
+            }]);
+        let mut template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["fetch".into()],
+            model_name: None,
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: true,
+        };
+        let rendered = template.render(&Templates::new()).unwrap();
+        assert!(!rendered.contains("<available_skills>"));
+        assert!(!rendered.contains("make-notes"));
+        template.no_folder = false;
+        let rendered = template.render(&Templates::new()).unwrap();
+        assert!(rendered.contains("<available_skills>"));
+        assert!(rendered.contains("make-notes"));
     }
 
     #[test]
@@ -141,6 +206,8 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -170,6 +237,8 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -203,6 +272,8 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -246,6 +317,8 @@ mod tests {
             sandboxing: true,
             is_linux: true,
             is_windows: false,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -279,6 +352,8 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: true,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -309,6 +384,8 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -331,6 +408,8 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -351,6 +430,8 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -369,6 +450,8 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            product_name: branding::PRODUCT_NAME,
+            no_folder: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();

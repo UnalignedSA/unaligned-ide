@@ -8,9 +8,16 @@ use gpui::{
 use language::Diagnostic;
 use project::project_settings::{GoToDiagnosticSeverityFilter, ProjectSettings};
 use settings::Settings;
-use ui::{Button, ButtonLike, Color, Icon, IconName, Label, Tooltip, h_flex, prelude::*};
+use ui::{Color, IconName, Tooltip, h_flex, prelude::*};
 use util::ResultExt;
-use workspace::{HideStatusItem, StatusItemView, ToolbarItemEvent, Workspace, item::ItemHandle};
+use workspace::{
+    HideStatusItem, StatusItemView, ToolbarItemEvent, Workspace,
+    active_file_name::{
+        status_bar_icon, status_bar_item, status_bar_item_content, status_bar_message,
+        status_bar_text, status_bar_text_in,
+    },
+    item::ItemHandle,
+};
 
 use crate::{Deploy, IncludeWarnings, ProjectDiagnosticsEditor};
 
@@ -28,36 +35,36 @@ pub struct DiagnosticIndicator {
 
 impl Render for DiagnosticIndicator {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let indicator = h_flex().gap_2().min_w_0().overflow_x_hidden();
+        let indicator = h_flex().min_w_0().overflow_x_hidden();
         if !ProjectSettings::get_global(cx).diagnostics.button {
             return indicator.hidden();
         }
 
-        let diagnostic_indicator = match (self.summary.error_count, self.summary.warning_count) {
-            (0, 0) => h_flex().child(
-                Icon::new(IconName::Check)
-                    .size(IconSize::Small)
-                    .color(Color::Default),
-            ),
-            (error_count, warning_count) => h_flex()
+        // Both counts are always shown so the item keeps its place and width;
+        // a count only takes its status colour, icon and number, when it is
+        // not zero.
+        let count = |icon: IconName, count: usize, color: Color| {
+            h_flex()
                 .gap_1()
-                .when(error_count > 0, |this| {
-                    this.child(
-                        Icon::new(IconName::XCircle)
-                            .size(IconSize::Small)
-                            .color(Color::Error),
-                    )
-                    .child(Label::new(error_count.to_string()).size(LabelSize::Small))
+                .child(status_bar_icon(icon).when(count > 0, |icon| icon.color(color)))
+                .child(if count > 0 {
+                    status_bar_text_in(count.to_string(), color.color(cx), cx)
+                } else {
+                    status_bar_text(count.to_string(), cx)
                 })
-                .when(warning_count > 0, |this| {
-                    this.child(
-                        Icon::new(IconName::Warning)
-                            .size(IconSize::Small)
-                            .color(Color::Warning),
-                    )
-                    .child(Label::new(warning_count.to_string()).size(LabelSize::Small))
-                }),
         };
+        let diagnostic_indicator = h_flex()
+            .gap_1p5()
+            .child(count(
+                IconName::XCircle,
+                self.summary.error_count,
+                Color::Error,
+            ))
+            .child(count(
+                IconName::Warning,
+                self.summary.warning_count,
+                Color::Warning,
+            ));
 
         let status = if let Some(diagnostic) = &self.current_diagnostic {
             let message = diagnostic
@@ -72,9 +79,17 @@ impl Render for DiagnosticIndicator {
                 "Next Diagnostic"
             };
             Some(
-                Button::new("diagnostic_message", SharedString::new(message))
-                    .label_size(LabelSize::Small)
-                    .truncate(true)
+                status_bar_item("diagnostic_message", cx)
+                    .aria_label(SharedString::new(message))
+                    .child(
+                        status_bar_item_content().child(
+                            // A compiler's sentence: its capitals are kept.
+                            status_bar_message(SharedString::new(message), cx)
+                                .flex_initial()
+                                .max_w(rems_from_px(480_f32))
+                                .truncate(),
+                        ),
+                    )
                     .tab_index(0isize)
                     .tooltip(move |_window, cx| {
                         Tooltip::for_action(
@@ -113,8 +128,8 @@ impl Render for DiagnosticIndicator {
 
         indicator
             .child(
-                ButtonLike::new("diagnostic-indicator")
-                    .child(diagnostic_indicator)
+                status_bar_item("diagnostic-indicator", cx)
+                    .child(status_bar_item_content().child(diagnostic_indicator))
                     .tab_index(0isize)
                     .aria_label(diagnostics_label)
                     .tooltip(move |_window, cx| {

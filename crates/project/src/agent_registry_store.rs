@@ -8,13 +8,14 @@ use fs::Fs;
 use futures::{AsyncReadExt, future::join_all};
 use gpui::{
     App, AppContext as _, BackgroundExecutor, Context, Entity, FutureExt as _, Global,
-    SharedString, Task, TaskExt,
+    SharedString, Task,
 };
 use http_client::{AsyncBody, HttpClient, StatusCode};
 use serde::Deserialize;
-use settings::Settings as _;
+use settings::{Settings as _, SettingsStore};
 use util::ResultExt;
 
+use crate::agent_server_store::{AllAgentServersSettings, CustomAgentServerSettings};
 use crate::{AgentId, DisableAiSettings};
 
 const REGISTRY_URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
@@ -126,15 +127,28 @@ pub struct AgentRegistryStore {
     fetch_error: Option<SharedString>,
     pending_refresh: Option<Task<()>>,
     last_refresh: Option<Instant>,
+    /// The copy on disk has been read (or there is none).
+    cache_loaded: bool,
+    /// `refresh_if_stale` was called before the copy on disk was read: the
+    /// question is asked again once it is.
+    refresh_wanted_after_cache: bool,
+    /// The list in memory came from the network during this session, so the
+    /// copy on disk must not replace it.
+    fetched_this_session: bool,
 }
 
 impl AgentRegistryStore {
     /// Initialize the global AgentRegistryStore.
     ///
-    /// This loads the cached registry from disk. If the cache is empty but there
-    /// are registry agents configured in settings, it will trigger a network fetch.
-    /// Otherwise, call `refresh()` explicitly when you need fresh data
-    /// (e.g., when opening the Agent Registry page).
+    /// This reads the copy of the registry kept on disk and contacts nothing:
+    /// the public registry (a third party, `REGISTRY_URL`) is asked only for a
+    /// reason the user can see. Who asks:
+    /// - `refresh`: the Agent Registry page when it opens, and the chat's
+    ///   "Set Up …" entries;
+    /// - `refresh_before_agent_start`: a registry agent is about to be started
+    ///   (at most once an hour);
+    /// - `refresh_if_stale`: the settings name a registry agent that the copy
+    ///   on disk does not know (at most once an hour).
     pub fn init_global(
         cx: &mut App,
         fs: Arc<dyn Fs>,
@@ -146,13 +160,6 @@ impl AgentRegistryStore {
 
         let store = cx.new(|cx| Self::new(fs, http_client, cx));
         cx.set_global(GlobalAgentRegistryStore(store.clone()));
-
-        store.update(cx, |store, cx| {
-            if store.agents.is_empty() {
-                store.refresh(cx);
-            }
-        });
-
         store
     }
 
@@ -176,6 +183,9 @@ impl AgentRegistryStore {
             fetch_error: None,
             pending_refresh: None,
             last_refresh: None,
+            cache_loaded: true,
+            refresh_wanted_after_cache: false,
+            fetched_this_session: false,
         });
         cx.set_global(GlobalAgentRegistryStore(store.clone()));
         store
@@ -250,6 +260,7 @@ impl AgentRegistryStore {
                     Ok(agents) => {
                         this.agents = agents;
                         this.fetch_error = None;
+                        this.fetched_this_session = true;
                     }
                     Err(error) => {
                         this.fetch_error = Some(SharedString::from(format!("{error:#}")));
@@ -261,20 +272,56 @@ impl AgentRegistryStore {
         }));
     }
 
-    /// Refresh the registry if it hasn't been refreshed recently.
+    /// Fetch the registry when the settings name a registry agent that the
+    /// list in memory (the copy on disk included) does not know.
     ///
-    /// This is useful to call when using a registry-based agent to check for
-    /// updates without making too many network requests. The refresh is
-    /// throttled to at most once per hour.
+    /// `AgentServerStore` calls this whenever the settings hold a registry
+    /// agent, which includes every start of the app: with every such agent
+    /// known from the copy on disk, nothing is contacted. Throttled to at most
+    /// once per hour, so an id the registry does not have costs one request
+    /// per session.
     pub fn refresh_if_stale(&mut self, cx: &mut Context<Self>) {
-        let should_refresh = self
-            .last_refresh
-            .map(|last| last.elapsed() >= REFRESH_THROTTLE_DURATION)
-            .unwrap_or(true);
+        if !self.cache_loaded {
+            self.refresh_wanted_after_cache = true;
+            return;
+        }
 
-        if should_refresh {
+        if self.knows_configured_agents(cx) {
+            return;
+        }
+
+        if self.refresh_is_due() {
             self.refresh(cx);
         }
+    }
+
+    /// Check the registry for a newer version of an agent that is about to be
+    /// started. Throttled to at most once per hour.
+    pub fn refresh_before_agent_start(&mut self, cx: &mut Context<Self>) {
+        if self.refresh_is_due() {
+            self.refresh(cx);
+        }
+    }
+
+    fn refresh_is_due(&self) -> bool {
+        self.last_refresh
+            .map(|last| last.elapsed() >= REFRESH_THROTTLE_DURATION)
+            .unwrap_or(true)
+    }
+
+    fn knows_configured_agents(&self, cx: &App) -> bool {
+        let Some(settings) = cx.try_global::<SettingsStore>() else {
+            return true;
+        };
+        settings
+            .get::<AllAgentServersSettings>(None)
+            .iter()
+            .filter(|(_, agent)| matches!(agent, CustomAgentServerSettings::Registry { .. }))
+            .all(|(id, _)| {
+                self.agents
+                    .iter()
+                    .any(|agent| agent.id().0.as_ref() == id.as_str())
+            })
     }
 
     fn new(fs: Arc<dyn Fs>, http_client: Arc<dyn HttpClient>, cx: &mut Context<Self>) -> Self {
@@ -286,6 +333,9 @@ impl AgentRegistryStore {
             fetch_error: None,
             pending_refresh: None,
             last_refresh: None,
+            cache_loaded: false,
+            refresh_wanted_after_cache: false,
+            fetched_this_session: false,
         };
 
         store.load_cached_registry(fs, store.http_client.clone(), cx);
@@ -300,34 +350,49 @@ impl AgentRegistryStore {
         cx: &mut Context<Self>,
     ) {
         if DisableAiSettings::get_global(cx).disable_ai {
+            self.cache_loaded = true;
             return;
         }
 
-        cx.spawn(async move |this, cx| -> Result<()> {
-            let cache_path = registry_cache_path();
-            if !fs.is_file(&cache_path).await {
-                return Ok(());
-            }
-
-            let bytes = fs
-                .load_bytes(&cache_path)
-                .await
-                .context("reading cached registry")?;
-            let index: RegistryIndex =
-                serde_json::from_slice(&bytes).context("parsing cached registry")?;
-
+        cx.spawn(async move |this, cx| {
             let executor = cx.background_executor().clone();
-            let agents =
-                build_registry_agents(fs, http_client, index, bytes, false, &executor).await?;
+            let cached = async {
+                let cache_path = registry_cache_path();
+                if !fs.is_file(&cache_path).await {
+                    return anyhow::Ok(None);
+                }
+
+                let bytes = fs
+                    .load_bytes(&cache_path)
+                    .await
+                    .context("reading cached registry")?;
+                let index: RegistryIndex =
+                    serde_json::from_slice(&bytes).context("parsing cached registry")?;
+
+                // `update_cache: false`: icons are read from disk, never downloaded.
+                let agents =
+                    build_registry_agents(fs, http_client, index, bytes, false, &executor).await?;
+                Ok(Some(agents))
+            }
+            .await
+            .log_err()
+            .flatten();
 
             this.update(cx, |this, cx| {
-                this.agents = agents;
-                cx.notify();
-            })?;
-
-            Ok(())
+                this.cache_loaded = true;
+                if let Some(agents) = cached
+                    && !this.fetched_this_session
+                {
+                    this.agents = agents;
+                    cx.notify();
+                }
+                if std::mem::take(&mut this.refresh_wanted_after_cache) {
+                    this.refresh_if_stale(cx);
+                }
+            })
+            .ok();
         })
-        .detach_and_log_err(cx);
+        .detach();
     }
 }
 
@@ -682,4 +747,189 @@ struct RegistryNpxDistribution {
     args: Vec<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs::FakeFs;
+    use gpui::TestAppContext;
+    use http_client::{FakeHttpClient, Response};
+    use parking_lot::Mutex;
+    use serde_json::json;
+
+    fn registry_body(ids: &[&str]) -> Vec<u8> {
+        let agents = ids
+            .iter()
+            .map(|id| {
+                json!({
+                    "id": id,
+                    "name": id,
+                    "version": "1.0.0",
+                    "description": "",
+                    "icon": format!("https://example.test/{id}.svg"),
+                    "distribution": { "npx": { "package": id } }
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_vec(&json!({ "version": "1", "agents": agents })).unwrap()
+    }
+
+    /// A client that serves a registry of `ids` and records every URL asked for.
+    fn recording_client(
+        ids: &'static [&'static str],
+    ) -> (Arc<dyn HttpClient>, Arc<Mutex<Vec<String>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let client = FakeHttpClient::create({
+            let requests = requests.clone();
+            move |request| {
+                requests.lock().push(request.uri().to_string());
+                async move {
+                    Ok(Response::builder()
+                        .status(200)
+                        .body(AsyncBody::from(registry_body(ids)))?)
+                }
+            }
+        });
+        (client, requests)
+    }
+
+    fn init_settings(cx: &mut TestAppContext, registry_agents: &[&str]) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            AllAgentServersSettings::override_global(
+                AllAgentServersSettings(
+                    registry_agents
+                        .iter()
+                        .map(|id| {
+                            (
+                                id.to_string(),
+                                CustomAgentServerSettings::Registry {
+                                    env: HashMap::default(),
+                                    default_mode: None,
+                                    default_config_options: HashMap::default(),
+                                    favorite_config_option_values: HashMap::default(),
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
+                cx,
+            );
+        });
+    }
+
+    async fn write_cache(fs: &Arc<FakeFs>, ids: &[&str]) {
+        fs.create_dir(&registry_cache_dir()).await.unwrap();
+        fs.insert_file(registry_cache_path(), registry_body(ids))
+            .await;
+    }
+
+    #[gpui::test]
+    async fn init_contacts_nothing(cx: &mut TestAppContext) {
+        init_settings(cx, &[]);
+        let fs = FakeFs::new(cx.executor());
+        let (client, requests) = recording_client(&["claude-acp"]);
+
+        let store = cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), client));
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(Duration::from_secs(2 * 60 * 60));
+        cx.run_until_parked();
+
+        assert_eq!(*requests.lock(), Vec::<String>::new());
+        store.read_with(cx, |store, _| {
+            assert!(store.agents().is_empty());
+            assert!(!store.is_fetching());
+        });
+    }
+
+    #[gpui::test]
+    async fn init_reads_the_copy_on_disk_without_fetching_icons(cx: &mut TestAppContext) {
+        init_settings(cx, &["claude-acp"]);
+        let fs = FakeFs::new(cx.executor());
+        write_cache(&fs, &["claude-acp", "codex-acp"]).await;
+        let (client, requests) = recording_client(&["claude-acp", "codex-acp"]);
+
+        let store = cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), client));
+        // What `AgentServerStore` does at every start when the settings hold a
+        // registry agent, here before the copy on disk has been read.
+        store.update(cx, |store, cx| store.refresh_if_stale(cx));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.refresh_if_stale(cx));
+        cx.run_until_parked();
+
+        assert_eq!(*requests.lock(), Vec::<String>::new());
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.agents().len(), 2);
+            assert!(store.agent(&AgentId::new("claude-acp")).is_some());
+        });
+    }
+
+    #[gpui::test]
+    async fn configured_agent_missing_from_disk_is_fetched_once(cx: &mut TestAppContext) {
+        init_settings(cx, &["claude-acp"]);
+        let fs = FakeFs::new(cx.executor());
+        let (client, requests) = recording_client(&["claude-acp"]);
+
+        let store = cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), client));
+        // Asked before the (absent) copy on disk was looked for: answered after.
+        store.update(cx, |store, cx| store.refresh_if_stale(cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            *requests.lock(),
+            vec![
+                REGISTRY_URL.to_string(),
+                "https://example.test/claude-acp.svg".to_string()
+            ]
+        );
+        store.read_with(cx, |store, _| {
+            assert!(store.agent(&AgentId::new("claude-acp")).is_some());
+        });
+
+        store.update(cx, |store, cx| store.refresh_if_stale(cx));
+        cx.run_until_parked();
+        assert_eq!(requests.lock().len(), 2);
+    }
+
+    #[gpui::test]
+    async fn unknown_configured_agent_costs_one_request_an_hour(cx: &mut TestAppContext) {
+        init_settings(cx, &["not-in-the-registry"]);
+        let fs = FakeFs::new(cx.executor());
+        let (client, requests) = recording_client(&[]);
+
+        let store = cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), client));
+        cx.run_until_parked();
+        for _ in 0..3 {
+            store.update(cx, |store, cx| store.refresh_if_stale(cx));
+            cx.run_until_parked();
+        }
+        assert_eq!(*requests.lock(), vec![REGISTRY_URL.to_string()]);
+    }
+
+    #[gpui::test]
+    async fn agent_start_checks_for_updates_at_most_once_an_hour(cx: &mut TestAppContext) {
+        init_settings(cx, &["claude-acp"]);
+        let fs = FakeFs::new(cx.executor());
+        write_cache(&fs, &["claude-acp"]).await;
+        let (client, requests) = recording_client(&["claude-acp"]);
+
+        let store = cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), client));
+        cx.run_until_parked();
+        assert_eq!(requests.lock().len(), 0);
+
+        store.update(cx, |store, cx| store.refresh_before_agent_start(cx));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.refresh_before_agent_start(cx));
+        cx.run_until_parked();
+
+        let registry_requests = requests
+            .lock()
+            .iter()
+            .filter(|url| url.as_str() == REGISTRY_URL)
+            .count();
+        assert_eq!(registry_requests, 1);
+    }
 }

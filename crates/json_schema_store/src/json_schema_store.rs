@@ -12,7 +12,7 @@ use project::{LspStore, lsp_store::LocalLspAdapterDelegate};
 use settings::{LSP_SETTINGS_SCHEMA_URL_PREFIX, Settings as _, SettingsLocation};
 use util::schemars::{AllowTrailingCommas, DefaultDenyUnknownFields};
 
-const SCHEMA_URI_PREFIX: &str = "zed://schemas/";
+const SCHEMA_URI_PREFIX: &str = "ide://schemas/";
 
 const TSCONFIG_SCHEMA: &str = include_str!("schemas/tsconfig.json");
 const PACKAGE_JSON_SCHEMA: &str = include_str!("schemas/package.json");
@@ -179,7 +179,7 @@ fn resolve_static_schema(path: &str) -> Option<String> {
         "snippets" => Some(SNIPPETS_SCHEMA.clone()),
         "jsonc" => Some(JSONC_SCHEMA.clone()),
         "keymap" => Some(KEYMAP_SCHEMA.clone()),
-        "zed_inspector_style" => {
+        "ide_inspector_style" => {
             #[cfg(debug_assertions)]
             {
                 Some(INSPECTOR_STYLE_SCHEMA.clone())
@@ -330,6 +330,9 @@ async fn resolve_dynamic_schema(
                     );
                     theme_names.extend(registry.list_names());
                 }
+                // The name older settings files carry for the default icon theme: still
+                // accepted (it is an alias), so the schema must not flag it.
+                icon_theme_names.push(theme::LEGACY_DEFAULT_ICON_THEME_NAME.into());
                 let icon_theme_names = icon_theme_names.as_slice();
                 let theme_names = theme_names.as_slice();
 
@@ -487,9 +490,9 @@ pub fn all_schema_file_associations(
             .unwrap()
             .push(serde_json::json!({
                 "fileMatch": [
-                    "zed-inspector-style.json"
+                    "ide-inspector-style.json"
                 ],
-                "url": format!("{SCHEMA_URI_PREFIX}zed_inspector_style")
+                "url": format!("{SCHEMA_URI_PREFIX}ide_inspector_style")
             }));
     }
 

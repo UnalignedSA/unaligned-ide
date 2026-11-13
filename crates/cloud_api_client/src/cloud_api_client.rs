@@ -1,3 +1,4 @@
+// Modified by the Unaligned IDE contributors, 2026: see NOTICE at the repository root.
 mod llm_token;
 mod websocket;
 
@@ -118,7 +119,7 @@ impl CloudApiClient {
                     .as_ref(),
             )
             .when_some(system_id, |builder, system_id| {
-                builder.header(ZED_SYSTEM_ID_HEADER_NAME, system_id)
+                builder.header(IDE_SYSTEM_ID_HEADER_NAME, system_id)
             });
 
         self.send_authenticated_json_request(request_builder, AsyncBody::default())
@@ -139,7 +140,7 @@ impl CloudApiClient {
                     .as_ref(),
             )
             .when_some(system_id, |builder, system_id| {
-                builder.header(ZED_SYSTEM_ID_HEADER_NAME, system_id)
+                builder.header(IDE_SYSTEM_ID_HEADER_NAME, system_id)
             });
 
         self.send_authenticated_json_request(
@@ -162,7 +163,7 @@ impl CloudApiClient {
                     .map_err(ClientApiError::RequestBuildFailed)?
                     .as_ref(),
             )
-            .header(ZED_SYSTEM_ID_HEADER_NAME, system_id);
+            .header(IDE_SYSTEM_ID_HEADER_NAME, system_id);
 
         self.send_authenticated_json_request(request_builder, Json(body))
             .await
@@ -269,47 +270,32 @@ impl CloudApiClient {
         }
     }
 
-    pub async fn submit_agent_feedback(&self, body: SubmitAgentThreadFeedbackBody) -> Result<()> {
-        let request = Request::builder().method(Method::POST).uri(
-            self.http_client
-                .build_zed_cloud_url("/client/feedback/agent_thread")?
-                .as_ref(),
-        );
-
-        self.send_authenticated_request(request, AsyncBody::from(serde_json::to_string(&body)?))
-            .await?;
-        Ok(())
+    /// Feedback about agent threads went to Zed's cloud together with the
+    /// thread's content. This build sends none: the call fails before any
+    /// request is built, whatever the server URL is.
+    pub async fn submit_agent_feedback(&self, _body: SubmitAgentThreadFeedbackBody) -> Result<()> {
+        Err(feedback_unavailable())
     }
 
+    /// See [`Self::submit_agent_feedback`]: fails without a request.
     pub async fn submit_agent_feedback_comments(
         &self,
-        body: SubmitAgentThreadFeedbackCommentsBody,
+        _body: SubmitAgentThreadFeedbackCommentsBody,
     ) -> Result<()> {
-        let request = Request::builder().method(Method::POST).uri(
-            self.http_client
-                .build_zed_cloud_url("/client/feedback/agent_thread_comments")?
-                .as_ref(),
-        );
-
-        self.send_authenticated_request(request, AsyncBody::from(serde_json::to_string(&body)?))
-            .await?;
-        Ok(())
+        Err(feedback_unavailable())
     }
 
+    /// See [`Self::submit_agent_feedback`]: fails without a request.
     pub async fn submit_edit_prediction_feedback(
         &self,
-        body: SubmitEditPredictionFeedbackBody,
+        _body: SubmitEditPredictionFeedbackBody,
     ) -> Result<()> {
-        let request = Request::builder().method(Method::POST).uri(
-            self.http_client
-                .build_zed_cloud_url("/client/feedback/edit_prediction")?
-                .as_ref(),
-        );
-
-        self.send_authenticated_request(request, AsyncBody::from(serde_json::to_string(&body)?))
-            .await?;
-        Ok(())
+        Err(feedback_unavailable())
     }
+}
+
+fn feedback_unavailable() -> anyhow::Error {
+    anyhow!("Feedback is not sent to Zed's cloud in this build")
 }
 
 fn build_request(
@@ -331,6 +317,66 @@ fn build_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_client::BlockedHttpClient;
+
+    /// A client whose every request fails, with Zed's production server as
+    /// its base URL: what the app has when nothing overrides the server.
+    fn production_like_client() -> CloudApiClient {
+        CloudApiClient::new(Arc::new(HttpClientWithUrl::new_url(
+            Arc::new(BlockedHttpClient::new()),
+            "https://zed.dev",
+            None,
+        )))
+    }
+
+    #[test]
+    fn feedback_calls_fail_without_a_request() {
+        let client = production_like_client();
+        client.set_credentials(1, "token".into());
+
+        let error = futures::executor::block_on(client.submit_agent_feedback(
+            SubmitAgentThreadFeedbackBody {
+                organization_id: OrganizationId("organization".into()),
+                agent: "agent".into(),
+                session_id: "session".into(),
+                parent_session_id: None,
+                rating: "positive".into(),
+                thread: serde_json::Value::Null,
+            },
+        ))
+        .unwrap_err();
+
+        // `BlockedHttpClient` answers "disallowed request" to anything that is
+        // sent: this message proves nothing was.
+        assert_eq!(
+            error.to_string(),
+            "Feedback is not sent to Zed's cloud in this build"
+        );
+    }
+
+    #[test]
+    fn cloud_requests_fail_before_they_are_sent() {
+        // The override enables Zed's services on purpose.
+        if std::env::var_os("IDE_SERVER_URL").is_some_and(|value| !value.is_empty()) {
+            return;
+        }
+
+        let client = production_like_client();
+        client.set_credentials(1, "token".into());
+
+        let error = futures::executor::block_on(client.get_authenticated_user(None)).unwrap_err();
+        assert!(
+            matches!(error, ClientApiError::RequestBuildFailed(_)),
+            "{error:?}"
+        );
+
+        let error =
+            futures::executor::block_on(client.validate_credentials(1, "token")).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            http_client::IDE_CLOUD_UNAVAILABLE_MESSAGE
+        );
+    }
 
     #[test]
     fn build_session_authenticated_request_without_authorization_header() -> Result<()> {

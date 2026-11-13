@@ -74,7 +74,41 @@ pub struct BufferCodegen {
     initial_transaction_id: Option<TransactionId>,
     builder: Arc<PromptBuilder>,
     pub is_insertion: bool,
+    /// Lines of the selection when the box was opened: what decides the
+    /// model, whatever the generated text does to the range afterwards.
+    selection_lines: u32,
     session_id: Uuid,
+}
+
+/// A selection shorter than this is a small edit: unless the user chose a
+/// model for inline edits, it goes to the connection's fast, cheap model.
+pub const FAST_MODEL_MAX_LINES: u32 = 50;
+
+/// The model an inline edit of `selection_lines` lines is sent to, which is
+/// also the one the prompt box names.
+///
+/// A model chosen by the user (`agent.inline_assistant_model`, or the picker
+/// of the box, which writes that setting) always wins. Otherwise a selection
+/// under [`FAST_MODEL_MAX_LINES`] lines uses the fast model of the default
+/// model's provider when it has one, and anything else the default model.
+pub fn inline_assist_model(selection_lines: u32, cx: &App) -> Option<LanguageModel> {
+    let registry = LanguageModelRegistry::read_global(cx);
+    let model = registry.inline_assistant_model()?;
+    if selection_lines >= FAST_MODEL_MAX_LINES
+        || AgentSettings::get_global(cx)
+            .inline_assistant_model
+            .is_some()
+    {
+        return Some(model);
+    }
+    // Set on the registry without going through the settings: also a choice.
+    let is_default = registry.default_model().is_some_and(|default| {
+        default.provider_id() == model.provider_id() && default.id() == model.id()
+    });
+    if !is_default {
+        return Some(model);
+    }
+    Some(registry.default_fast_model(cx).unwrap_or(model))
 }
 
 pub const REWRITE_SECTION_TOOL_NAME: &str = "rewrite_section";
@@ -99,8 +133,14 @@ impl BufferCodegen {
                 cx,
             )
         });
+        let snapshot = buffer.read(cx).snapshot(cx);
+        let selection_lines = {
+            let range = range.to_point(&snapshot);
+            range.end.row.saturating_sub(range.start.row) + 1
+        };
         let mut this = Self {
-            is_insertion: range.to_offset(&buffer.read(cx).snapshot(cx)).is_empty(),
+            is_insertion: range.to_offset(&snapshot).is_empty(),
+            selection_lines,
             alternatives: vec![codegen],
             active_alternative: 0,
             seen_alternatives: HashSet::default(),
@@ -124,8 +164,9 @@ impl BufferCodegen {
             .push(cx.subscribe(&codegen, |_, _, event, cx| cx.emit(*event)));
     }
 
-    pub fn active_completion(&self, cx: &App) -> Option<String> {
-        self.active_alternative().read(cx).current_completion()
+    /// The model this edit is sent to. See [`inline_assist_model`].
+    pub fn model(&self, cx: &App) -> Option<LanguageModel> {
+        inline_assist_model(self.selection_lines, cx)
     }
 
     pub fn active_alternative(&self) -> &Entity<CodegenAlternative> {
@@ -255,10 +296,6 @@ impl BufferCodegen {
         self.active_alternative().read(cx).last_equal_ranges()
     }
 
-    pub fn selected_text<'a>(&self, cx: &'a App) -> Option<&'a str> {
-        self.active_alternative().read(cx).selected_text()
-    }
-
     pub fn session_id(&self) -> Uuid {
         self.session_id
     }
@@ -284,7 +321,6 @@ pub struct CodegenAlternative {
     line_operations: Vec<LineOperation>,
     elapsed_time: Option<f64>,
     completion: Option<String>,
-    selected_text: Option<String>,
     pub message_id: Option<String>,
     session_id: Uuid,
     pub description: Option<String>,
@@ -345,7 +381,6 @@ impl CodegenAlternative {
             range,
             elapsed_time: None,
             completion: None,
-            selected_text: None,
             session_id,
             description: None,
             failure: None,
@@ -676,8 +711,6 @@ impl CodegenAlternative {
             .text_for_range(self.range.start..self.range.end)
             .collect::<Rope>();
 
-        self.selected_text = Some(selected_text.to_string());
-
         let selection_start = self.range.start.to_point(&snapshot);
 
         // Start with the indentation of the first line in the selection
@@ -947,6 +980,7 @@ impl CodegenAlternative {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn current_completion(&self) -> Option<String> {
         self.completion.clone()
     }
@@ -959,10 +993,6 @@ impl CodegenAlternative {
     #[cfg(any(test, feature = "test-support"))]
     pub fn current_failure(&self) -> Option<String> {
         self.failure.clone()
-    }
-
-    pub fn selected_text(&self) -> Option<&str> {
-        self.selected_text.as_deref()
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
@@ -2564,6 +2594,59 @@ mod tests {
     fn init_test(cx: &mut TestAppContext) {
         cx.update(LanguageModelRegistry::test);
         cx.set_global(cx.update(SettingsStore::test));
+    }
+
+    #[gpui::test]
+    fn test_inline_assist_model_prefers_fast_model_for_short_selections(cx: &mut TestAppContext) {
+        let provider = cx.update(LanguageModelRegistry::test);
+        cx.set_global(cx.update(SettingsStore::test));
+        // The fake provider's fast model is its first one, "fake".
+        let big = provider.model("big");
+        cx.update(|cx| {
+            LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.set_default_model(Some(big.clone()), cx);
+            });
+        });
+
+        let model_id = |lines: u32, cx: &mut TestAppContext| {
+            cx.update(|cx| inline_assist_model(lines, cx).map(|model| model.id().0.to_string()))
+        };
+        assert_eq!(model_id(1, cx).as_deref(), Some("fake"));
+        assert_eq!(
+            model_id(FAST_MODEL_MAX_LINES - 1, cx).as_deref(),
+            Some("fake")
+        );
+        assert_eq!(model_id(FAST_MODEL_MAX_LINES, cx).as_deref(), Some("big"));
+
+        // The user's own choice in the settings wins, even for one line.
+        cx.update(|cx| {
+            use gpui::UpdateGlobal as _;
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .agent
+                        .get_or_insert_default()
+                        .set_inline_assistant_model("fake".into(), "big".into());
+                });
+            });
+        });
+        assert_eq!(model_id(1, cx).as_deref(), Some("big"));
+    }
+
+    #[gpui::test]
+    fn test_inline_assist_model_keeps_a_model_set_on_the_registry(cx: &mut TestAppContext) {
+        let provider = cx.update(LanguageModelRegistry::test);
+        cx.set_global(cx.update(SettingsStore::test));
+        let chosen = provider.model("chosen");
+        cx.update(|cx| {
+            LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.set_inline_assistant_model(Some(chosen.clone()), cx);
+            });
+            assert_eq!(
+                inline_assist_model(1, cx).map(|model| model.id().0.to_string()),
+                Some("chosen".to_string())
+            );
+        });
     }
 
     fn new_tool_based_codegen(

@@ -198,8 +198,11 @@ impl SshRunningKernel {
             local_connection_info["hb_port"] = serde_json::json!(local_ports[4]);
             local_connection_info["ip"] = serde_json::json!("127.0.0.1");
 
-            let local_connection_file =
-                std::env::temp_dir().join(format!("zed_ssh_kernel_{}.json", kernel_id));
+            let local_connection_file = std::env::temp_dir().join(format!(
+                "{}_ssh_kernel_{}.json",
+                branding::APP_ID,
+                kernel_id
+            ));
             std::fs::write(
                 &local_connection_file,
                 serde_json::to_string_pretty(&local_connection_info)?,

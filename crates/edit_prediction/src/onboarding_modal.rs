@@ -106,7 +106,7 @@ impl Render for ZedPredictModal {
 
         v_flex()
             .id("edit-prediction-onboarding")
-            .key_context("ZedPredictModal")
+            .key_context("EditPredictionOnboardingModal")
             .relative()
             .w(px(550.))
             .h_full()

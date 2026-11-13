@@ -52,7 +52,7 @@ use task::{
 };
 use terminal_view::TerminalView;
 use ui::{
-    FluentBuilder, IntoElement, Render, StatefulInteractiveElement, Tab, Tooltip, VisibleOnHover,
+    FluentBuilder, IntoElement, Render, StatefulInteractiveElement, Tooltip, VisibleOnHover,
     VisualContext, prelude::*,
 };
 use util::ResultExt;
@@ -301,9 +301,15 @@ impl Item for SubView {
         _: &Window,
         cx: &App,
     ) -> AnyElement {
-        let label = Label::new(self.kind.to_shared_string())
-            .size(ui::LabelSize::Small)
-            .color(params.text_color())
+        // Sub-view tabs are text tabs: mono, uppercase, muted until selected.
+        let label = Label::new(self.kind.to_shared_string().to_uppercase())
+            .size(ui::LabelSize::XSmall)
+            .buffer_font(cx)
+            .color(if params.selected {
+                Color::Default
+            } else {
+                Color::Muted
+            })
             .line_height_style(ui::LineHeightStyle::UiLabel);
 
         if !params.selected && self.show_indicator.as_ref()(cx) {
@@ -431,14 +437,15 @@ impl Render for DraggedTabPreview {
             .font(ui_font)
             .h_6()
             .px_1()
-            .rounded_sm()
-            .shadow_md()
             .border_1()
             .border_color(colors.border)
             .bg(colors.elevated_surface_background)
             .child(Label::new(self.label.clone()).size(LabelSize::Small))
     }
 }
+
+/// Height of the strips that head the debugger's sub-views (tabs, breakpoints).
+pub(crate) const SUBVIEW_HEADER_HEIGHT: Pixels = px(28.);
 
 fn render_debugger_tab(
     ix: usize,
@@ -452,6 +459,7 @@ fn render_debugger_tab(
     let colors = cx.theme().colors();
 
     div()
+        .h_full()
         .border_l_2()
         .border_color(gpui::transparent_black())
         .drag_over::<DraggedTab>(|wrapper, _, _, cx| wrapper.border_color(cx.theme().colors().text))
@@ -459,15 +467,25 @@ fn render_debugger_tab(
             div()
                 .cursor_pointer()
                 .id(format!("debugger_tab_{}", item.item_id().as_u64()))
-                .p_1()
-                .rounded_sm()
+                .relative()
+                .h_full()
+                .px_2()
+                .flex()
+                .items_center()
                 .map(|s| {
                     if selected {
-                        s.bg(colors.text_accent.opacity(0.08))
-                            .hover(|s| s.bg(colors.text_accent.opacity(0.25)))
-                            .text_color(colors.text_accent)
+                        // The accent only marks the selected tab, as a 2px underline.
+                        s.child(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left_2()
+                                .right_2()
+                                .h(px(2.))
+                                .bg(colors.text_accent),
+                        )
                     } else {
-                        s.hover(|s| s.bg(colors.element_hover))
+                        s.hover(|s| s.bg(colors.ghost_element_hover))
                     }
                 })
                 .when(deemphasized, |s| s.opacity(0.8))
@@ -551,7 +569,7 @@ fn render_debugger_tab_bar(
                 cx.propagate();
             }
         })
-        .pl_1p5()
+        .pl_0p5()
         .pr_1()
         .justify_between()
         .border_b_1()
@@ -560,8 +578,7 @@ fn render_debugger_tab_bar(
         .child(
             h_flex()
                 .w_full()
-                .gap_1()
-                .h(Tab::container_height(cx))
+                .h(SUBVIEW_HEADER_HEIGHT)
                 .children(tabs)
                 .on_drop(
                     cx.listener(move |this, dragged_tab: &DraggedTab, window, cx| {
@@ -607,6 +624,8 @@ fn render_debugger_tab_bar(
                         },
                     )
                     .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .hover_color(Color::Default)
                     .on_click(cx.listener(move |pane, _, _, cx| {
                         let is_zoomed = pane.is_zoomed();
                         pane.set_zoomed(!is_zoomed, cx);
@@ -756,7 +775,7 @@ impl RunningState {
             }
             serde_json::Value::String(s) => {
                 // Some built-in zed tasks wrap their arguments in quotes as they might contain spaces.
-                if s.starts_with("\"$ZED_") && s.ends_with('"') {
+                if s.starts_with("\"$IDE_") && s.ends_with('"') {
                     *s = s[1..s.len() - 1].to_string();
                 }
                 if let Some(substituted) = substitute_variables_in_str(s, context) {
@@ -818,7 +837,7 @@ impl RunningState {
             }
             serde_json::Value::String(s) if key == Some("program") || key == Some("cwd") => {
                 // Some built-in zed tasks wrap their arguments in quotes as they might contain spaces.
-                if s.starts_with("\"$ZED_") && s.ends_with('"') {
+                if s.starts_with("\"$IDE_") && s.ends_with('"') {
                     *s = s[1..s.len() - 1].to_string();
                 }
                 resolve_path(s);
@@ -1293,7 +1312,10 @@ impl RunningState {
                 let Err(e) = request_type else {
                     unreachable!();
                 };
-                anyhow::bail!("Zed cannot determine how to run this debug scenario. `build` field was not provided and Debug Adapter won't accept provided configuration because: {e}");
+                anyhow::bail!(
+                    "{} cannot determine how to run this debug scenario. `build` field was not provided and Debug Adapter won't accept provided configuration because: {e}",
+                    branding::PRODUCT_NAME
+                );
             };
 
             Ok(DebugTaskDefinition {

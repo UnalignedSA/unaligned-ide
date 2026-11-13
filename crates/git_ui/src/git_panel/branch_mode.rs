@@ -840,10 +840,7 @@ impl GitPanel {
             "No default branch found. Pick a base branch.".into()
         };
 
-        h_flex()
-            .px_4()
-            .child(Label::new(message).color(Color::Muted))
-            .into_any_element()
+        EmptyState::new(message).into_any_element()
     }
 
     pub(super) fn build_branch_context_menu(

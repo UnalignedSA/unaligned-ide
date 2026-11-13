@@ -34,6 +34,7 @@ use acp_thread::{
     AgentSessionListRequest, AgentSessionListResponse, ClientUserMessageId, ProcessOutput,
     TokenUsageRatio,
 };
+use agent_client_protocol::schema::MaybeUndefined;
 use agent_client_protocol::v2::schema as acp_v2;
 use agent_skills::{
     AGENTS_DIR_NAME, MAX_SKILL_DESCRIPTIONS_SIZE, MAX_SKILL_FILE_SIZE, ProjectSkillGroup,
@@ -906,6 +907,7 @@ impl NativeAgent {
         let draft_prompt = thread.draft_prompt().map(Vec::from);
         let scroll_position = thread.ui_scroll_position();
         let token_usage = thread.latest_token_usage();
+        let cost_usd = thread.cost_usd(cx);
         let project = thread.project.clone();
         let action_log = thread.action_log.clone();
         let prompt_capabilities_rx = thread.prompt_capabilities_rx.clone();
@@ -932,7 +934,7 @@ impl NativeAgent {
             }
             acp_thread.set_draft_prompt(draft_prompt, cx);
             acp_thread.set_ui_scroll_position(scroll_position);
-            acp_thread.update_token_usage(token_usage, cx);
+            report_usage_and_cost(&mut acp_thread, token_usage, cost_usd, cx);
             acp_thread
         });
 
@@ -1545,10 +1547,11 @@ impl NativeAgent {
         let Some(session) = self.sessions.get(thread.read(cx).id()) else {
             return;
         };
+        let cost_usd = thread.read(cx).cost_usd(cx);
         session
             .acp_thread
             .update(cx, |acp_thread, cx| {
-                acp_thread.update_token_usage(usage.0.clone(), cx);
+                report_usage_and_cost(acp_thread, usage.0.clone(), cost_usd, cx);
             })
             .ok();
     }
@@ -3027,6 +3030,40 @@ impl<'a> Command<'a> {
 ///
 /// If the input doesn't begin with `/`, it is returned unchanged so callers
 /// degrade gracefully rather than silently mangling unrelated text.
+/// The currency of [`Thread::cost_usd`], as the usage update names it.
+const COST_CURRENCY: &str = "USD";
+
+/// Hands the context usage of a native thread to its `AcpThread`, and with it
+/// what the session has cost so far, through the usage update that external
+/// agents use to report their own cost: the chat reads both from the same
+/// place (`AcpThread::token_usage` and `AcpThread::cost`).
+///
+/// The cost is only sent along with a usage. `AcpThread` forgets the cost when
+/// the usage is cleared (a compaction, a chat cut back to its start), and the
+/// next usage brings the running total back: clearing the display does not
+/// refund anything.
+fn report_usage_and_cost(
+    acp_thread: &mut AcpThread,
+    usage: Option<acp_thread::TokenUsage>,
+    cost_usd: Option<f64>,
+    cx: &mut Context<AcpThread>,
+) {
+    let context_window = usage
+        .as_ref()
+        .map(|usage| (usage.used_tokens, usage.max_tokens));
+    acp_thread.update_token_usage(usage, cx);
+    if let Some((used_tokens, max_tokens)) = context_window
+        && let Some(cost_usd) = cost_usd
+    {
+        acp_thread.update_usage(
+            acp_v2::UsageUpdate::new(used_tokens, max_tokens).cost(MaybeUndefined::Value(
+                acp_v2::Cost::new(cost_usd, COST_CURRENCY),
+            )),
+            cx,
+        );
+    }
+}
+
 fn strip_slash_command_prefix(text: &str) -> String {
     let trimmed_start = text.trim_start();
     let Some(rest) = trimmed_start.strip_prefix('/') else {
@@ -3228,7 +3265,7 @@ fn model_id_to_selection(model_id: &AgentModelId, cx: &App) -> LanguageModelSele
     agent_settings::language_model_to_selection(&resolved, current_user_selection.as_ref())
 }
 
-pub static ZED_AGENT_ID: LazyLock<AgentId> = LazyLock::new(|| AgentId::new("Zed Agent"));
+pub static IDE_AGENT_ID: LazyLock<AgentId> = LazyLock::new(|| AgentId::new("Zed Agent"));
 
 pub fn available_native_agent(cx: &App) -> AvailableAgent {
     let registry = LanguageModelRegistry::read_global(cx);
@@ -3253,8 +3290,8 @@ pub fn available_native_agent(cx: &App) -> AvailableAgent {
     }
 
     AvailableAgent {
-        id: ZED_AGENT_ID.to_string(),
-        name: ZED_AGENT_ID.0.clone(),
+        id: IDE_AGENT_ID.to_string(),
+        name: IDE_AGENT_ID.0.clone(),
         is_native: true,
         models,
     }
@@ -3291,11 +3328,11 @@ impl acp_thread::ReceiptSessionSubmissions for NativeSessionSubmissions {
 
 impl acp_thread::AgentConnection for NativeAgentConnection {
     fn agent_id(&self) -> AgentId {
-        ZED_AGENT_ID.clone()
+        IDE_AGENT_ID.clone()
     }
 
     fn telemetry_id(&self) -> SharedString {
-        "zed".into()
+        branding::APP_ID.into()
     }
 
     fn new_session(
@@ -3632,12 +3669,14 @@ impl acp_thread::AgentSessionTruncate for NativeAgentSessionTruncate {
             // An MCP prompt, skill, or compaction may still be preparing before
             // the model turn starts, so cancel it before truncating.
             cancellation.await?;
-            let usage = thread.update(cx, |thread, cx| {
+            let (usage, cost_usd) = thread.update(cx, |thread, cx| {
                 thread.truncate(client_user_message_id, cx)?;
-                anyhow::Ok(thread.latest_token_usage())
+                anyhow::Ok((thread.latest_token_usage(), thread.cost_usd(cx)))
             })?;
             acp_thread
-                .update(cx, |thread, cx| thread.update_token_usage(usage, cx))
+                .update(cx, |thread, cx| {
+                    report_usage_and_cost(thread, usage, cost_usd, cx)
+                })
                 .log_err();
             Ok(())
         })
@@ -8571,7 +8610,7 @@ mod internal_tests {
                     name: "Fake".into(),
                     description: None,
                     icon: Some(acp_thread::AgentModelIcon::Named(
-                        ui::IconName::ZedAssistant
+                        ui::IconName::AppAssistant
                     )),
                     is_latest: false,
                     disabled: None,
@@ -9932,6 +9971,256 @@ mod internal_tests {
                 .input_tokens,
             100
         );
+    }
+
+    /// Answers like the fake provider and prices usage the way the Unaligned
+    /// provider does (`ModelPrice::cost_of`), from a price list. Models that
+    /// are not on the list have no price.
+    struct PricedFakeProvider {
+        fake: Arc<FakeLanguageModelProvider>,
+        prices: HashMap<&'static str, language_models::provider::unaligned::ModelPrice>,
+    }
+
+    impl language_model::LanguageModelProviderState for PricedFakeProvider {
+        type ObservableEntity = ();
+
+        fn observable_entity(&self) -> Option<Entity<Self::ObservableEntity>> {
+            None
+        }
+    }
+
+    impl LanguageModelProvider for PricedFakeProvider {
+        fn id(&self) -> LanguageModelProviderId {
+            self.fake.id()
+        }
+
+        fn name(&self) -> LanguageModelProviderName {
+            self.fake.name()
+        }
+
+        fn default_model(&self, cx: &App) -> Option<LanguageModel> {
+            self.fake.default_model(cx)
+        }
+
+        fn default_fast_model(&self, cx: &App) -> Option<LanguageModel> {
+            self.fake.default_fast_model(cx)
+        }
+
+        fn provided_models(&self, cx: &App) -> Vec<LanguageModel> {
+            self.fake.provided_models(cx)
+        }
+
+        fn is_authenticated(&self, _cx: &App) -> bool {
+            true
+        }
+
+        fn authenticate(
+            &self,
+            _cx: &mut App,
+        ) -> Task<Result<(), language_model::AuthenticateError>> {
+            Task::ready(Ok(()))
+        }
+
+        fn settings_view(&self, _cx: &mut App) -> Option<language_model::ProviderSettingsView> {
+            None
+        }
+
+        fn usage_cost(
+            &self,
+            model_id: &language_model::LanguageModelId,
+            usage: &language_model::TokenUsage,
+            _cx: &App,
+        ) -> Option<f64> {
+            Some(self.prices.get(model_id.0.as_ref())?.cost_of(usage))
+        }
+    }
+
+    impl language_model::LanguageModelClient for PricedFakeProvider {
+        fn stream_completion(
+            &self,
+            model: &LanguageModel,
+            request: language_model::LanguageModelRequest,
+            cx: &gpui::AsyncApp,
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<language_model::LanguageModelCompletionStream, LanguageModelCompletionError>,
+        > {
+            self.fake.stream_completion(model, request, cx)
+        }
+    }
+
+    /// Sends one message and answers it with one request that reports each of
+    /// `usage_reports` in turn, as a provider that repeats its usage does.
+    async fn exchange_with_usage(
+        acp_thread: &Entity<AcpThread>,
+        fake: &FakeLanguageModelProvider,
+        model: &LanguageModel,
+        usage_reports: &[language_model::TokenUsage],
+        cx: &mut TestAppContext,
+    ) {
+        let send = acp_thread.update(cx, |thread, cx| thread.send(vec!["hello".into()], cx));
+        let send = cx.foreground_executor().spawn(send);
+        cx.run_until_parked();
+        fake.send_last_text(model, "answer");
+        for usage in usage_reports {
+            fake.send_last_event(model, LanguageModelCompletionEvent::UsageUpdate(*usage));
+            cx.run_until_parked();
+        }
+        fake.end_last(model);
+        send.await.unwrap();
+        cx.run_until_parked();
+    }
+
+    #[track_caller]
+    fn assert_cost(acp_thread: &Entity<AcpThread>, expected_usd: f64, cx: &mut TestAppContext) {
+        acp_thread.read_with(cx, |thread, _| {
+            let cost = thread.cost().expect("the chat should report a cost");
+            assert!(
+                (cost.amount - expected_usd).abs() < 1e-12,
+                "expected {expected_usd} USD, the chat reports {}",
+                cost.amount
+            );
+            assert_eq!(cost.currency.as_ref(), "USD");
+        });
+    }
+
+    /// The prices and the token counts are those of the stand-in API
+    /// (`script/unaligned/fake-api`): Claude Sonnet 5.5 at $1.25 per million
+    /// input tokens, $6.25 per million output tokens and $0.125 per million
+    /// cached input tokens; every answer reports 1840 prompt tokens and 212
+    /// completion tokens.
+    #[gpui::test]
+    async fn test_chat_cost_follows_the_provider_prices(cx: &mut TestAppContext) {
+        let unpriced_fake = init_test(cx);
+        let priced_fake = Arc::new(FakeLanguageModelProvider::new(
+            LanguageModelProviderId::from("priced".to_string()),
+            LanguageModelProviderName::from("Priced".to_string()),
+        ));
+        cx.update(|cx| {
+            let provider = Arc::new(PricedFakeProvider {
+                fake: priced_fake.clone(),
+                prices: HashMap::from_iter([(
+                    "claude-sonnet-5-5",
+                    language_models::provider::unaligned::ModelPrice {
+                        input: 1.25,
+                        output: 6.25,
+                        cached: Some(0.125),
+                    },
+                )]),
+            });
+            LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.register_provider(provider, cx);
+            });
+        });
+        let sonnet = priced_fake.model("claude-sonnet-5-5");
+        let unpriced_model = unpriced_fake.model("fake");
+        let fake_api_usage = language_model::TokenUsage {
+            input_tokens: 1840,
+            output_tokens: 212,
+            ..Default::default()
+        };
+        // 1840 × 1.25 / 1e6 + 212 × 6.25 / 1e6 = 0.0023 + 0.001325
+        let fake_api_request_cost = 0.003625;
+
+        let (_connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = cx.update(|cx| acp_thread.read(cx).session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        // A titled thread sends no request for a title.
+        thread.update(cx, |thread, cx| {
+            thread.set_title("Title".into(), cx);
+            thread.set_model(unpriced_model.clone(), cx);
+        });
+
+        // A model without a price: usage is shown, a cost is not.
+        exchange_with_usage(
+            &acp_thread,
+            &unpriced_fake,
+            &unpriced_model,
+            &[fake_api_usage],
+            cx,
+        )
+        .await;
+        acp_thread.read_with(cx, |thread, _| {
+            assert!(thread.token_usage().is_some());
+            assert!(thread.cost().is_none(), "no price, no cost");
+        });
+
+        // One answer of the stand-in API. A provider that reports usage twice
+        // for one request is billed once.
+        thread.update(cx, |thread, cx| thread.set_model(sonnet.clone(), cx));
+        let partial_usage = language_model::TokenUsage {
+            input_tokens: 1840,
+            output_tokens: 100,
+            ..Default::default()
+        };
+        exchange_with_usage(
+            &acp_thread,
+            &priced_fake,
+            &sonnet,
+            &[partial_usage, fake_api_usage],
+            cx,
+        )
+        .await;
+        assert_cost(&acp_thread, fake_api_request_cost, cx);
+
+        // The canned chat of the stand-in API is two requests (a tool call,
+        // then the answer): 2 × 0.003625 = 0.00725, shown as "about 0.0073 USD".
+        exchange_with_usage(&acp_thread, &priced_fake, &sonnet, &[fake_api_usage], cx).await;
+        assert_cost(&acp_thread, 0.00725, cx);
+
+        // Input read from the cache has its own price:
+        // (340 × 1.25 + 1500 × 0.125 + 212 × 6.25) / 1e6 = 0.0019375
+        let cached_usage = language_model::TokenUsage {
+            input_tokens: 340,
+            cache_read_input_tokens: 1500,
+            output_tokens: 212,
+            ..Default::default()
+        };
+        exchange_with_usage(&acp_thread, &priced_fake, &sonnet, &[cached_usage], cx).await;
+        assert_cost(&acp_thread, 0.00725 + 0.0019375, cx);
+        thread.read_with(cx, |thread, cx| {
+            let cost = thread.cost_usd(cx).expect("the thread knows its cost");
+            assert!((cost - 0.0091875).abs() < 1e-12);
+        });
+
+        // A reopened chat still says what it has cost: the stored thread keeps
+        // token totals, which are priced again with the thread's model.
+        drop(thread);
+        drop(acp_thread);
+        release_dropped_entities(cx);
+        agent.read_with(cx, |agent, _| assert!(agent.sessions.is_empty()));
+        let acp_thread = agent
+            .update(cx, |agent, cx| {
+                agent.open_thread(session_id.clone(), project.clone(), cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.model().map(|model| &model.id), Some(&sonnet.id));
+        });
+        // The request made with the model that has no price is in the stored
+        // totals too, so it is priced like the others: an estimate.
+        let restored_cost = 0.0091875 + fake_api_request_cost;
+        assert_cost(&acp_thread, restored_cost, cx);
+
+        // A request with a model that has no price adds nothing, and does not
+        // change what was counted before.
+        thread.update(cx, |thread, cx| {
+            thread.set_model(unpriced_model.clone(), cx)
+        });
+        exchange_with_usage(
+            &acp_thread,
+            &unpriced_fake,
+            &unpriced_model,
+            &[fake_api_usage],
+            cx,
+        )
+        .await;
+        thread.update(cx, |thread, cx| thread.set_model(sonnet.clone(), cx));
+        exchange_with_usage(&acp_thread, &priced_fake, &sonnet, &[fake_api_usage], cx).await;
+        assert_cost(&acp_thread, restored_cost + fake_api_request_cost, cx);
     }
 
     struct StreamingTurn {

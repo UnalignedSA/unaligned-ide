@@ -235,7 +235,7 @@ pub struct AgentSettingsContent {
     /// When enabled, `default_width` does not control the panel width, and resetting the panel
     /// restores the default proportion.
     ///
-    /// Default: true
+    /// Default: false
     pub flexible: Option<bool>,
     /// The deprecated version of `threads_sidebar.position`.
     ///
@@ -263,7 +263,7 @@ pub struct AgentSettingsContent {
     /// Default fixed width in pixels when the agent panel is docked to the left or right and
     /// `flexible` is false.
     ///
-    /// Default: 640
+    /// Default: 400
     pub default_width: Option<crate::PixelSetting>,
     /// Default height in pixels when the agent panel is docked to the bottom.
     ///
@@ -350,8 +350,9 @@ pub struct AgentSettingsContent {
     /// context grows too large.
     pub auto_compact: Option<AutoCompactSettingsContent>,
     /// Whether to show thumb buttons for feedback in the agent panel.
+    /// No feedback is sent anywhere in this product.
     ///
-    /// Default: true
+    /// Default: false
     pub enable_feedback: Option<bool>,
     /// Whether to have edit cards in the agent panel expanded, showing a preview of the full diff.
     ///
@@ -361,7 +362,7 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub expand_terminal_card: Option<bool>,
-    /// Command to automatically run when Zed creates a Terminal Thread shell in the agent panel.
+    /// Command to automatically run when the IDE creates a Terminal Thread shell in the agent panel.
     /// The command is sent to the shell as if typed, so it is interpreted by your
     /// configured shell (including on Windows and remote/WSL projects).
     /// An empty string disables this behavior.
@@ -394,7 +395,7 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub show_merge_conflict_indicator: Option<bool>,
-    /// Whether to automatically generate a title for Zed Agent threads using the
+    /// Whether to automatically generate a title for the built-in agent's chats using the
     /// summary model. When disabled, titles are only created when manually
     /// requested (e.g. via the thread's "Regenerate Thread Title" action).
     ///
@@ -406,7 +407,7 @@ pub struct AgentSettingsContent {
     /// The global `default` applies when no tool-specific rules match.
     /// For external agent servers (e.g. Claude Agent) that define their own
     /// permission modes, "deny" and "confirm" still take precedence — the
-    /// external agent's permission system is only used when Zed would allow
+    /// external agent's permission system is only used when the IDE would allow
     /// the action. Per-tool regex patterns (`always_allow`, `always_deny`,
     /// `always_confirm`) match against the tool's text input (command, path,
     /// URL, etc.).
@@ -750,10 +751,10 @@ impl JsonSchema for LanguageModelProviderSetting {
                         "openai-subscribed",
                         "opencode",
                         "openrouter",
+                        "unaligned",
                         "vercel_ai_gateway",
                         "x_ai",
-                        "x_ai_subscribed",
-                        "zed.dev"
+                        "x_ai_subscribed"
                     ]
                 },
                 {
@@ -913,7 +914,7 @@ pub enum CustomAgentServerSettings {
 /// path string (`"/tmp/x"`, a legacy/hand-authored entry with no resolved
 /// target) or an object (`{ "requested": "/tmp/x", "resolved": "/tmp/real" }`).
 /// Serializes back as a bare string when `resolved` is `None` and as an object
-/// otherwise, so hand-authored bare strings round-trip and Zed-written grants
+/// otherwise, so hand-authored bare strings round-trip and IDE-written grants
 /// are objects.
 #[derive(Clone, Debug, Default, PartialEq, MergeFrom)]
 pub struct GrantedWritePathContent {
@@ -1046,9 +1047,9 @@ pub struct SandboxPermissionsContent {
 
     /// Directory subtrees that sandboxed terminal commands may always write
     /// to without prompting. Each entry is either a bare path string or an
-    /// object `{requested, resolved}`; Zed writes objects (the canonical,
+    /// object `{requested, resolved}`; the IDE writes objects (the canonical,
     /// symlink-resolved target established at approval time), while
-    /// hand-authored entries may be bare path strings. Paths written by Zed
+    /// hand-authored entries may be bare path strings. Paths written by the IDE
     /// are absolute.
     /// Default: []
     pub write_paths: Option<ExtendingVec<GrantedWritePathContent>>,

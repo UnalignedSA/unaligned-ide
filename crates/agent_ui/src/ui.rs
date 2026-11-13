@@ -6,6 +6,7 @@ mod sandbox_status_tooltip;
 mod session_notice;
 mod terminal_tool_header;
 mod undo_reject_toast;
+mod working_indicator;
 
 pub use agent_notification::*;
 pub use end_trial_upsell::*;
@@ -15,6 +16,7 @@ pub use sandbox_status_tooltip::*;
 pub use session_notice::*;
 pub use terminal_tool_header::*;
 pub use undo_reject_toast::*;
+pub use working_indicator::*;
 
 /// Returns the appropriate [`DocumentationSide`] for documentation asides
 /// in the agent panel, based on the current dock position.

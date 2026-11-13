@@ -348,7 +348,7 @@ impl PickerDelegate for ScopeSelectorDelegate {
         Some(
             ListItem::new(ix)
                 .inset(true)
-                .spacing(ListItemSpacing::Sparse)
+                .spacing(ListItemSpacing::Dense)
                 .toggle_state(selected)
                 .start_slot::<Icon>(language_icon)
                 .child(

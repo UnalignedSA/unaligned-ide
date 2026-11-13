@@ -19,7 +19,16 @@ use util::paths::{PathStyle, UrlExt};
 
 use crate::Range;
 
-const URL_REGEX: &str = r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://|zed://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`']+"#;
+// The last alternative is the product's own link scheme, the one registered
+// with the system: a clicked link is handed to the system, which gives it back
+// to the app. The app's internal scheme is not listed: nothing outside the app
+// can open such a link. `branding::URL_SCHEME` is ASCII letters, digits and
+// dashes (checked by the branding crate's tests), so it needs no escaping.
+const URL_REGEX: &str = const_format::concatcp!(
+    r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://|"#,
+    branding::URL_SCHEME,
+    r#"://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`']+"#
+);
 const WIDE_CHAR_SPACERS: Flags =
     Flags::from_bits(Flags::LEADING_WIDE_CHAR_SPACER.bits() | Flags::WIDE_CHAR_SPACER.bits())
         .unwrap();
@@ -549,11 +558,17 @@ mod tests {
                 "mailto:bob@example.com",
             ],
         );
+        // The product's own links are found whole; the internal scheme is
+        // not a link.
+        let scheme = branding::URL_SCHEME;
+        let first = format!("{scheme}://extension/html");
+        let second = format!("{scheme}://settings/theme");
         re_test(
             URL_REGEX,
-            "open zed://channel/the-channel and zed://settings/theme now",
-            vec!["zed://channel/the-channel", "zed://settings/theme"],
+            &format!("open {first} and {second} now"),
+            vec![first.as_str(), second.as_str()],
         );
+        re_test(URL_REGEX, "open ide://settings/theme now", vec![]);
     }
 
     #[test]

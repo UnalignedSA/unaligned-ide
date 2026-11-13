@@ -43,7 +43,7 @@ use crate::{
 
 use settings_json::{infer_json_indent_size, update_value_in_json_text};
 
-pub const LSP_SETTINGS_SCHEMA_URL_PREFIX: &str = "zed://schemas/settings/lsp/";
+pub const LSP_SETTINGS_SCHEMA_URL_PREFIX: &str = "ide://schemas/settings/lsp/";
 
 // GPUI resolves these aliases, but they are not part of the platform font inventory.
 const VIRTUAL_FONT_NAMES: [&str; 5] = [
@@ -53,6 +53,10 @@ const VIRTUAL_FONT_NAMES: [&str; 5] = [
     "Zed Plex Mono",
     "Zed Plex Sans",
 ];
+
+// Of those, the only one suggested when a font family is completed. The others are
+// aliases kept from upstream: old settings files stay valid, but nothing offers them.
+const OFFERED_VIRTUAL_FONT_NAMES: [&str; 1] = [".SystemUIFont"];
 
 pub trait SettingsKey: 'static + Send + Sync {
     /// The name of a key within the JSON file from which this setting should
@@ -1305,13 +1309,22 @@ impl SettingsStore {
         if !params.font_names.is_empty() {
             replace_subschema::<FontFamilyName>(&mut generator, || {
                 let mut font_names = params.font_names.to_vec();
-                font_names.extend(VIRTUAL_FONT_NAMES.map(str::to_string));
+                font_names.extend(OFFERED_VIRTUAL_FONT_NAMES.map(str::to_string));
                 font_names.sort_unstable();
                 font_names.dedup();
+                // The JSON language server validates a pattern but never suggests it.
+                let legacy_aliases = VIRTUAL_FONT_NAMES
+                    .iter()
+                    .filter(|name| !OFFERED_VIRTUAL_FONT_NAMES.contains(*name))
+                    .map(|name| name.replace('.', "\\."))
+                    .collect::<Vec<_>>()
+                    .join("|");
 
                 json_schema!({
-                     "type": "string",
-                     "enum": font_names,
+                    "anyOf": [
+                        { "type": "string", "enum": font_names },
+                        { "type": "string", "pattern": format!("^({legacy_aliases})$") }
+                    ]
                 })
             });
         }
@@ -1877,9 +1890,11 @@ mod tests {
         store.register_setting::<ItemSettings>();
         store.register_setting::<DefaultLanguageSettings>();
 
+        // Unaligned default: auto_update off. The user file turns it on below, so the
+        // test still shows that a user value replaces the default.
         assert_eq!(
             store.get::<AutoUpdateSetting>(None),
-            &AutoUpdateSetting { auto_update: true }
+            &AutoUpdateSetting { auto_update: false }
         );
         assert_eq!(
             store.get::<ItemSettings>(None).close_position,
@@ -1889,7 +1904,7 @@ mod tests {
         store
             .set_user_settings(
                 r#"{
-                    "auto_update": false,
+                    "auto_update": true,
                     "tabs": {
                       "close_position": "left"
                     }
@@ -1900,7 +1915,7 @@ mod tests {
 
         assert_eq!(
             store.get::<AutoUpdateSetting>(None),
-            &AutoUpdateSetting { auto_update: false }
+            &AutoUpdateSetting { auto_update: true }
         );
         assert_eq!(
             store.get::<ItemSettings>(None).close_position,
@@ -1931,7 +1946,7 @@ mod tests {
                 WorktreeId::from_usize(1),
                 LocalSettingsPath::InWorktree(rel_path("root2").into()),
                 LocalSettingsKind::Settings,
-                Some(r#"{ "tab_size": 9, "auto_update": true}"#),
+                Some(r#"{ "tab_size": 9, "auto_update": false}"#),
                 cx,
             )
             .unwrap();
@@ -1971,7 +1986,7 @@ mod tests {
                 worktree_id: WorktreeId::from_usize(1),
                 path: rel_path("root2/something")
             })),
-            &AutoUpdateSetting { auto_update: false }
+            &AutoUpdateSetting { auto_update: true }
         );
     }
 
@@ -3207,18 +3222,40 @@ mod tests {
         });
 
         let font_names = schema
-            .pointer("/$defs/FontFamilyName/enum")
+            .pointer("/$defs/FontFamilyName/anyOf/0/enum")
             .and_then(Value::as_array)
             .context("FontFamilyName schema should contain allowed font names")?;
 
         for font_name in ["IBM Plex Sans", "Lilex"]
             .into_iter()
-            .chain(VIRTUAL_FONT_NAMES)
+            .chain(OFFERED_VIRTUAL_FONT_NAMES)
         {
             assert!(
                 font_names
                     .iter()
                     .any(|value| value.as_str() == Some(font_name)),
+                "FontFamilyName schema should accept {font_name}"
+            );
+        }
+
+        // The aliases kept from upstream are accepted, through a pattern, and
+        // are not in the list a completion offers.
+        let legacy_pattern = schema
+            .pointer("/$defs/FontFamilyName/anyOf/1/pattern")
+            .and_then(Value::as_str)
+            .context("FontFamilyName schema should accept the legacy aliases")?;
+        for font_name in VIRTUAL_FONT_NAMES {
+            if OFFERED_VIRTUAL_FONT_NAMES.contains(&font_name) {
+                continue;
+            }
+            assert!(
+                !font_names
+                    .iter()
+                    .any(|value| value.as_str() == Some(font_name)),
+                "FontFamilyName schema should not suggest {font_name}"
+            );
+            assert!(
+                legacy_pattern.contains(&font_name.replace('.', "\\.")),
                 "FontFamilyName schema should accept {font_name}"
             );
         }
@@ -3309,7 +3346,7 @@ mod tests {
 
         assert_eq!(
             init_options_ref,
-            "zed://schemas/settings/lsp/rust-analyzer/initialization_options"
+            "ide://schemas/settings/lsp/rust-analyzer/initialization_options"
         );
 
         let settings_ref = properties
@@ -3322,7 +3359,7 @@ mod tests {
 
         assert_eq!(
             settings_ref,
-            "zed://schemas/settings/lsp/rust-analyzer/settings"
+            "ide://schemas/settings/lsp/rust-analyzer/settings"
         );
     }
 
@@ -3364,7 +3401,7 @@ mod tests {
 
         assert_eq!(
             init_options_ref,
-            "zed://schemas/settings/lsp/rust-analyzer/initialization_options"
+            "ide://schemas/settings/lsp/rust-analyzer/initialization_options"
         );
 
         let settings_ref = properties
@@ -3377,7 +3414,7 @@ mod tests {
 
         assert_eq!(
             settings_ref,
-            "zed://schemas/settings/lsp/rust-analyzer/settings"
+            "ide://schemas/settings/lsp/rust-analyzer/settings"
         );
     }
 

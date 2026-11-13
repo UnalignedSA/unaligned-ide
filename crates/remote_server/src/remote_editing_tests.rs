@@ -1367,7 +1367,7 @@ async fn test_remote_settings(cx: &mut TestAppContext, server_cx: &mut TestAppCo
     );
 
     fs.insert_tree(
-        "/code/project1/.zed",
+        "/code/project1/.unaligned",
         json!({
             "settings.json": r#"
                   {
@@ -1454,7 +1454,7 @@ async fn test_remote_lsp(cx: &mut TestAppContext, server_cx: &mut TestAppContext
     let (project, headless) = init_test(&fs, cx, server_cx).await;
 
     fs.insert_tree(
-        path!("/code/project1/.zed"),
+        path!("/code/project1/.unaligned"),
         json!({
             "settings.json": r#"
           {
@@ -1872,7 +1872,7 @@ async fn test_remote_call_hierarchy(cx: &mut TestAppContext, server_cx: &mut Tes
     let (project, headless) = init_test(&fs, cx, server_cx).await;
 
     fs.insert_tree(
-        path!("/code/project1/.zed"),
+        path!("/code/project1/.unaligned"),
         json!({
             "settings.json": r#"
           {
@@ -2970,7 +2970,7 @@ async fn test_remote_cancel_language_server_work(
     let (project, headless) = init_test(&fs, cx, server_cx).await;
 
     fs.insert_tree(
-        path!("/code/project1/.zed"),
+        path!("/code/project1/.unaligned"),
         json!({
             "settings.json": r#"
           {
@@ -5476,7 +5476,7 @@ async fn test_remote_apply_code_action_skips_unadvertised_command(
     let (project, headless) = init_test(&fs, cx, server_cx).await;
 
     fs.insert_tree(
-        path!("/code/project1/.zed"),
+        path!("/code/project1/.unaligned"),
         json!({
             "settings.json": r#"
           {

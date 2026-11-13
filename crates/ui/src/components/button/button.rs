@@ -2,10 +2,12 @@ use crate::component_prelude::*;
 use gpui::{AnyElement, AnyView, DefiniteLength};
 use ui_macros::RegisterComponent;
 
+use super::button_like::ButtonPreviewState;
 use crate::traits::animation_ext::CommonAnimationExt;
 use crate::{ButtonCommon, ButtonLike, ButtonSize, ButtonStyle, Icon, Label};
 use crate::{
-    Color, DynamicSpacing, ElevationIndex, KeyBinding, KeybindingPosition, TintColor, prelude::*,
+    Color, DynamicSpacing, ElevationIndex, KeyBinding, KeybindingPosition, TintColor, on_accent,
+    prelude::*,
 };
 
 /// An element that creates a button with a label and optional icons.
@@ -101,8 +103,10 @@ impl Button {
     /// properties to their default values, which can be customized using the
     /// builder pattern methods provided by this struct.
     pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        let mut base = ButtonLike::new(id);
+        base.disabled_content_uses_token = true;
         Self {
-            base: ButtonLike::new(id),
+            base,
             label: label.into(),
             label_color: None,
             label_size: None,
@@ -117,6 +121,24 @@ impl Button {
             truncate: false,
             loading: false,
         }
+    }
+
+    /// Creates the primary action of a view: a filled accent button.
+    ///
+    /// At most one is visible per region (the editor area, each dock, a
+    /// modal). Every other action is [`ButtonStyle::Outlined`] or
+    /// [`ButtonStyle::Subtle`].
+    ///
+    /// ```
+    /// use ui::prelude::*;
+    ///
+    /// Button::primary("connect", "Connect")
+    ///     .on_click(|event, window, cx| {
+    ///         // Handle click event
+    ///     });
+    /// ```
+    pub fn primary(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Self::new(id, label).style(ButtonStyle::Tinted(TintColor::Accent))
     }
 
     /// Sets the color of the button's label.
@@ -465,13 +487,49 @@ impl RenderOnce for Button {
             self.base.aria_value = Some(label.clone());
         }
 
-        let label_color = if is_disabled {
+        let effective_style = self.base.effective_style();
+        let selected_neutral = self.base.selected_is_neutral();
+        // The theme's colour for content on the accent fill, whatever colour the
+        // caller picked for other styles.
+        let is_primary = self.base.is_primary();
+        let on_primary = is_primary && !is_disabled;
+        // A disabled primary is a neutral block that `ButtonLike` does not dim.
+        let disabled_primary = is_primary && is_disabled;
+        let on_primary_color = Color::Custom(on_accent(cx));
+
+        let label_color = if on_primary {
+            on_primary_color
+        } else if disabled_primary {
+            Color::Disabled
+        } else if is_disabled {
+            // The theme's disabled colour alone: `ButtonLike` adds no opacity to it.
             Color::Disabled
         } else if is_selected {
-            self.selected_label_color.unwrap_or(Color::Selected)
+            self.selected_label_color.unwrap_or(
+                if selected_neutral || effective_style != ButtonStyle::Transparent {
+                    Color::Default
+                } else {
+                    Color::Selected
+                },
+            )
         } else {
-            self.label_color.unwrap_or_default()
+            self.label_color.unwrap_or(match effective_style {
+                ButtonStyle::Tinted(TintColor::Error) => Color::Error,
+                _ => Color::Default,
+            })
         };
+        // A muted key hint would vanish on the accent fill.
+        if on_primary {
+            self.key_binding = self
+                .key_binding
+                .take()
+                .map(|key_binding| key_binding.color(on_primary_color));
+        } else if disabled_primary {
+            self.key_binding = self
+                .key_binding
+                .take()
+                .map(|key_binding| key_binding.color(Color::Disabled));
+        }
         let loading_icon_id = (self.base.id().clone(), "loading");
         let wrapped_key_binding = if wrap_key_binding {
             self.key_binding.take()
@@ -488,13 +546,21 @@ impl RenderOnce for Button {
                     this.child(
                         Icon::new(IconName::LoadCircle)
                             .size(IconSize::Small)
-                            .color(Color::Muted)
+                            .color(if on_primary {
+                                on_primary_color
+                            } else if is_disabled {
+                                Color::Disabled
+                            } else {
+                                Color::Muted
+                            })
                             .with_keyed_rotate_animation(loading_icon_id, 2),
                     )
                 },
                 |this| {
                     this.when_some(self.start_icon, |this, icon| {
-                        this.child(if is_disabled {
+                        this.child(if on_primary {
+                            icon.color(on_primary_color)
+                        } else if is_disabled {
                             icon.color(Color::Disabled)
                         } else {
                             icon
@@ -521,7 +587,9 @@ impl RenderOnce for Button {
                     .children(self.key_binding),
             )
             .when_some(self.end_icon, |this, icon| {
-                this.child(if is_disabled {
+                this.child(if on_primary {
+                    icon.color(on_primary_color)
+                } else if is_disabled {
                     icon.color(Color::Disabled)
                 } else {
                     icon
@@ -568,9 +636,59 @@ impl Component for Button {
     }
 
     fn preview(_window: &mut Window, _cx: &mut App) -> AnyElement {
+        let primary_in_state = |id: &'static str, state| {
+            let mut button = Button::primary(id, "Connect").size(ButtonSize::Medium);
+            button.base = button.base.preview_state(state);
+            button
+        };
+
         v_flex()
             .gap_6()
             .children(vec![
+                example_group_with_title(
+                    "Primary",
+                    vec![
+                        single_example(
+                            "Normal, Hover, Focused, Disabled",
+                            h_flex()
+                                .gap_4()
+                                .child(
+                                    Button::primary("primary", "Connect").size(ButtonSize::Medium),
+                                )
+                                .child(primary_in_state(
+                                    "primary_hover",
+                                    ButtonPreviewState::Hovered,
+                                ))
+                                .child(primary_in_state(
+                                    "primary_focused",
+                                    ButtonPreviewState::Focused,
+                                ))
+                                .child(
+                                    Button::primary("primary_disabled", "Connect")
+                                        .size(ButtonSize::Medium)
+                                        .disabled(true),
+                                )
+                                .into_any_element(),
+                        ),
+                        single_example(
+                            "With Icon: Normal, Disabled",
+                            h_flex()
+                                .gap_4()
+                                .child(
+                                    Button::primary("primary_icon", "Commit")
+                                        .size(ButtonSize::Medium)
+                                        .start_icon(Icon::new(IconName::Check)),
+                                )
+                                .child(
+                                    Button::primary("primary_icon_disabled", "Commit")
+                                        .size(ButtonSize::Medium)
+                                        .start_icon(Icon::new(IconName::Check))
+                                        .disabled(true),
+                                )
+                                .into_any_element(),
+                        ),
+                    ],
+                ),
                 example_group_with_title(
                     "Button Styles",
                     vec![

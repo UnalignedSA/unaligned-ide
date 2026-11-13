@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""Regenerate the app icons and brand marks from the logo.
+
+    script/unaligned/make-icons LOGO.png                  write every file listed below
+    script/unaligned/make-icons LOGO.png --preview DIR    also write contact sheets to look at
+    script/unaligned/make-icons LOGO.png --root DIR       write under DIR instead of the repository
+
+LOGO.png is the brand art: two overlapping rectangles on a flat ground (the back one partly
+hidden by the front one), as in the logo of the Unaligned website. The script measures
+the three colours and the two rectangles, then redraws them at every size with every edge on
+a whole pixel: nothing is scaled, so nothing is blurred. Art of another kind is refused with
+a message; change measure() and the draw_* functions for it.
+
+Python 3 standard library only. `iconutil` (part of macOS) is needed for Document.icns; when
+it is missing that one file is left alone and the script says so.
+
+Written
+  crates/ide/resources/app-icon{,-preview,-nightly,-dev}{,@2x}.png    512 and 1024 px
+  crates/ide/resources/windows/app-icon{,-preview,-nightly,-dev}.ico  256, 128, 64, 48, 32, 24, 16
+  crates/ide/resources/Document.icns                                  16 to 1024 px
+  assets/images/unaligned_mark.svg       the mark in its two colours (for img(), docs, packaging)
+  assets/images/app_logo.svg             the mark in one colour (VectorName::AppLogo, tinted)
+  assets/images/app_x_copilot.svg        Copilot + the mark (VectorName::AppXCopilot, tinted)
+  assets/images/*_stamp.svg              emptied (Zed's plan stamps)
+  assets/icons/ai_unaligned.svg, ai_zed.svg, zed_agent.svg, zed_agent_two.svg   16px glyph
+  assets/icons/app_predict{,_disabled,_down,_up,_error}.svg           16px "ghost text" glyph
+
+Channels: stable is the mark; preview and nightly add a band at the bottom, one eighth of the
+height (grey, amber); dev draws the front square as an outline in the back square's colour.
+"""
+
+import argparse
+import collections
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import zlib
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent.parent
+
+PREVIEW_BAND = (0x9A, 0x95, 0x8E)  # the site's muted grey
+NIGHTLY_BAND = (0xD9, 0xA4, 0x41)  # the site's amber
+CHANNELS = [("", None), ("-preview", PREVIEW_BAND), ("-nightly", NIGHTLY_BAND), ("-dev", None)]
+ICO_SIZES = [256, 128, 64, 48, 32, 24, 16]
+ICNS_SIZES = [16, 32, 64, 128, 256, 512, 1024]
+STAMPS = ["business", "pro_trial", "pro_user", "student", "vip"]
+
+
+def fail(message):
+    sys.exit(f"make-icons: {message}")
+
+
+# --- PNG in and out ---------------------------------------------------------------------------
+
+
+def read_png(path):
+    """Returns (width, height, rows) with rows as bytes of RGB triples."""
+    data = Path(path).read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        fail(f"{path} is not a PNG file")
+    pos, idat, palette, header = 8, b"", None, None
+    while pos < len(data):
+        length, kind = struct.unpack(">I4s", data[pos : pos + 8])
+        body = data[pos + 8 : pos + 8 + length]
+        pos += 12 + length
+        if kind == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif kind == b"PLTE":
+            palette = body
+        elif kind == b"IDAT":
+            idat += body
+    width, height, depth, colour_type, _, _, interlace = header
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(colour_type)
+    if depth != 8 or interlace or channels is None:
+        fail(
+            f"{path}: only 8-bit, non-interlaced PNG is read here; convert it first, for example "
+            f"`sips -s format png {path} --out logo8.png`"
+        )
+    stride = width * channels
+    raw = zlib.decompress(idat)
+    rows, previous, pos = [], bytearray(stride), 0
+    for _ in range(height):
+        filter_type = raw[pos]
+        line = bytearray(raw[pos + 1 : pos + 1 + stride])
+        pos += 1 + stride
+        if filter_type == 1:
+            for i in range(channels, stride):
+                line[i] = (line[i] + line[i - channels]) & 255
+        elif filter_type == 2:
+            for i in range(stride):
+                line[i] = (line[i] + previous[i]) & 255
+        elif filter_type == 3:
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                line[i] = (line[i] + ((left + previous[i]) >> 1)) & 255
+        elif filter_type == 4:
+            for i in range(stride):
+                a = line[i - channels] if i >= channels else 0
+                b = previous[i]
+                c = previous[i - channels] if i >= channels else 0
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        previous = line
+        if colour_type == 2:
+            rows.append(bytes(line))
+        elif colour_type == 6:
+            rows.append(bytes(v for i, v in enumerate(line) if i % 4 != 3))
+        elif colour_type == 0:
+            rows.append(bytes(v for v in line for _ in range(3)))
+        elif colour_type == 4:
+            rows.append(bytes(v for v in line[0::2] for _ in range(3)))
+        else:
+            rows.append(b"".join(palette[3 * v : 3 * v + 3] for v in line))
+    return width, height, rows
+
+
+def png_chunk(kind, body):
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+
+class Canvas:
+    """RGBA picture. Shapes are whole-pixel rectangles, so every edge is exact."""
+
+    def __init__(self, width, height, colour=None):
+        self.width, self.height = width, height
+        pixel = bytes(colour) + b"\xff" if colour else b"\0\0\0\0"
+        self.rows = [bytearray(pixel * width) for _ in range(height)]
+
+    def rect(self, x0, y0, x1, y1, colour, alpha=255):
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(self.width, x1), min(self.height, y1)
+        if x1 <= x0 or y1 <= y0:
+            return
+        span = (bytes(colour) + bytes([alpha])) * (x1 - x0)
+        for y in range(y0, y1):
+            self.rows[y][x0 * 4 : x1 * 4] = span
+
+    def blit(self, other, left, top, zoom=1):
+        """Copies `other` here, each of its pixels as a zoom x zoom block, over the ground."""
+        for y in range(other.height):
+            source = other.rows[y]
+            line = bytearray()
+            for x in range(other.width):
+                r, g, b, a = source[x * 4 : x * 4 + 4]
+                under = self.rows[top + y * zoom][(left + x * zoom) * 4 : (left + x * zoom) * 4 + 4]
+                mixed = bytes((c * a + u * (255 - a) + 127) // 255 for c, u in zip((r, g, b), under))
+                line += (mixed + b"\xff") * zoom
+            for dy in range(zoom):
+                self.rows[top + y * zoom + dy][left * 4 : left * 4 + len(line)] = line
+
+    def png(self):
+        raw = b"".join(b"\0" + bytes(row) for row in self.rows)
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + png_chunk(b"IHDR", struct.pack(">IIBBBBB", self.width, self.height, 8, 6, 0, 0, 0))
+            + png_chunk(b"sRGB", b"\0")
+            + png_chunk(b"IDAT", zlib.compress(raw, 9))
+            + png_chunk(b"IEND", b"")
+        )
+
+    def dib(self):
+        """The 32-bit bitmap form an .ico entry uses: header, BGRA rows bottom-up, empty mask."""
+        header = struct.pack("<IiiHHIIiiII", 40, self.width, self.height * 2, 1, 32, 0, 0, 0, 0, 0, 0)
+        pixels = bytearray()
+        for row in reversed(self.rows):
+            line = bytearray(row)
+            line[0::4], line[2::4] = row[2::4], row[0::4]
+            pixels += line
+        mask_stride = ((self.width + 31) // 32) * 4
+        return header + bytes(pixels) + bytes(mask_stride * self.height)
+
+
+# --- Measuring the logo -----------------------------------------------------------------------
+
+
+class Art:
+    """Colours as RGB tuples; `back` and `front` as (left, top, right, bottom) fractions."""
+
+    def edges(self, box, size):
+        """`box` at `size` pixels, each edge on a whole pixel, symmetric art staying symmetric."""
+        left, top, right, bottom = box
+        low = lambda f: int(f * size + 0.5)
+        return low(left), low(top), size - low(1 - right), size - low(1 - bottom)
+
+    def mark_ratios(self):
+        """Side of a square and offset of the front one, as parts of the mark's own width."""
+        extent = self.front[2] - self.back[0]
+        return (self.back[2] - self.back[0]) / extent, (self.front[0] - self.back[0]) / extent
+
+
+def measure(path):
+    width, height, rows = read_png(path)
+    corners = [rows[0][:3], rows[0][-3:], rows[-1][:3], rows[-1][-3:]]
+    ground = collections.Counter(corners).most_common(1)[0][0]
+    counts = collections.Counter()
+    for row in rows:
+        counts.update(row[i : i + 3] for i in range(0, len(row), 3))
+
+    def distance(a, b):
+        return sum((x - y) ** 2 for x, y in zip(a, b))
+
+    others = [c for c, _ in counts.most_common() if distance(c, ground) > 3 * 24**2]
+    if not others:
+        fail(f"{path}: one flat colour, no mark found")
+    first = others[0]
+    rest = [c for c in others if distance(c, first) > 3 * 24**2]
+    if not rest:
+        fail(f"{path}: one shape colour found, two expected (a back and a front rectangle)")
+    palette = [ground, first, rest[0]]
+    nearest = {}
+    boxes = {1: [width, height, -1, -1], 2: [width, height, -1, -1]}
+    areas = {1: 0, 2: 0}
+    for y, row in enumerate(rows):
+        for x in range(width):
+            colour = row[x * 3 : x * 3 + 3]
+            index = nearest.get(colour)
+            if index is None:
+                index = min(range(3), key=lambda i: distance(colour, palette[i]))
+                nearest[colour] = index
+            if index:
+                box = boxes[index]
+                box[0], box[1] = min(box[0], x), min(box[1], y)
+                box[2], box[3] = max(box[2], x + 1), max(box[3], y + 1)
+                areas[index] += 1
+
+    def box_area(box):
+        return max(0, box[2] - box[0]) * max(0, box[3] - box[1])
+
+    overlap = box_area(
+        [max(boxes[1][0], boxes[2][0]), max(boxes[1][1], boxes[2][1]), min(boxes[1][2], boxes[2][2]), min(boxes[1][3], boxes[2][3])]
+    )
+    full = {i: areas[i] / box_area(boxes[i]) for i in (1, 2)}
+    front = 1 if full[1] >= full[2] else 2
+    back = 3 - front
+    if full[front] < 0.98 or (areas[back] + overlap) / box_area(boxes[back]) < 0.98 or not overlap:
+        fail(
+            f"{path}: the art is not two overlapping rectangles on a flat ground. This script only "
+            "redraws that kind of mark; for other art change measure() and the draw_* functions."
+        )
+    art = Art()
+    art.ground, art.back_colour, art.front_colour = (tuple(palette[i]) for i in (0, back, front))
+    art.back, art.front = (
+        (boxes[i][0] / width, boxes[i][1] / height, boxes[i][2] / width, boxes[i][3] / height) for i in (back, front)
+    )
+    return art
+
+
+# --- Raster drawings --------------------------------------------------------------------------
+
+
+def draw_app_icon(art, size, channel, band):
+    """Full-bleed square, no rounded mask: the brand is square."""
+    canvas = Canvas(size, size, art.ground)
+    back, front = art.edges(art.back, size), art.edges(art.front, size)
+    if channel == "-dev":
+        # Front square as an outline in the back square's colour, with air between the two
+        # so that the outline does not melt into the square behind it.
+        line = max(1, int(size / 32 + 0.5))
+        canvas.rect(*back, art.back_colour)
+        canvas.rect(front[0] - line, front[1] - line, front[2] + line, front[3] + line, art.ground)
+        canvas.rect(*front, art.back_colour)
+        canvas.rect(front[0] + line, front[1] + line, front[2] - line, front[3] - line, art.ground)
+    else:
+        canvas.rect(*back, art.back_colour)
+        canvas.rect(*front, art.front_colour)
+    if band:
+        canvas.rect(0, size - int(size / 8 + 0.5), size, size, band)
+    return canvas
+
+
+def draw_document(art, size):
+    """A sheet of paper with a folded corner and the small mark, on a transparent ground.
+
+    The paper is the logo's light colour, so the mark is drawn as on a light ground: back
+    square in the logo's dark colour, front square in its red.
+    """
+    canvas = Canvas(size, size)
+    edge = PREVIEW_BAND
+    left, right = int(size * 0.1875 + 0.5), size - int(size * 0.1875 + 0.5)
+    top, bottom = int(size * 0.0625 + 0.5), size - int(size * 0.0625 + 0.5)
+    line = max(1, int(size / 64 + 0.5))
+    fold = max(3, int(size * 0.22 + 0.5))
+    # Outline and folded corner in one colour: the sheet without its top right triangle.
+    canvas.rect(left, top + fold, right, bottom, edge)
+    canvas.rect(left, top, right - fold, top + fold, edge)
+    for step in range(fold):
+        # The cut runs through pixel corners, so the pixel on it is exactly half covered.
+        # Not at the two smallest sizes: iconutil stores those in a format that turns a
+        # half-transparent pixel white, and a clean staircase reads better there anyway.
+        canvas.rect(right - fold, top + step, right - fold + step, top + step + 1, edge)
+        canvas.rect(right - fold + step, top + step, right - fold + step + 1, top + step + 1, edge, 128 if size >= 64 else 255)
+    canvas.rect(left + line, top + fold, right - line, bottom - line, art.back_colour)
+    canvas.rect(left + line, top + line, right - fold, top + fold, art.back_colour)
+    # The mark, centred under the fold.
+    side_ratio, offset_ratio = art.mark_ratios()
+    extent = int(size * 0.36 + 0.5)
+    if (right - left - extent) % 2:
+        extent += 1
+    side, offset = int(extent * side_ratio + 0.5), extent - int(extent * side_ratio + 0.5)
+    x = left + (right - left - extent) // 2
+    y = top + fold + (bottom - line - top - fold - extent + 1) // 2
+    canvas.rect(x, y, x + side, y + side, art.ground)
+    canvas.rect(x + offset, y + offset, x + extent, y + extent, art.front_colour)
+    return canvas
+
+
+def ico(canvases):
+    """An .ico file: 256px as PNG, smaller sizes as 32-bit bitmaps (what every reader accepts)."""
+    entries = [(c, c.png() if c.width >= 256 else c.dib()) for c in canvases]
+    offset = 6 + 16 * len(entries)
+    out = struct.pack("<HHH", 0, 1, len(entries))
+    for canvas, data in entries:
+        out += struct.pack("<BBBBHHII", canvas.width % 256, canvas.height % 256, 0, 0, 1, 32, len(data), offset)
+        offset += len(data)
+    return out + b"".join(data for _, data in entries)
+
+
+def icns(art, target):
+    iconutil = shutil.which("iconutil")
+    if not iconutil:
+        print(f"SKIPPED {target}: iconutil not found (macOS only); the file was left as it is")
+        return False
+    with tempfile.TemporaryDirectory() as scratch:
+        iconset = Path(scratch) / "Document.iconset"
+        iconset.mkdir()
+        pictures = {size: draw_document(art, size).png() for size in ICNS_SIZES}
+        for points in (16, 32, 128, 256, 512):
+            (iconset / f"icon_{points}x{points}.png").write_bytes(pictures[points])
+            (iconset / f"icon_{points}x{points}@2x.png").write_bytes(pictures[points * 2])
+        subprocess.run([iconutil, "-c", "icns", "-o", str(target), str(iconset)], check=True)
+    return True
+
+
+# --- Vector drawings --------------------------------------------------------------------------
+
+
+def number(value):
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def hex_colour(colour):
+    return "#" + "".join(f"{c:02X}" for c in colour)
+
+
+def one_colour_mark(x, y, side, offset, line, air):
+    """Path data of the mark for tinted (single colour) use: back square outlined and cut
+    short of the front one, front square filled. Returns (back, front)."""
+    n = number
+    far, cut = x + side, x + offset - air
+    cut_y, far_y = y + offset - air, y + side
+    back = (
+        f"M{n(x)} {n(y)}H{n(far)}V{n(cut_y)}H{n(far - line)}V{n(y + line)}H{n(x + line)}"
+        f"V{n(far_y - line)}H{n(cut)}V{n(far_y)}H{n(x)}Z"
+    )
+    fx, fy = x + offset, y + offset
+    front = f"M{n(fx)} {n(fy)}H{n(fx + side)}V{n(fy + side)}H{n(fx)}Z"
+    return back, front
+
+
+def svg(width, height, body):
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" fill="none" '
+        f'xmlns="http://www.w3.org/2000/svg">\n{body}\n</svg>\n'
+    )
+
+
+def glyph_mark():
+    # 16px grid, outer edges on whole pixels: 7px squares, 1px of air, and a 1.5px outline
+    # (a 1px one fades when a row draws the icon at 14px). Not derived from the logo's exact
+    # ratios: at this size the pixel grid decides.
+    back, front = one_colour_mark(2, 2, 7, 5, 1.5, 1)
+    return svg(16, 16, f'<path d="{back}" fill="black"/>\n<path d="{front}" fill="black"/>')
+
+
+def logo_mark(art):
+    side_ratio, _ = art.mark_ratios()
+    extent = 84
+    side = int(extent * side_ratio + 0.5)
+    back, front = one_colour_mark(6, 6, side, extent - side, 6, 6)
+    return svg(96, 96, f'<path d="{back}" fill="black"/>\n<path d="{front}" fill="black"/>')
+
+
+def colour_mark(art):
+    """64px, transparent ground, the logo's two colours. The back square is cut around the
+    front one, so the two shapes never lie on top of each other."""
+    side_ratio, _ = art.mark_ratios()
+    extent, n = 60, number
+    side = int(extent * side_ratio + 0.5)
+    offset = extent - side
+    a, b, c, d = 2, 2 + offset, 2 + side, 2 + extent
+    back = f"M{n(a)} {n(a)}H{n(c)}V{n(b)}H{n(b)}V{n(c)}H{n(a)}Z"
+    front = f"M{n(b)} {n(b)}H{n(d)}V{n(d)}H{n(b)}Z"
+    return svg(
+        64,
+        64,
+        f'<path d="{back}" fill="{hex_colour(art.back_colour)}"/>\n'
+        f'<path d="{front}" fill="{hex_colour(art.front_colour)}"/>',
+    )
+
+
+COPILOT_MARKER = "<!-- product mark -->"
+
+
+def copilot_mark(art, current):
+    """Keeps the Copilot glyph and the plus sign of the current file, replaces what follows."""
+    if COPILOT_MARKER in current:
+        kept = current.split(COPILOT_MARKER)[0]
+    else:
+        kept = current[: current.rindex("<path")]
+    kept = kept[kept.index("<path") :].rstrip()
+    side_ratio, _ = art.mark_ratios()
+    extent = 24
+    side = int(extent * side_ratio + 0.5)
+    back, front = one_colour_mark(68, 4, side, extent - side, 1.5, 1.5)
+    body = f'{kept}\n{COPILOT_MARKER}\n<path d="{back}" fill="black"/>\n<path d="{front}" fill="black"/>'
+    return svg(93, 32, body)
+
+
+def predict_glyph(state):
+    """Ghost text: the caret, then the words being proposed, fainter. Heavier than the 1.2
+    strokes of the sibling icons: with those the glyph vanished in a 12px menu row."""
+    line = 'stroke="black" stroke-width="1.5"'
+    block = 'stroke="black" stroke-width="2"'
+    if state in ("up", "down"):
+        caret, words = "M2.5 2.5V13.5", "M4.5 8H8"
+    else:
+        caret, words = "M3 2.5V13.5", "M5.5 8H9M10.5 8H14.5"
+    caret_opacity, words_opacity = ('opacity="0.5" ', 0.3) if state == "disabled" else ("", 0.6)
+    parts = [f'<path {caret_opacity}d="{caret}" {line}/>', f'<path opacity="{words_opacity}" d="{words}" {block}/>']
+    if state == "down":
+        parts.append(f'<path d="M10 8.5L12.5 11L15 8.5M12.5 11V4" {line}/>')
+    elif state == "up":
+        parts.append(f'<path d="M10 7.5L12.5 5L15 7.5M12.5 5V12" {line}/>')
+    elif state == "error":
+        parts.append('<path d="M11.5 11H14.5V14H11.5Z" fill="black"/>')
+    return svg(16, 16, "\n".join(parts))
+
+
+# --- Contact sheets (for looking, never shipped) ----------------------------------------------
+
+
+def sheet(pictures, ground):
+    """`pictures`: size -> Canvas. One row: 512, 128, 32 and 16 at true size, then 32 and 16
+    magnified eight times."""
+    gap = 24
+    cells = [(pictures[512], 1), (pictures[128], 1), (pictures[32], 1), (pictures[16], 1), (pictures[32], 8), (pictures[16], 8)]
+    width = gap + sum(c.width * zoom + gap for c, zoom in cells)
+    canvas = Canvas(width, 512 + 2 * gap, ground)
+    x = gap
+    for picture, zoom in cells:
+        canvas.blit(picture, x, gap, zoom)
+        x += picture.width * zoom + gap
+    return canvas
+
+
+# --- Main -------------------------------------------------------------------------------------
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("logo", help="the brand art, an 8-bit PNG")
+    parser.add_argument("--preview", metavar="DIR", help="also write contact sheets here")
+    parser.add_argument("--root", metavar="DIR", default=str(REPO), help="write under DIR (default: the repository)")
+    args = parser.parse_args()
+
+    art = measure(args.logo)
+    print(
+        f"measured: ground {hex_colour(art.ground)}, back {hex_colour(art.back_colour)} "
+        f"{' '.join(f'{v:.4f}' for v in art.back)}, front {hex_colour(art.front_colour)} "
+        f"{' '.join(f'{v:.4f}' for v in art.front)}"
+    )
+    root = Path(args.root)
+    written = []
+
+    def write(relative, data):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data if isinstance(data, bytes) else data.encode())
+        written.append(relative)
+
+    resources = "crates/ide/resources"
+    for suffix, band in CHANNELS:
+        write(f"{resources}/app-icon{suffix}.png", draw_app_icon(art, 512, suffix, band).png())
+        write(f"{resources}/app-icon{suffix}@2x.png", draw_app_icon(art, 1024, suffix, band).png())
+        write(f"{resources}/windows/app-icon{suffix}.ico", ico([draw_app_icon(art, s, suffix, band) for s in ICO_SIZES]))
+
+    document = root / resources / "Document.icns"
+    document.parent.mkdir(parents=True, exist_ok=True)
+    if icns(art, document):
+        written.append(f"{resources}/Document.icns")
+
+    write("assets/images/unaligned_mark.svg", colour_mark(art))
+    write("assets/images/app_logo.svg", logo_mark(art))
+    write("assets/images/app_x_copilot.svg", copilot_mark(art, (REPO / "assets/images/app_x_copilot.svg").read_text()))
+    for stamp in STAMPS:
+        write(f"assets/images/{stamp}_stamp.svg", '<svg width="1" height="1" viewBox="0 0 1 1" xmlns="http://www.w3.org/2000/svg"/>\n')
+    for name in ("ai_unaligned", "ai_zed", "zed_agent", "zed_agent_two"):
+        write(f"assets/icons/{name}.svg", glyph_mark())
+    for state in ("", "disabled", "down", "up", "error"):
+        write(f"assets/icons/app_predict{'_' + state if state else ''}.svg", predict_glyph(state))
+
+    if args.preview:
+        preview = Path(args.preview)
+        preview.mkdir(parents=True, exist_ok=True)
+        for suffix, band in CHANNELS:
+            pictures = {s: draw_app_icon(art, s, suffix, band) for s in (512, 128, 32, 16)}
+            (preview / f"app-icon{suffix}-sheet.png").write_bytes(sheet(pictures, (0x6B, 0x6B, 0x6B)).png())
+            for size, picture in pictures.items():
+                (preview / f"app-icon{suffix}-{size}.png").write_bytes(picture.png())
+        pictures = {s: draw_document(art, s) for s in (512, 128, 32, 16)}
+        (preview / "document-sheet-light.png").write_bytes(sheet(pictures, (0xF4, 0xF4, 0xF4)).png())
+        (preview / "document-sheet-dark.png").write_bytes(sheet(pictures, (0x1E, 0x1E, 0x1E)).png())
+        print(f"contact sheets in {preview}")
+
+    for relative in written:
+        print(f"wrote {relative}")
+
+
+if __name__ == "__main__":
+    main()

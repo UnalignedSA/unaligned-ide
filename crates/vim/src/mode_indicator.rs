@@ -2,7 +2,12 @@ use gpui::{
     App, Context, Element, Entity, FontWeight, Render, Subscription, WeakEntity, Window, div,
 };
 use ui::text_for_keystrokes;
-use workspace::{HideStatusItem, StatusItemView, item::ItemHandle, ui::prelude::*};
+use workspace::{
+    HideStatusItem, StatusItemView,
+    active_file_name::{status_bar_item_height_for, status_bar_value},
+    item::ItemHandle,
+    ui::prelude::*,
+};
 
 use crate::{Vim, VimEvent, VimGlobals};
 
@@ -146,34 +151,26 @@ impl Render for ModeIndicator {
             (pending.into(), Some(mode))
         };
         h_flex()
-            .h(ButtonSize::Default.rems())
-            .gap_1()
+            .h(status_bar_item_height_for(cx))
             .when(!label.is_empty(), |el| {
                 el.child(
-                    Label::new(label)
-                        .size(LabelSize::Small)
-                        .weight(FontWeight::MEDIUM),
+                    div()
+                        .px_2()
+                        .child(status_bar_value(label, cx).weight(FontWeight::MEDIUM)),
                 )
             })
             .when_some(mode, |el, mode| {
                 el.child(
+                    // A flat block as high as the bar, same padding as the other items.
                     v_flex()
-                        .when(bg_color != system_transparent, |el| el.px_2())
-                        // match with other icons at the bottom that use default buttons
-                        .h(ButtonSize::Default.rems())
+                        .px_2()
+                        .h_full()
                         .justify_center()
-                        .rounded_sm()
                         .bg(bg_color)
-                        .child(
-                            Label::new(mode)
-                                .size(LabelSize::Small)
-                                .weight(FontWeight::MEDIUM)
-                                .when(
-                                    bg_color != system_transparent
-                                        && vim_mode_text != system_transparent,
-                                    |el| el.color(Color::Custom(vim_mode_text)),
-                                ),
-                        ),
+                        .child(status_bar_value(mode, cx).weight(FontWeight::MEDIUM).when(
+                            bg_color != system_transparent && vim_mode_text != system_transparent,
+                            |el| el.color(Color::Custom(vim_mode_text)),
+                        )),
                 )
             })
             .into_any()

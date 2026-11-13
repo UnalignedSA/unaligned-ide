@@ -1,18 +1,20 @@
-//! Provides constructs for the Zed app version and release channel.
+//! Provides constructs for the app version and release channel.
+//!
+//! Every name and identifier here is built from the `branding` crate.
 
 #![deny(missing_docs)]
 
 use std::{env, str::FromStr, sync::LazyLock};
 
+use branding::{APP_ID, DOCS_URL, PRODUCT_NAME, REVERSE_DNS_ID};
+use const_format::concatcp;
 use gpui::{App, Global};
 use semver::Version;
-
-const ZED_DOCS_URL: &str = "https://zed.dev/docs";
 
 /// stable | dev | nightly | preview
 pub static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
     if cfg!(debug_assertions) {
-        env::var("ZED_RELEASE_CHANNEL").unwrap_or_else(|_| compile_time_release_channel_name())
+        env::var("IDE_RELEASE_CHANNEL").unwrap_or_else(|_| compile_time_release_channel_name())
     } else {
         compile_time_release_channel_name()
     }
@@ -22,15 +24,15 @@ pub static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
 /// library, it vendors each crate separately and builds it in isolation, which
 /// makes the `include_str!` fail.
 ///
-/// The build script checks for `$ZED_RELEASE_CHANNEL` and emits the `cfg`
+/// The build script checks for `$IDE_RELEASE_CHANNEL` and emits the `cfg`
 #[cfg(__do_not_set_zed_release_channel)]
 fn compile_time_release_channel_name() -> String {
-    env!("ZED_RELEASE_CHANNEL").trim().to_string()
+    env!("IDE_RELEASE_CHANNEL").trim().to_string()
 }
 
 #[cfg(not(__do_not_set_zed_release_channel))]
 fn compile_time_release_channel_name() -> String {
-    include_str!("../../zed/RELEASE_CHANNEL").trim().to_string()
+    include_str!("../../ide/RELEASE_CHANNEL").trim().to_string()
 }
 
 #[doc(hidden)]
@@ -41,17 +43,16 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
     });
 
 /// The app identifier for the current release channel, Windows only.
+///
+/// The single-instance mutex (`<identifier>-Instance-Mutex`) and the named
+/// pipe of the CLI (`<identifier>-Named-Pipe`) are built from it, so it must
+/// never be one of upstream's `Zed-Editor-*` values.
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
-    match *RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed-Editor-Dev",
-        ReleaseChannel::Nightly => "Zed-Editor-Nightly",
-        ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
-    }
+    RELEASE_CHANNEL.app_identifier()
 }
 
-/// The Git commit SHA that Zed was built at.
+/// The Git commit SHA that the app was built at.
 #[derive(Clone, Eq, Debug, PartialEq)]
 pub struct AppCommitSha(String);
 
@@ -91,7 +92,7 @@ struct GlobalAppVersion(Version);
 
 impl Global for GlobalAppVersion {}
 
-/// The version of Zed.
+/// The version of the app.
 pub struct AppVersion;
 
 impl AppVersion {
@@ -101,8 +102,8 @@ impl AppVersion {
         build_id: Option<&str>,
         commit_sha: Option<AppCommitSha>,
     ) -> Version {
-        let mut version: Version = if let Ok(from_env) = env::var("ZED_APP_VERSION") {
-            from_env.parse().expect("invalid ZED_APP_VERSION")
+        let mut version: Version = if let Ok(from_env) = env::var("IDE_APP_VERSION") {
+            from_env.parse().expect("invalid IDE_APP_VERSION")
         } else {
             pkg_version.parse().expect("invalid version in Cargo.toml")
         };
@@ -134,12 +135,12 @@ impl AppVersion {
     }
 }
 
-/// A Zed release channel.
+/// A release channel of the app.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum ReleaseChannel {
     /// The development release channel.
     ///
-    /// Used for local debug builds of Zed.
+    /// Used for local debug builds of the app.
     #[default]
     Dev,
 
@@ -169,8 +170,13 @@ pub fn init_test(app_version: Version, release_channel: ReleaseChannel, cx: &mut
     cx.set_global(GlobalReleaseChannel(release_channel))
 }
 
-/// Returns the Zed docs URL for the current release channel for the given
+/// Returns the docs URL for the current release channel for the given
 /// `slug`.
+///
+/// The product's documentation is the provider's (its API, billing, coding
+/// tools): none of the pages of upstream's manual exist there, and an unknown
+/// slug is a 404. Nothing calls this any more; before linking to a page, check
+/// that the site has it.
 pub fn docs_url(slug: &str, cx: &App) -> String {
     ReleaseChannel::try_global(cx)
         .unwrap_or(*RELEASE_CHANNEL)
@@ -202,13 +208,14 @@ impl ReleaseChannel {
         !matches!(self, ReleaseChannel::Dev)
     }
 
-    /// Returns the display name for this [`ReleaseChannel`].
+    /// Returns the display name for this [`ReleaseChannel`]: the product's
+    /// name, followed by the channel for every channel but stable.
     pub fn display_name(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "Zed Dev",
-            ReleaseChannel::Nightly => "Zed Nightly",
-            ReleaseChannel::Preview => "Zed Preview",
-            ReleaseChannel::Stable => "Zed",
+            ReleaseChannel::Dev => concatcp!(PRODUCT_NAME, " Dev"),
+            ReleaseChannel::Nightly => concatcp!(PRODUCT_NAME, " Nightly"),
+            ReleaseChannel::Preview => concatcp!(PRODUCT_NAME, " Preview"),
+            ReleaseChannel::Stable => PRODUCT_NAME,
         }
     }
 
@@ -224,13 +231,26 @@ impl ReleaseChannel {
 
     /// Returns the application ID that's used by Wayland as application ID
     /// and WM_CLASS on X11.
-    /// This also has to match the bundle identifier for Zed on macOS.
+    /// This also has to match the bundle identifier of the app on macOS and
+    /// the name of its `.desktop` file on Linux.
     pub fn app_id(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "dev.zed.Zed-Dev",
-            ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
-            ReleaseChannel::Preview => "dev.zed.Zed-Preview",
-            ReleaseChannel::Stable => "dev.zed.Zed",
+            ReleaseChannel::Dev => concatcp!(REVERSE_DNS_ID, "-Dev"),
+            ReleaseChannel::Nightly => concatcp!(REVERSE_DNS_ID, "-Nightly"),
+            ReleaseChannel::Preview => concatcp!(REVERSE_DNS_ID, "-Preview"),
+            ReleaseChannel::Stable => REVERSE_DNS_ID,
+        }
+    }
+
+    /// Returns the identifier that names what an instance of this
+    /// [`ReleaseChannel`] shares with the CLI on Windows (see
+    /// [`app_identifier`]).
+    pub fn app_identifier(&self) -> &'static str {
+        match self {
+            ReleaseChannel::Dev => concatcp!(APP_ID, "-Dev"),
+            ReleaseChannel::Nightly => concatcp!(APP_ID, "-Nightly"),
+            ReleaseChannel::Preview => concatcp!(APP_ID, "-Preview"),
+            ReleaseChannel::Stable => concatcp!(APP_ID, "-Stable"),
         }
     }
 
@@ -244,20 +264,16 @@ impl ReleaseChannel {
         }
     }
 
-    /// Returns the Zed docs URL for this [`ReleaseChannel`] for the given
-    /// `slug`.
+    /// Returns the docs URL for the given `slug`, under `branding::DOCS_URL`.
+    ///
+    /// The product has one documentation site for every channel: upstream's
+    /// `/nightly/` and `/preview/` path segments do not exist there, so the
+    /// URL is the same on all channels.
     pub fn docs_url(&self, slug: &str) -> String {
-        let channel_path_segment = match self {
-            Self::Dev | Self::Nightly => Some("nightly"),
-            Self::Preview => Some("preview"),
-            Self::Stable => None,
-        };
-
-        match channel_path_segment {
-            Some(channel) if slug.is_empty() => format!("{ZED_DOCS_URL}/{channel}"),
-            Some(channel) => format!("{ZED_DOCS_URL}/{channel}/{slug}"),
-            None if slug.is_empty() => ZED_DOCS_URL.to_string(),
-            None => format!("{ZED_DOCS_URL}/{slug}"),
+        if slug.is_empty() {
+            DOCS_URL.to_string()
+        } else {
+            format!("{DOCS_URL}/{slug}")
         }
     }
 }
@@ -286,21 +302,90 @@ mod tests {
 
     #[test]
     fn test_docs_url_for_release_channel() {
+        let docs = branding::DOCS_URL;
+        // Upstream expected `{docs}/nightly/settings` on dev and nightly and
+        // `{docs}/preview/settings` on preview. The product's site has no
+        // per-channel docs, so every channel gets the same URL (gate 1, Q3).
+        for channel in ReleaseChannel::ALL {
+            assert_eq!(channel.docs_url("settings"), format!("{docs}/settings"));
+            assert_eq!(channel.docs_url(""), docs);
+            assert!(!channel.docs_url("settings").contains("/nightly"));
+            assert!(!channel.docs_url("settings").contains("/preview"));
+            assert!(!channel.docs_url("settings").contains("zed.dev"));
+        }
+    }
+
+    #[test]
+    fn test_display_name_comes_from_the_brand() {
         assert_eq!(
-            ReleaseChannel::Dev.docs_url("settings"),
-            "https://zed.dev/docs/nightly/settings"
+            ReleaseChannel::Stable.display_name(),
+            branding::PRODUCT_NAME
         );
         assert_eq!(
-            ReleaseChannel::Nightly.docs_url("settings"),
-            "https://zed.dev/docs/nightly/settings"
+            ReleaseChannel::Preview.display_name(),
+            format!("{} Preview", branding::PRODUCT_NAME)
         );
         assert_eq!(
-            ReleaseChannel::Preview.docs_url("settings"),
-            "https://zed.dev/docs/preview/settings"
+            ReleaseChannel::Nightly.display_name(),
+            format!("{} Nightly", branding::PRODUCT_NAME)
         );
         assert_eq!(
-            ReleaseChannel::Stable.docs_url("settings"),
-            "https://zed.dev/docs/settings"
+            ReleaseChannel::Dev.display_name(),
+            format!("{} Dev", branding::PRODUCT_NAME)
         );
+    }
+
+    #[test]
+    fn test_identifiers_come_from_the_brand_and_differ_per_channel() {
+        assert_eq!(ReleaseChannel::Stable.app_id(), branding::REVERSE_DNS_ID);
+        assert_eq!(
+            ReleaseChannel::Dev.app_id(),
+            format!("{}-Dev", branding::REVERSE_DNS_ID)
+        );
+        assert_eq!(
+            ReleaseChannel::Stable.app_identifier(),
+            format!("{}-Stable", branding::APP_ID)
+        );
+
+        for (index, channel) in ReleaseChannel::ALL.iter().enumerate() {
+            // Nothing may be shared with an upstream Zed running on the same machine.
+            for value in [
+                channel.display_name(),
+                channel.app_id(),
+                channel.app_identifier(),
+            ] {
+                assert!(!value.starts_with(branding::UPSTREAM_NAME), "{value:?}");
+                assert!(!value.starts_with("dev.zed."), "{value:?}");
+            }
+            for other in &ReleaseChannel::ALL[index + 1..] {
+                assert_ne!(channel.display_name(), other.display_name());
+                assert_ne!(channel.app_id(), other.app_id());
+                assert_ne!(channel.app_identifier(), other.app_identifier());
+            }
+        }
+    }
+
+    /// The macOS bundle metadata of the `zed` crate cannot read Rust constants;
+    /// it must still say what the app says about itself.
+    #[test]
+    fn test_bundle_metadata_follows_the_brand() {
+        let manifest = include_str!("../../ide/Cargo.toml");
+        for channel in ReleaseChannel::ALL {
+            let section = format!("[package.metadata.bundle-{}]", channel.dev_name());
+            let (_, section_body) = manifest
+                .split_once(&section)
+                .unwrap_or_else(|| panic!("no {section} in crates/ide/Cargo.toml"));
+            let section_body = section_body.split("\n[").next().unwrap();
+            for line in [
+                format!("identifier = \"{}\"", channel.app_id()),
+                format!("name = \"{}\"", channel.display_name()),
+                format!("osx_url_schemes = [\"{}\"]", branding::URL_SCHEME),
+            ] {
+                assert!(
+                    section_body.lines().any(|candidate| candidate == line),
+                    "{section} must contain `{line}`"
+                );
+            }
+        }
     }
 }

@@ -36,6 +36,7 @@ agent_settings.workspace = true
 agent_skills.workspace = true
 ai_onboarding.workspace = true
 anyhow.workspace = true
+branding.workspace = true
 heapless.workspace = true
 audio = { workspace = true, optional = true }
 base64.workspace = true
@@ -116,7 +117,7 @@ uuid.workspace = true
 watch.workspace = true
 workspace.workspace = true
 git_ui_core.workspace = true
-zed_actions.workspace = true
+app_actions.workspace = true
 image.workspace = true
 reqwest_client = { workspace = true, optional = true }
 

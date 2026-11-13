@@ -15,6 +15,14 @@ fail_on_stderr() {
     return $rc
 }
 
+# The application's licences page shows this file as the complete list of
+# third-party notices, so it is built beside its destination and moved into
+# place only when every block is in it: a run that stops half way (a font
+# without its licence, cargo-about failing) leaves no partial file behind.
+FINAL_OUTPUT_FILE="$OUTPUT_FILE"
+OUTPUT_FILE="${FINAL_OUTPUT_FILE}.partial"
+trap 'rm -f "$OUTPUT_FILE" "${OUTPUT_FILE}.bak"' EXIT
+
 echo -n "" >"$OUTPUT_FILE"
 
 {
@@ -23,6 +31,11 @@ echo -n "" >"$OUTPUT_FILE"
 
     echo -e "\n# ###### ICON LICENSES ######\n"
     cat assets/icons/LICENSES
+
+    # The bundled fonts (assets/fonts, embedded in the binary), one heading
+    # per family. Fails when a family has no licence file.
+    echo ""
+    bash script/licenses/font-licenses assets/fonts
 
     echo -e "\n# ###### CODE LICENSES ######\n"
 } >>"$OUTPUT_FILE"
@@ -40,7 +53,7 @@ if [ -z "${ALLOW_MISSING_LICENSES-}" ]; then WRAPPER=fail_on_stderr; else WRAPPE
 set -x
 $WRAPPER cargo about generate \
     $FAIL_FLAG \
-    -c script/licenses/zed-licenses.toml \
+    -c script/licenses/licenses.toml \
     "$TEMPLATE_FILE" >>"$OUTPUT_FILE"
 set +x
 
@@ -53,4 +66,6 @@ sed -i.bak 's/&gt;/>/g' "$OUTPUT_FILE"
 
 rm -rf "${OUTPUT_FILE}.bak"
 
-echo "generate-licenses completed. See $OUTPUT_FILE"
+mv "$OUTPUT_FILE" "$FINAL_OUTPUT_FILE"
+
+echo "generate-licenses completed. See $FINAL_OUTPUT_FILE"

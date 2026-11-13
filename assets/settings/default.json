@@ -1,21 +1,31 @@
 {
-  "$schema": "zed://schemas/settings",
-  // The name of the Zed theme to use for the UI.
+  "$schema": "ide://schemas/settings",
+  // The theme to use for the UI.
   //
   // `mode` is one of:
   // - "system": Use the theme that corresponds to the system's appearance
   // - "light": Use the theme indicated by the "light" field
   // - "dark": Use the theme indicated by the "dark" field
+  //
+  // The "light" theme is only loaded when the mode is "light", or "system"
+  // on a light desktop.
   "theme": {
-    "mode": "system",
-    "light": "One Light",
-    "dark": "One Dark",
+    "mode": "dark",
+    "light": "Unaligned Light",
+    "dark": "Unaligned",
   },
-  "icon_theme": "Zed (Default)",
+  "icon_theme": "Default",
+  // How round the corners of buttons, inputs and menus are:
+  // "theme" (what the active theme asks for), "square", "soft" or "round".
+  "corners": "theme",
+  // The accent color: "theme" (the active theme's own) or a color such as "#e5322d".
+  "accent": "theme",
+  // How much room rows, buttons and lists take: "compact", "default" or "comfortable".
+  "unstable.ui_density": "default",
   // The name of a base set of key bindings to use.
   // This setting can take the following values:
   //
-  // 1. "Zed"
+  // 1. "Native" (the editor's own key bindings)
   // 2. "VSCode"
   // 3. "Atom"
   // 4. "JetBrains"
@@ -24,18 +34,16 @@
   // 7. "Emacs"
   // 8. "Cursor"
   // 9. "None"
-  "base_keymap": "Zed",
+  "base_keymap": "VSCode",
   // The name of a font to use for rendering text in the editor
-  // ".ZedMono" currently aliases to Lilex
-  // but this may change in the future.
-  "buffer_font_family": ".ZedMono",
+  "buffer_font_family": "JetBrains Mono",
   // Set the buffer text's font fallbacks, this will be merged with
   // the platform's default fallbacks.
   "buffer_font_fallbacks": null,
   // The OpenType features to enable for text in the editor.
   "buffer_font_features": {
-    // Disable ligatures:
-    // "calt": false
+    // Ligatures off: code shows exactly what it is.
+    "calt": false,
   },
   // The default font size for text in the editor
   "buffer_font_size": 15,
@@ -54,9 +62,7 @@
   "buffer_line_height": "comfortable",
   // The name of a font to use for rendering text in the UI
   // You can set this to ".SystemUIFont" to use the system font
-  // ".ZedSans" currently aliases to "IBM Plex Sans", but this may
-  // change in the future
-  "ui_font_family": ".ZedSans",
+  "ui_font_family": "Onest",
   // Set the UI's font fallbacks, this will be merged with the platform's
   // default font fallbacks.
   "ui_font_fallbacks": null,
@@ -158,9 +164,9 @@
   // after the mouse moves away from the hover target.
   // Only applies when `hover_popover_sticky` is enabled.
   "hover_popover_hiding_delay": 300,
-  // Whether to confirm before quitting Zed.
+  // Whether to confirm before quitting.
   "confirm_quit": false,
-  // Whether to restore last closed project when fresh Zed instance is opened
+  // Whether to restore last closed project when fresh instance is opened
   // May take 3 values:
   //  1. All workspaces open during last session
   //         "restore_on_startup": "last_session"
@@ -173,7 +179,7 @@
   // an explicit `-e` (existing window) or `-n` (new window) flag.
   //
   // May take 2 values:
-  //  1. Open directories as a new workspace in the current Zed window's sidebar
+  //  1. Open directories as a new workspace in the current window's sidebar
   //         "cli_default_open_behavior": "existing_window"
   //  2. Open paths in a new window, unless they are subpaths of an existing project
   //         "cli_default_open_behavior": "new_window"
@@ -181,7 +187,7 @@
   // The default behavior when opening projects from the UI.
   //
   // May take 2 values:
-  //  1. Open projects as a new workspace in the current Zed window's sidebar
+  //  1. Open projects as a new workspace in the current window's sidebar
   //         "default_open_behavior": "existing_window"
   //  2. Open projects in a new window
   //         "default_open_behavior": "new_window"
@@ -268,28 +274,28 @@
   //
   // Default: " — "
   "window_title_separator": " — ",
-  // On Linux, what draws Zed's window decorations (titlebar).
+  // On Linux, what draws the window decorations (titlebar).
   // This setting has no effect on other platforms:
-  // 1. Zed draws its own window decorations.
+  // 1. The IDE draws its own window decorations.
   //    "client"
   // 2. The window manager or compositor draws the window decorations.
   //    Not supported by GNOME Wayland.
   //    "server"
   //
-  // This requires restarting Zed for changes to take effect.
+  // This requires a restart for changes to take effect.
   //
   // Default: "client"
   "window_decorations": "client",
-  // Whether to optimize Zed's interface for assistive technology such as screen
+  // Whether to optimize the interface for assistive technology such as screen
   // readers.
   "accessible_mode": false,
   // Whether to use the system provided dialogs for Open and Save As.
-  // When set to false, Zed will use the built-in keyboard-first pickers.
+  // When set to false, the IDE will use the built-in keyboard-first pickers.
   "use_system_path_prompts": true,
   // Whether to use the system provided dialogs for prompts, such as confirmation
   // prompts.
-  // When set to false, Zed will use its built-in prompts. Note that on Linux,
-  // this option is ignored and Zed will always use the built-in prompts.
+  // When set to false, the IDE will use its built-in prompts. Note that on Linux,
+  // this option is ignored and the IDE will always use the built-in prompts.
   "use_system_prompts": true,
   // Whether the cursor blinks in the editor.
   "cursor_blink": true,
@@ -511,11 +517,11 @@
   "use_on_type_format": true,
   // Whether to automatically add matching closing characters when typing
   // opening parenthesis, bracket, brace, single or double quote characters.
-  // For example, when you type '(', Zed will add a closing ) at the correct position.
+  // For example, when you type '(', the IDE will add a closing ) at the correct position.
   "use_autoclose": true,
   // Whether to automatically surround selected text when typing opening parenthesis,
   // bracket, brace, single or double quote characters.
-  // For example, when you select text and type '(', Zed will surround the text with ().
+  // For example, when you select text and type '(', the IDE will surround the text with ().
   "use_auto_surround": true,
   // Controls automatic indentation behavior when typing.
   // - "syntax_aware": Adjusts indentation based on syntax context (default)
@@ -549,7 +555,7 @@
   "allow_rewrap": "in_comments",
   // Controls whether edit predictions are shown immediately (true)
   // or manually by triggering `editor::ShowEditPrediction` (false).
-  "show_edit_predictions": true,
+  "show_edit_predictions": false,
   // Disable edit predictions in these language scopes, such as "comment" and
   // "string".
   //
@@ -586,7 +592,7 @@
     "space": "•",
     "tab": "→",
   },
-  // Settings related to calls in Zed
+  // Settings related to calls
   "calls": {
     // Join calls with the microphone live by default
     "mute_on_join": false,
@@ -608,7 +614,7 @@
   },
   // Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
   "use_system_window_tabs": false,
-  // Which fullscreen mode the `zed::ToggleFullScreen` action enters (macOS only).
+  // Which fullscreen mode the `app::ToggleFullScreen` action enters (macOS only).
   //
   // 1. Use macOS's native fullscreen, which moves the window into its own Mission Control space.
   //     "native"
@@ -628,14 +634,14 @@
     "show_worktree_name": true,
     // Whether to show the project host and name in the titlebar.
     "show_project_items": true,
-    // Whether to show onboarding banners in the titlebar.
-    "show_onboarding_banner": true,
-    // Whether to show user picture in the titlebar.
-    "show_user_picture": true,
-    // Whether to show the user menu in the titlebar.
-    "show_user_menu": true,
-    // Whether to show the sign in button in the titlebar.
-    "show_sign_in": true,
+    // No effect in this product (kept so older settings files still parse).
+    "show_onboarding_banner": false,
+    // No effect in this product (kept so older settings files still parse).
+    "show_user_picture": false,
+    // No effect in this product (kept so older settings files still parse).
+    "show_user_menu": false,
+    // No effect in this product (kept so older settings files still parse).
+    "show_sign_in": false,
     // Whether to show the menus in the titlebar.
     "show_menus": false,
     // Whether to open the menus in the titlebar on hover.
@@ -810,7 +816,7 @@
   "fast_scroll_sensitivity": 4.0,
   "sticky_scroll": {
     // Whether to stick scopes to the top of the editor.
-    "enabled": false,
+    "enabled": true,
   },
   "relative_line_numbers": "disabled",
   // If 'search_wrap' is disabled, search result do not wrap around the end of the file.
@@ -887,9 +893,9 @@
     // Delay in milliseconds before tooltips appear for project panel titles.
     "title_tooltip_delay": "default",
     // Default width of the project panel.
-    "default_width": 240,
+    "default_width": 280,
     // Where to dock the project panel. Can be 'left' or 'right'.
-    "dock": "right",
+    "dock": "left",
     // Spacing between worktree entries in the project panel. Can be 'comfortable' or 'standard'.
     "entry_spacing": "comfortable",
     // Whether to show file icons in the project panel.
@@ -993,7 +999,7 @@
     // Whether to show error and warning count badges next to file names in the project panel.
     "diagnostic_badges": false,
     // Whether to show the git status indicator next to file names in the project panel.
-    "git_status_indicator": false,
+    "git_status_indicator": true,
     // Whether to enable drag-and-drop operations in the project panel.
     "drag_and_drop": true,
     // Whether to hide the root entry when only one folder is open in the window;
@@ -1015,9 +1021,9 @@
     // Whether to show the outline panel button in the status bar
     "button": true,
     // Default width of the outline panel.
-    "default_width": 300,
+    "default_width": 280,
     // Where to dock the outline panel. Can be 'left' or 'right'.
-    "dock": "right",
+    "dock": "left",
     // Whether to show file icons in the outline panel.
     "file_icons": true,
     // What to show for directories in the outline panel.
@@ -1079,11 +1085,11 @@
   },
   "collaboration_panel": {
     // Whether to show the collaboration panel button in the status bar.
-    "button": true,
+    "button": false,
     // Where to dock the collaboration panel. Can be 'left' or 'right'.
-    "dock": "right",
+    "dock": "left",
     // Default width of the collaboration panel.
-    "default_width": 240,
+    "default_width": 280,
   },
   "git_graph": {
     // Show "absolute" or "relative" dates in graph rows.
@@ -1095,9 +1101,9 @@
     // Whether to show the git panel button in the status bar.
     "button": true,
     // Where to dock the git panel. Can be 'left' or 'right'.
-    "dock": "right",
+    "dock": "left",
     // Default width of the git panel.
-    "default_width": 360,
+    "default_width": 280,
     // Style of the git status indicator in the panel.
     //
     // Choices: label_color, icon
@@ -1129,7 +1135,7 @@
     // How to group entries in the git panel.
     //
     // Default: status
-    "group_by": "status",
+    "group_by": "staging",
     // Whether to collapse untracked files in the diff panel.
     //
     // Default: false
@@ -1183,14 +1189,15 @@
     "enabled": true,
     // Whether to show the agent panel button in the status bar.
     "button": true,
-    // Where to dock the agent panel. Can be 'left', 'right' or 'bottom'.
-    "dock": "left",
+    // Where to dock the agent panel. 'left', 'right' and 'bottom' are all allowed.
+    "dock": "right",
     // Whether the agent panel should use flexible (proportional) sizing when docked
     // to the left or right. When enabled, `default_width` does not control the panel
     // width, and resetting the panel restores the default proportion.
+    // When disabled, the panel is a fixed-width column of `default_width` pixels.
     //
-    // Default: true
-    "flexible": true,
+    // Default: false
+    "flexible": false,
     // Maximum number of idle threads with loadable sessions to retain in the
     // agent panel. Set to 0 to unload every eligible idle thread when it is
     // no longer active.
@@ -1202,11 +1209,11 @@
       // Default width of the Threads Sidebar.
       "default_width": 300,
       // Automatically open the Threads Sidebar when opening a folder in an existing window.
-      "auto_open": true,
+      "auto_open": false,
     },
     // Default fixed width when the agent panel is docked to the left or right and
     // `flexible` is false.
-    "default_width": 640,
+    "default_width": 400,
     // Default height when the agent panel is docked to the bottom.
     "default_height": 320,
     // Whether to limit the content width in the agent panel. When enabled,
@@ -1219,9 +1226,9 @@
     // The default model to use when creating new threads.
     "default_model": {
       // The provider to use.
-      "provider": "zed.dev",
+      "provider": "unaligned",
       // The model to use.
-      "model": "claude-sonnet-4",
+      "model": "claude-sonnet-5-5",
       // Whether thinking is enabled.
       "enable_thinking": false,
     },
@@ -1242,8 +1249,8 @@
       //
       // To set parameters for a specific provider and model:
       // {
-      //   "provider": "zed.dev",
-      //   "model": "claude-sonnet-4",
+      //   "provider": "unaligned",
+      //   "model": "claude-sonnet-5-5",
       //   "temperature": 1.0
       // }
     ],
@@ -1252,7 +1259,7 @@
     // The "default" setting applies when no tool-specific rules match.
     // For external agents that define their own permission modes,
     // "deny" and "confirm" still take precedence — the external agent's
-    // permission system is only used when Zed would allow the action.
+    // permission system is only used when the IDE would allow the action.
     //
     // Per-tool regex patterns ("tools" below) match against tool input text
     // (commands, paths, URLs, etc.). For `copy_path` and `move_path`,
@@ -1299,6 +1306,10 @@
       // The threshold at which auto-compaction runs. One of:
       //   - A percentage string ending in "%" (e.g. "90%"), measured against
       //     the model's context window. Decimals are allowed (e.g. "95.5%").
+      //     A percentage never waits for more than 200,000 tokens: every
+      //     message sends the whole conversation again and is billed for it,
+      //     so a model with a 1,000,000-token window is compacted at 200,000
+      //     rather than at 900,000. Use an integer to choose another limit.
       //   - A positive integer: compact after that many tokens have been used
       //     (e.g. 100000 compacts after 100,000 tokens are used).
       //   - A negative integer: compact once that many tokens remain in the
@@ -1307,7 +1318,8 @@
       "threshold": "90%",
     },
     // When enabled, show voting thumbs for feedback on agent edits.
-    "enable_feedback": true,
+    // Off by default: a vote sends the conversation to a hosted feedback service.
+    "enable_feedback": false,
     "default_profile": "write",
     "profiles": {
       "write": {
@@ -1395,7 +1407,7 @@
     //
     // Default: true
     "expand_terminal_card": true,
-    // Command to automatically run when Zed creates a Terminal Thread shell in the agent panel.
+    // Command to automatically run when the IDE creates a Terminal Thread shell in the agent panel.
     // The command is sent to the shell as if typed, so it is interpreted by your
     // configured shell (including on Windows and remote/WSL projects).
     // Set to "" to disable.
@@ -1417,8 +1429,8 @@
     "use_modifier_to_send": false,
     // Minimum number of lines to display in the agent message editor.
     //
-    // Default: 4
-    "message_editor_min_lines": 4,
+    // Default: 3
+    "message_editor_min_lines": 3,
     // Whether to show turn statistics (elapsed time during generation, final turn duration).
     //
     // Default: false
@@ -1428,7 +1440,7 @@
     //
     // Default: true
     "show_merge_conflict_indicator": true,
-    // Whether to automatically generate a title for Zed Agent threads using the
+    // Whether to automatically generate a title for the built-in agent's chats using the
     // summary model. When disabled, titles are only created when manually
     // requested (e.g. via the thread's "Regenerate Thread Title" action).
     //
@@ -1476,7 +1488,7 @@
   //
   // 1. Never automatically save:
   //     "autosave": "off",
-  // 2. Save when changing focus away from the Zed window:
+  // 2. Save when changing focus away from the window:
   //     "autosave": "on_window_change",
   // 3. Save when changing focus away from a specific buffer:
   //     "autosave": "on_focus_change",
@@ -1508,12 +1520,12 @@
   // Settings related to the editor's tabs
   "tabs": {
     // Show git status colors in the editor tabs.
-    "git_status": false,
+    "git_status": true,
     // Position of the close button on the editor tabs.
     // One of: ["right", "left"]
     "close_position": "right",
     // Whether to show the file icon for a tab.
-    "file_icons": false,
+    "file_icons": true,
     // Controls the appearance behavior of the tab's close button.
     //
     // 1. Show it just upon hovering the tab. (default)
@@ -1542,7 +1554,7 @@
     //    "errors"
     // 3. Mark files with errors and warnings:
     //    "all"
-    "show_diagnostics": "off",
+    "show_diagnostics": "errors",
   },
   // Settings related to preview tabs.
   "preview_tabs": {
@@ -1611,11 +1623,11 @@
     // Default: true
     "skip_focus_for_active_in_search": true,
     // Whether to use gitignored files when searching.
-    // Only the file Zed had indexed will be used, not necessary all the gitignored files.
+    // Only the file the IDE had indexed will be used, not necessary all the gitignored files.
     //
     // Can accept 3 values:
     //   * "all": Use all gitignored files
-    //   * "indexed": Use only the files Zed had indexed
+    //   * "indexed": Use only the files the IDE had indexed
     //   * "smart": Be smart and search for ignored when called from a gitignored worktree
     "include_ignored": "smart",
     // Whether to include text channels in file finder results.
@@ -1667,7 +1679,7 @@
   "format_on_save": "off",
   // How to perform a buffer format. This setting can take multiple values:
   //
-  // 1. Default. Format files using Zed's Prettier integration (if applicable),
+  // 1. Default. Format files using the built-in Prettier integration (if applicable),
   //    or falling back to formatting via language server:
   //     "formatter": "auto"
   // 2. Format code using the current language server:
@@ -1681,7 +1693,7 @@
   //         "arguments": ["--stdin-filepath", "{buffer_path}"]
   //       }
   //     }
-  // 5. Format code using Zed's Prettier integration:
+  // 5. Format code using the built-in Prettier integration:
   //     "formatter": "prettier"
   // 6. Format code using a code action
   //     "formatter": {"code_action": "source.fixAll.eslint"}
@@ -1729,23 +1741,23 @@
   //
   // Default: true
   "word_diff_enabled": true,
-  // Control what info is collected by Zed.
+  // Control what info is collected.
   "telemetry": {
     // Send debug info like crash reports.
-    "diagnostics": true,
-    // Send anonymized usage data like what languages you're using Zed with.
-    "metrics": true,
+    "diagnostics": false,
+    // Send anonymized usage data like what languages you use.
+    "metrics": false,
     // Allow sending requests to Anthropic models that cannot be offered with
     // Zero Data Retention
     "anthropic_retention": false,
   },
-  // Whether to disable all AI features in Zed.
+  // Whether to disable all AI features.
   //
   // Default: false
   "disable_ai": false,
-  // Automatically update Zed. This setting may be ignored on Linux if
-  // installed through a package manager.
-  "auto_update": true,
+  // Check once a day whether a newer version has been released.
+  // A newer version is announced, never downloaded or installed.
+  "auto_update": false,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
   // Possible values:
@@ -1771,7 +1783,7 @@
     //
     // Default: true
     "include_warnings": true,
-    // Settings for using LSP pull diagnostics mechanism in Zed.
+    // Settings for using LSP pull diagnostics mechanism.
     "lsp_pull_diagnostics": {
       // Whether to pull for diagnostics or not.
       "enabled": true,
@@ -1798,7 +1810,7 @@
       "max_severity": null,
     },
   },
-  // Files or globs of files that will be excluded by Zed entirely. They will be skipped during file
+  // Files or globs of files that will be excluded entirely. They will be skipped during file
   // scans, file searches, and not be displayed in the project file tree. Takes precedence over `file_scan_inclusions`.
   "file_scan_exclusions": [
     "**/.git",
@@ -1813,9 +1825,9 @@
     "**/.classpath",
     "**/.settings",
   ],
-  // Files or globs of files that will be included by Zed, even when ignored by git. This is useful
+  // Files or globs of files that will be included, even when ignored by git. This is useful
   // for files that are not tracked by git, but are still important to your project. Note that globs
-  // that are overly broad can slow down Zed's file scanning. `file_scan_exclusions` takes
+  // that are overly broad can slow down file scanning. `file_scan_exclusions` takes
   // precedence over these inclusions.
   "file_scan_inclusions": [".env*"],
   // Maximum directory depth to eagerly index outside of git repositories;
@@ -1884,7 +1896,10 @@
     "blame": {
       // Show "relative" or "absolute" dates in the blame gutter.
       "date_style": "relative",
-      "show_avatar": true,
+      // Whether to show the avatar of the author of the commit.
+      // Off by default: fetching an avatar sends the commit author's e-mail
+      // address to the git hosting provider (GitHub, GitLab, ...).
+      "show_avatar": false,
     },
     // Control which information is shown in the branch picker.
     "branch_picker": {
@@ -1928,15 +1943,15 @@
     // When the resolved directory is outside the project root, the
     // project's directory name is automatically appended so that
     // sibling repos don't collide. For example, with the default
-    // "../worktrees" and a project at ~/code/zed, worktrees are
-    // created under ~/code/worktrees/zed/.
+    // "../worktrees" and a project at ~/code/my-app, worktrees are
+    // created under ~/code/worktrees/my-app/.
     //
     // When the resolved directory is inside the project root, no
     // extra component is added (it's already project-scoped).
     //
     // Examples:
     //   "../worktrees" — ~/code/worktrees/<project>/ (default)
-    //   ".git/zed-worktrees" — <project>/.git/zed-worktrees/
+    //   ".git/ide-worktrees" — <project>/.git/ide-worktrees/
     //   "my-worktrees" — <project>/my-worktrees/
     //
     // Trailing slashes are ignored.
@@ -1968,12 +1983,12 @@
   "load_direnv": "direct",
   "edit_predictions": {
     // Whether to show the edit prediction button in the status bar.
-    "button": true,
+    "button": false,
     // Which edit prediction provider to use.
-    "provider": "zed",
+    "provider": "none",
     // Disable edit predictions for files matching these glob patterns.
     //
-    // Use `"..."` to add patterns without repeating Zed's defaults. In project
+    // Use `"..."` to add patterns without repeating the built-in defaults. In project
     // settings, it extends the user or parent configuration value. Omit
     // `"..."` to replace the inherited list.
     //
@@ -1993,9 +2008,9 @@
       "**/*.crt",
       "**/.dev.vars",
       "**/secrets.yml",
-      "**/.zed/settings.json", // zed project settings
-      "/**/zed/settings.json", // zed user settings
-      "/**/zed/keymap.json",
+      "**/.unaligned/settings.json", // project settings
+      "/**/unaligned-ide/settings.json", // user settings
+      "/**/unaligned-ide/keymap.json",
     ],
     // When to show edit predictions previews in buffer.
     // This setting takes two possible values:
@@ -2039,13 +2054,10 @@
       "max_output_tokens": 64,
       "prediction_debounce": 0,
     },
-    "zed": {
-      "prediction_debounce": 0,
-    },
     "mercury": {
       "prediction_debounce": 0,
     },
-    // Controls whether Zed may collect training data when using Zed's Edit Predictions.
+    // Controls whether the IDE may collect training data when using upstream's hosted edit predictions (not offered in this product).
     // Data is only captured when the project is detected as open source.
     // Possible values:
     //   - "default": use the preference previously set via the status-bar toggle,
@@ -2068,7 +2080,7 @@
   "status_bar": {
     // Whether to show the status bar.
     "experimental.show": true,
-    // Whether to show the name of the active file in the status bar.
+    // No effect in this product (kept so older settings files still parse).
     "show_active_file": false,
     // Whether to show the active language button in the status bar.
     "active_language_button": true,
@@ -2107,11 +2119,13 @@
     // Default: false
     "starts_open": false,
     // Whether the terminal panel should use flexible (proportional) sizing.
+    // When disabled, the panel has a fixed width of `default_width` pixels
+    // when docked to the left or right.
     //
-    // Default: true
-    "flexible": true,
+    // Default: false
+    "flexible": false,
     // Default width when the terminal is docked to the left or right.
-    "default_width": 640,
+    "default_width": 480,
     // Default height when the terminal is docked to the bottom.
     "default_height": 320,
     // What working directory to use when launching the terminal.
@@ -2131,7 +2145,7 @@
     //    this platform's home directory  (if we can find it)
     //      "working_directory": {
     //        "always": {
-    //          "directory": "~/zed/projects/"
+    //          "directory": "~/code/projects/"
     //        }
     //      }
     "working_directory": "current_project_directory",
@@ -2252,7 +2266,7 @@
     // "font_size": 15,
     // Set the terminal's font family. If this option is not included,
     // the terminal will default to matching the buffer's font family.
-    // "font_family": ".ZedMono",
+    // "font_family": "JetBrains Mono",
     // Set the terminal's font fallbacks. If this option is not included,
     // the terminal will default to matching the buffer's font fallbacks.
     // This will be merged with the platform's default font fallbacks
@@ -2347,13 +2361,13 @@
   "tasks": {
     "variables": {},
     "enabled": true,
-    // Use LSP tasks over Zed language extension ones.
+    // Use LSP tasks over language extension ones.
     // If no LSP tasks are returned due to error/timeout or regular execution,
-    // Zed language extension tasks will be used instead.
+    // language extension tasks will be used instead.
     //
-    // Other Zed tasks will still be shown:
-    // * Zed task from either of the task config file
-    // * Zed task from history (e.g. one-off task was spawned before)
+    // Other tasks will still be shown:
+    // * a task from either of the task config file
+    // * a task from history (e.g. one-off task was spawned before)
     //
     // Default: true
     "prefer_lsp": true,
@@ -2372,9 +2386,9 @@
   //
   "file_types": {
     "JSONC": [
-      "**/.zed/*.json",
+      "**/.unaligned/*.json",
       "**/.vscode/**/*.json",
-      "**/{zed,Zed}/{settings,keymap,tasks,debug}.json",
+      "**/unaligned-ide/{settings,keymap,tasks,debug}.json",
       "tsconfig*.json",
     ],
     "Markdown": [".rules", ".cursorrules", ".windsurfrules", ".clinerules"],
@@ -2383,20 +2397,22 @@
   // Settings for which version of Node.js and NPM to use when installing
   // language servers and Copilot.
   //
-  // Note: changing this setting currently requires restarting Zed.
+  // Note: changing this setting currently requires a restart.
   "node": {
-    // By default, Zed will look for `node` and `npm` on your `$PATH`, and use the
+    // By default, the IDE will look for `node` and `npm` on your `$PATH`, and use the
     // existing executables if their version is recent enough. Set this to `true`
-    // to prevent this, and force Zed to always download and install its own
+    // to prevent this, and force the IDE to always download and install its own
     // version of Node.
     "ignore_system_version": false,
     // You can also specify alternative paths to Node and NPM. If you specify
-    // `path`, but not `npm_path`, Zed will assume that `npm` is located at
+    // `path`, but not `npm_path`, the IDE will assume that `npm` is located at
     // `${path}/../npm`.
     "path": null,
     "npm_path": null,
   },
-  // The extensions that Zed should automatically install on startup.
+  // The language extensions to install without asking. An entry is installed
+  // when a file needs it, when the Extensions page is opened or with the daily
+  // check for extension updates, not at start-up.
   //
   // If you don't want any of these extensions, add this field to your settings
   // and change the value to `false`.
@@ -2448,7 +2464,7 @@
     // When LSP servers give an `InsertReplaceEdit` completion, they provides two ranges: `insert` and `replace`. Usually, `insert`
     // contains the word prefix before your cursor and `replace` contains the whole word.
     //
-    // Effectively, this setting just changes whether Zed will use the received range for `insert` or `replace`, so the results may
+    // Effectively, this setting just changes whether the IDE will use the received range for `insert` or `replace`, so the results may
     // differ depending on the underlying LSP server.
     //
     // Possible values:
@@ -2753,13 +2769,15 @@
     "mistral": {
       "api_url": "https://api.mistral.ai/v1",
     },
+    "unaligned": {
+      "api_url": "https://api.unaligned.pw",
+    },
     "vercel_ai_gateway": {
       "api_url": "https://ai-gateway.vercel.sh/v1",
     },
     "x_ai": {
       "api_url": "https://api.x.ai/v1",
     },
-    "zed.dev": {},
   },
   "session": {
     // Whether or not to restore unsaved buffers on restart.
@@ -2776,7 +2794,7 @@
     // Default: false
     "trust_all_worktrees": false,
   },
-  // Zed's Prettier integration settings.
+  // Settings of the built-in Prettier integration.
   // Allows to enable/disable formatting with Prettier
   // and configure default Prettier, used when no project-level Prettier installation is found.
   "prettier": {
@@ -2804,7 +2822,7 @@
     // "rust-analyzer": {
     //     // A special flag for rust-analyzer integration, to use server-provided tasks
     //     enable_lsp_tasks": true,
-    //     // These initialization options are merged into Zed's defaults
+    //     // These initialization options are merged into the built-in defaults
     //     "initialization_options": {
     //         "check": {
     //             "command": "clippy" // rust-analyzer.check.command (default: "check")
@@ -2868,7 +2886,7 @@
     //   }
     // ]
     //
-    // Default rules are viewable via the "zed: show default semantic token rules" action.
+    // Default rules are viewable via the "App: Show Default Semantic Token Rules" action.
     "semantic_token_rules": [],
   },
   // Jupyter settings
@@ -2928,16 +2946,13 @@
     // Delay in milliseconds before showing the which-key popup.
     "delay_ms": 1000,
   },
-  // The server to connect to. If the environment variable
-  // ZED_SERVER_URL is set, it will override this setting.
-  "server_url": "https://zed.dev",
-  // Settings overrides to use when using Zed Preview.
-  // Mostly useful for developers who are managing multiple instances of Zed.
+  // Settings overrides to use on the Preview channel.
+  // Mostly useful for developers who are managing multiple instances.
   "preview": {
     // "theme": "Andromeda"
   },
-  // Settings overrides to use when using Zed Nightly.
-  // Mostly useful for developers who are managing multiple instances of Zed.
+  // Settings overrides to use on the Nightly channel.
+  // Mostly useful for developers who are managing multiple instances.
   "nightly": {
     // "theme": "Andromeda"
     "instrumentation": {
@@ -2946,13 +2961,13 @@
       },
     },
   },
-  // Settings overrides to use when using Zed Stable.
-  // Mostly useful for developers who are managing multiple instances of Zed.
+  // Settings overrides to use on the Stable channel.
+  // Mostly useful for developers who are managing multiple instances.
   "stable": {
     // "theme": "Andromeda"
   },
-  // Settings overrides to use when using Zed Dev.
-  // Mostly useful for developers who are managing multiple instances of Zed.
+  // Settings overrides to use on the Dev channel.
+  // Mostly useful for developers who are managing multiple instances.
   "dev": {
     // "theme": "Andromeda"
     "instrumentation": {
@@ -2985,7 +3000,7 @@
   // Supported URI scheme: `http`, `https`, `socks4`, `socks4a`, `socks5`,
   // `socks5h`. `http` will be used when no scheme is specified.
   //
-  // By default no proxy will be used, or Zed will try get proxy settings from
+  // By default no proxy will be used, or the IDE will try get proxy settings from
   // environment variables. If certain hosts should not be proxied,
   // set the `no_proxy` environment variable and provide a comma-separated list.
   //
@@ -3003,7 +3018,7 @@
   "command_aliases": {},
   // ssh_connections is an array of ssh connections.
   // You can configure these from `project: Open Remote` in the command palette.
-  // Zed's ssh support will pull configuration from your ~/.ssh too.
+  // The ssh support will pull configuration from your ~/.ssh too.
   // Examples:
   // [
   //   {
@@ -3011,7 +3026,7 @@
   //     // "port": 22, "username": "test", "args": ["-i", "/home/user/.ssh/id_rsa"]
   //     "projects": [
   //       {
-  //         "paths": ["/home/user/code/zed"]
+  //         "paths": ["/home/user/code/my-app"]
   //       }
   //     ]
   //   }
@@ -3040,7 +3055,8 @@
     "timeout": 2000,
     "dock": "bottom",
     "default_width": 300,
-    "default_height": 300,
+    // The same height as the terminal, so the bottom dock does not jump between tabs.
+    "default_height": 320,
     "log_dap_communications": true,
     "format_dap_log_messages": true,
     "button": true,
@@ -3051,7 +3067,7 @@
   // Each profile has an optional `base` ("user" or "default") and a `settings`
   // object. When `base` is "user" (the default), the profile applies on top of
   // your user settings. When `base` is "default", user settings are ignored and
-  // the profile applies on top of Zed's defaults.
+  // the profile applies on top of the built-in defaults.
   //
   // Examples:
   // "profiles": {
@@ -3085,7 +3101,7 @@
   // Configuration for developer-oriented instrumentation tools that can be
   // toggled at runtime.
   "instrumentation": {
-    // Performance profiler, accessed via the `zed: open performance profiler`
+    // Performance profiler, accessed via the "App: Open Performance Profiler"
     // action. Collects timing data for foreground and background executor
     // tasks. Enabling this may lead to increased memory usage, hence it's
     // disabled by default for regular builds.

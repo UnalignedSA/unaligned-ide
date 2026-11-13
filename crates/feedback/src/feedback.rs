@@ -1,48 +1,34 @@
+use app_actions::feedback::{ContactSupport, FileBugReport, RequestFeature};
 use client::telemetry;
 use extension_host::ExtensionStore;
 use gpui::{App, ClipboardItem, PromptLevel, actions};
 use system_specs::{CopySystemSpecsIntoClipboard, SystemSpecs};
 use util::ResultExt;
 use workspace::Workspace;
-use zed_actions::feedback::{EmailZed, FileBugReport, RequestFeature};
 
 actions!(
-    zed,
+    app,
     [
-        /// Opens the Zed repository on GitHub.
-        OpenZedRepo,
+        /// Opens the project's source repository, or the website while the
+        /// source is not published.
+        OpenSourceRepository,
         /// Copies installed extensions to the clipboard for bug reports.
         CopyInstalledExtensionsIntoClipboard
     ]
 );
 
-const ZED_REPO_URL: &str = "https://github.com/zed-industries/zed";
-
-const REQUEST_FEATURE_URL: &str = "https://github.com/zed-industries/zed/discussions/new/choose";
-
-fn file_bug_report_url(specs: &SystemSpecs) -> String {
-    format!(
-        concat!(
-            "https://github.com/zed-industries/zed/issues/new",
-            "?",
-            "template=10_bug_report.yml",
-            "&",
-            "environment={}"
-        ),
-        urlencoding::encode(&specs.to_string())
-    )
+/// Where bug reports, feature requests and messages to the team go: the
+/// product's issue tracker, or the contact page of its website while there is
+/// no tracker. Never upstream's tracker or mailbox: a problem of this fork is
+/// not theirs.
+fn support_url() -> &'static str {
+    branding::issues_url().unwrap_or(branding::SUPPORT_URL)
 }
 
-fn email_zed_url(specs: &SystemSpecs) -> String {
-    format!(
-        concat!("mailto:hi@zed.dev", "?", "body={}"),
-        email_body(specs)
-    )
-}
-
-fn email_body(specs: &SystemSpecs) -> String {
-    let body = format!("\n\nSystem Information:\n\n{}", specs);
-    urlencoding::encode(&body).to_string()
+/// The product's source repository, or its website while the source is not
+/// published.
+fn repository_url() -> &'static str {
+    branding::source_repository_url().unwrap_or(branding::WEBSITE_URL)
 }
 
 pub fn init(cx: &mut App) {
@@ -82,34 +68,16 @@ pub fn init(cx: &mut App) {
                 ));
             })
             .register_action(|_, _: &RequestFeature, _, cx| {
-                cx.open_url(REQUEST_FEATURE_URL);
+                cx.open_url(support_url());
             })
-            .register_action(move |_, _: &FileBugReport, window, cx| {
-                let os_name = telemetry::os_name(cx);
-                let specs = SystemSpecs::new(window, cx, os_name, telemetry::os_version());
-                cx.spawn_in(window, async move |_, cx| {
-                    let specs = specs.await;
-                    cx.update(|_, cx| {
-                        cx.open_url(&file_bug_report_url(&specs));
-                    })
-                    .log_err();
-                })
-                .detach();
+            .register_action(|_, _: &FileBugReport, _, cx| {
+                cx.open_url(support_url());
             })
-            .register_action(move |_, _: &EmailZed, window, cx| {
-                let os_name = telemetry::os_name(cx);
-                let specs = SystemSpecs::new(window, cx, os_name, telemetry::os_version());
-                cx.spawn_in(window, async move |_, cx| {
-                    let specs = specs.await;
-                    cx.update(|_, cx| {
-                        cx.open_url(&email_zed_url(&specs));
-                    })
-                    .log_err();
-                })
-                .detach();
+            .register_action(|_, _: &ContactSupport, _, cx| {
+                cx.open_url(support_url());
             })
-            .register_action(move |_, _: &OpenZedRepo, _, cx| {
-                cx.open_url(ZED_REPO_URL);
+            .register_action(|_, _: &OpenSourceRepository, _, cx| {
+                cx.open_url(repository_url());
             });
     })
     .detach();

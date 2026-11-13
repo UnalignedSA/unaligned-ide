@@ -21,6 +21,10 @@ pub struct ApiKeyState {
     env_var: EnvVar,
     load_status: LoadStatus,
     load_task: Option<ApiKeyLoad>,
+    /// The key was given in this session and the system keychain could not
+    /// store it (for example Linux without a Secret Service): it is used from
+    /// memory until the app quits, and is never written to a file.
+    session_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +83,15 @@ impl ApiKeyState {
             env_var,
             load_status: LoadStatus::NotLoaded,
             load_task: None,
+            session_only: false,
         }
+    }
+
+    /// Whether the key in use lives in memory only because the system
+    /// keychain refused to store it. The interface says so in one line: the
+    /// key will have to be given again after a restart.
+    pub fn is_session_only(&self) -> bool {
+        self.session_only && self.has_key()
     }
 
     pub fn has_key(&self) -> bool {
@@ -153,19 +165,25 @@ impl ApiKeyState {
         }
 
         cx.spawn(async move |ent, cx| {
-            if let Some(key) = &key {
+            // A keychain that cannot store the key does not stop the key from
+            // being used: it stays in memory for this session (and nowhere
+            // else), and `is_session_only` lets the interface say so.
+            let session_only = if let Some(key) = &key {
                 provider
                     .write_credentials(&url, "Bearer", key.as_bytes(), cx)
                     .await
-                    .log_err();
+                    .log_err()
+                    .is_none()
             } else {
                 provider.delete_credentials(&url, cx).await.log_err();
-            }
+                false
+            };
             ent.update(cx, |ent, cx| {
                 let key_state = get_this(ent);
                 if key_state.url != url {
                     return;
                 }
+                key_state.session_only = session_only;
                 key_state.load_task = None;
                 key_state.load_status = match &key {
                     Some(key) => LoadStatus::Loaded(ApiKey {
@@ -278,6 +296,7 @@ impl ApiKeyState {
                 key_state.url = url;
                 key_state.load_status = load_status;
                 key_state.load_task = None;
+                key_state.session_only = false;
                 cx.notify();
             })
             .ok();

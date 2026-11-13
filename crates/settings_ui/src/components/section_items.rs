@@ -1,5 +1,5 @@
 use gpui::{IntoElement, ParentElement, Role, Styled};
-use ui::{Divider, DividerColor, prelude::*};
+use ui::{Divider, DividerColor, SectionLabel, prelude::*};
 
 #[derive(IntoElement)]
 pub struct SettingsSectionHeader {
@@ -29,12 +29,10 @@ impl SettingsSectionHeader {
 }
 
 impl RenderOnce for SettingsSectionHeader {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, _cx: &mut App) -> impl IntoElement {
         let label_text = self.label.clone();
-        let label = Label::new(self.label)
-            .size(LabelSize::Small)
-            .color(Color::Muted)
-            .buffer_font(cx);
+        // The shared micro-label: mono, uppercase, 11px, the readable faint step.
+        let label = SectionLabel::new(self.label);
 
         v_flex()
             .id(label_text.clone())
@@ -49,13 +47,13 @@ impl RenderOnce for SettingsSectionHeader {
                     this.child(
                         h_flex()
                             .gap_1p5()
-                            .child(Icon::new(icon).color(Color::Muted))
+                            .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
                             .child(label),
                     )
                 } else {
                     this.child(label)
                 }
             })
-            .child(Divider::horizontal().color(DividerColor::BorderFaded))
+            .child(Divider::horizontal().color(DividerColor::Border))
     }
 }

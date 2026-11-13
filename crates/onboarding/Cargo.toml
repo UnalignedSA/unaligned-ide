@@ -10,7 +10,6 @@ workspace = true
 
 [lib]
 path = "src/onboarding.rs"
-test = false
 doctest = false
 
 [features]
@@ -18,8 +17,7 @@ default = []
 
 [dependencies]
 anyhow.workspace = true
-client.workspace = true
-cloud_api_types.workspace = true
+branding.workspace = true
 collections.workspace = true
 component.workspace = true
 db.workspace = true
@@ -34,14 +32,13 @@ project.workspace = true
 schemars.workspace = true
 serde.workspace = true
 settings.workspace = true
-telemetry.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
 ui.workspace = true
 util.workspace = true
 vim_mode_setting.workspace = true
 workspace.workspace = true
-zed_actions.workspace = true
+app_actions.workspace = true
 zlog.workspace = true
 
 [dev-dependencies]

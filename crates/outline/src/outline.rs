@@ -17,7 +17,7 @@ use workspace::{DismissDecision, ModalView};
 
 pub fn init(cx: &mut App) {
     cx.observe_new(OutlineView::register).detach();
-    zed_actions::outline::TOGGLE_OUTLINE
+    app_actions::outline::TOGGLE_OUTLINE
         .set(|view, window, cx| {
             let Ok(editor) = view.downcast::<Editor>() else {
                 return;
@@ -30,7 +30,7 @@ pub fn init(cx: &mut App) {
 
 pub fn toggle(
     editor: Entity<Editor>,
-    _: &zed_actions::outline::ToggleOutline,
+    _: &app_actions::outline::ToggleOutline,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -141,7 +141,7 @@ impl Render for OutlineView {
         v_flex()
             .on_action(cx.listener(
                 |_this: &mut OutlineView,
-                 _: &zed_actions::outline::ToggleOutline,
+                 _: &app_actions::outline::ToggleOutline,
                  _window: &mut Window,
                  cx: &mut Context<OutlineView>| {
                     // When outline::Toggle is triggered while the outline is open, dismiss it
@@ -448,7 +448,7 @@ impl PickerDelegate for OutlineViewDelegate {
         Some(
             ListItem::new(ix)
                 .inset(true)
-                .spacing(ListItemSpacing::Sparse)
+                .spacing(ListItemSpacing::Dense)
                 .toggle_state(selected)
                 .child(
                     div()
@@ -465,8 +465,10 @@ pub fn render_item<T, M: IntoIterator<Item = Range<usize>>>(
     match_ranges: M,
     cx: &App,
 ) -> impl IntoElement + use<T, M> {
+    // As every picker does: the matched characters take the accent text colour, no
+    // background behind them.
     let highlight_style = HighlightStyle {
-        background_color: Some(cx.theme().colors().text_accent.alpha(0.3)),
+        color: Some(cx.theme().colors().text_accent),
         ..Default::default()
     };
     let custom_highlights = match_ranges
@@ -941,7 +943,7 @@ mod tests {
         workspace: &Entity<Workspace>,
         cx: &mut VisualTestContext,
     ) -> Entity<Picker<OutlineViewDelegate>> {
-        cx.dispatch_action(zed_actions::outline::ToggleOutline);
+        cx.dispatch_action(app_actions::outline::ToggleOutline);
         cx.executor().advance_clock(Duration::from_millis(200));
         workspace.update(cx, |workspace, cx| {
             workspace

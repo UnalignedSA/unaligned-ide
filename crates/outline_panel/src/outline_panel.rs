@@ -19,9 +19,9 @@ use gpui::{
     DismissEvent, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, HighlightStyle,
     InteractiveElement, IntoElement, KeyContext, ListHorizontalSizingBehavior, ListSizingBehavior,
     MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollStrategy,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, div, point, px, size,
-    uniform_list,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled, StyledText, Subscription,
+    Task, UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, div, point, px,
+    size, uniform_list,
 };
 use language::{Anchor, BufferId, BufferSnapshot, DiskState, OffsetRangeExt, OutlineItem};
 use language::{LanguageAwareStyling, language_settings::LanguageSettings};
@@ -48,15 +48,17 @@ use settings::{Settings, SettingsStore};
 use theme::{GlobalTheme, SyntaxTheme};
 use theme_settings::ThemeSettings;
 use ui::{
-    ContextMenu, FluentBuilder, HighlightedLabel, IconButton, IconButtonShape, IndentGuideColors,
-    IndentGuideLayout, KeyBinding, ListItem, ScrollAxes, Scrollbars, Tab, Tooltip, WithScrollbar,
-    prelude::*,
+    ContextMenu, EmptyState, FluentBuilder, HighlightedLabel, IconButton, IndentGuideColors,
+    IndentGuideLayout, InputShell, InputShellSize, ListItem, MarkerSide, PanelHeader, ScrollAxes,
+    Scrollbars, SectionLabel, Tooltip, WithScrollbar, metrics, prelude::*, selected_marker,
+    selected_marker_inactive,
 };
 use util::{RangeExt, ResultExt, TryFutureExt, debug_panic, rel_path::RelPath};
 use workspace::{
     OpenInTerminal, WeakItemHandle, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     item::ItemHandle,
+    panel_drag::panel_drag_source,
     searchable::{SearchEvent, SearchableItem},
 };
 use worktree::{PathProgress, PathTarget, WorktreeId};
@@ -1820,10 +1822,10 @@ impl OutlinePanel {
                     menu.action("Fold Directory", Box::new(FoldDirectory))
                 })
                 .separator()
-                .action("Copy Path", Box::new(zed_actions::workspace::CopyPath))
+                .action("Copy Path", Box::new(app_actions::workspace::CopyPath))
                 .action(
                     "Copy Relative Path",
-                    Box::new(zed_actions::workspace::CopyRelativePath),
+                    Box::new(app_actions::workspace::CopyRelativePath),
                 )
         });
         window.focus(&context_menu.focus_handle(cx), cx);
@@ -2300,7 +2302,7 @@ impl OutlinePanel {
 
     fn copy_path(
         &mut self,
-        _: &zed_actions::workspace::CopyPath,
+        _: &app_actions::workspace::CopyPath,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2315,7 +2317,7 @@ impl OutlinePanel {
 
     fn copy_relative_path(
         &mut self,
-        _: &zed_actions::workspace::CopyRelativePath,
+        _: &app_actions::workspace::CopyRelativePath,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2497,7 +2499,6 @@ impl OutlinePanel {
             self.chevron_toggle(
                 PanelEntry::Outline(OutlineEntry::Excerpt(excerpt.clone())),
                 is_expanded,
-                color,
                 cx,
             )
         } else {
@@ -2545,14 +2546,13 @@ impl OutlinePanel {
             outline.range, outline.text,
         )));
 
-        let label_element = outline::render_item(
-            &outline,
+        let label_element = render_outline_label(
+            outline,
             string_match
                 .map(|string_match| string_match.ranges().collect::<Vec<_>>())
                 .unwrap_or_default(),
             cx,
-        )
-        .into_any_element();
+        );
 
         let is_active = match self.selected_entry() {
             Some(PanelEntry::Outline(OutlineEntry::Outline(selected))) => outline == selected,
@@ -2576,7 +2576,6 @@ impl OutlinePanel {
             self.chevron_toggle(
                 PanelEntry::Outline(OutlineEntry::Outline(outline.clone())),
                 is_expanded,
-                entry_label_color(is_active),
                 cx,
             )
         } else {
@@ -2619,8 +2618,11 @@ impl OutlinePanel {
                 let color =
                     entry_git_aware_label_color(entry.git_summary, entry.is_ignored, is_active);
                 let icon = if settings.file_icons {
-                    FileIcons::get_icon(Path::new(&name), cx)
-                        .map(|icon_path| Icon::from_path(icon_path).color(color).into_any_element())
+                    FileIcons::get_icon(Path::new(&name), cx).map(|icon_path| {
+                        Icon::from_path(icon_path)
+                            .color(Color::Muted)
+                            .into_any_element()
+                    })
                 } else {
                     None
                 };
@@ -2640,7 +2642,6 @@ impl OutlinePanel {
                             .collapsed_entries
                             .contains(&CollapsedEntry::File(*worktree_id, *buffer_id)),
                         icon,
-                        color,
                         cx,
                     ),
                 )
@@ -2661,7 +2662,6 @@ impl OutlinePanel {
                     PanelEntry::Fs(rendered_entry.clone()),
                     is_expanded,
                     directory.entry.path.as_std_path(),
-                    color,
                     cx,
                 );
                 (
@@ -2693,7 +2693,7 @@ impl OutlinePanel {
                                 None
                             }
                             .map(Icon::from_path)
-                            .map(|icon| icon.color(color).into_any_element());
+                            .map(|icon| icon.color(Color::Muted).into_any_element());
                             (icon, name)
                         }
                         None => (None, "Untitled".to_string()),
@@ -2716,7 +2716,6 @@ impl OutlinePanel {
                             .collapsed_entries
                             .contains(&CollapsedEntry::ExternalFile(external_file.buffer_id)),
                         icon,
-                        color,
                         cx,
                     ),
                 )
@@ -2767,7 +2766,6 @@ impl OutlinePanel {
                 PanelEntry::FoldedDirs(folded_dir.clone()),
                 is_expanded,
                 Path::new(&name),
-                color,
                 cx,
             );
             (
@@ -2905,11 +2903,10 @@ impl OutlinePanel {
         &self,
         entry: PanelEntry,
         is_expanded: bool,
-        color: Color,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let chevron = FileIcons::get_chevron_icon(is_expanded, cx)
-            .map(|path| Icon::from_path(path).color(color).into_any_element())
+            .map(|path| Icon::from_path(path).color(Color::Muted).into_any_element())
             .unwrap_or_else(empty_icon);
         self.expand_collapse_icon(entry, is_expanded, chevron, cx)
     }
@@ -2953,7 +2950,6 @@ impl OutlinePanel {
         entry: PanelEntry,
         is_expanded: bool,
         path: &Path,
-        color: Color,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let settings = OutlinePanelSettings::get_global(cx);
@@ -2964,13 +2960,13 @@ impl OutlinePanel {
             self.expand_collapse_icon(
                 entry,
                 is_expanded,
-                Icon::from_path(path).color(color).into_any_element(),
+                Icon::from_path(path).color(Color::Muted).into_any_element(),
                 cx,
             )
         });
         let icon = indicators
             .icon
-            .map(|path| Icon::from_path(path).color(color).into_any_element());
+            .map(|path| Icon::from_path(path).color(Color::Muted).into_any_element());
         let (leading, trailing) = if file_icons || indicator == FolderIndicator::Both {
             (
                 chevron.unwrap_or_else(empty_icon),
@@ -2992,7 +2988,6 @@ impl OutlinePanel {
         entry: &FsEntry,
         is_expanded: bool,
         icon: Option<AnyElement>,
-        color: Color,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if !self.multi_buffer_active(cx) {
@@ -3006,7 +3001,7 @@ impl OutlinePanel {
         let expand_collapse_icon = if self.hide_symbols_active(cx) {
             empty_icon()
         } else {
-            self.chevron_toggle(PanelEntry::Fs(entry.clone()), is_expanded, color, cx)
+            self.chevron_toggle(PanelEntry::Fs(entry.clone()), is_expanded, cx)
         };
         h_flex()
             .flex_none()
@@ -3032,9 +3027,18 @@ impl OutlinePanel {
             PanelEntry::Fs(FsEntry::File(file)) => file.is_deleted,
             _ => false,
         };
+        let panel_focused = self.focus_handle.contains_focused(window, cx);
+        let colors = cx.theme().colors();
+        let hover_color = colors.element_hover;
+        // The selected row is filled edge to edge; the marker on its left tells
+        // whether the panel has the focus.
+        let selected_color = colors.element_selected;
+        let row_height = metrics::row_height(cx);
         div()
             .text_ui(cx)
             .id(item_id.clone())
+            .relative()
+            .pl(row_extra_inset())
             .on_click({
                 let clicked_entry = rendered_entry.clone();
                 cx.listener(move |outline_panel, event: &gpui::ClickEvent, window, cx| {
@@ -3059,12 +3063,19 @@ impl OutlinePanel {
                     .indent_level(depth)
                     .indent_step_size(px(settings.indent_size))
                     .toggle_state(is_active)
+                    .selectable(false)
+                    .height(row_height)
                     .child(
                         h_flex()
-                            .child(h_flex().min_w(px(16.)).justify_center().child(icon_element))
                             .child(
                                 h_flex()
-                                    .h_6()
+                                    .min_w(IconSize::default().rems())
+                                    .justify_center()
+                                    .child(icon_element),
+                            )
+                            .child(
+                                h_flex()
+                                    .h(row_height)
                                     .child(label_element)
                                     .ml_1()
                                     .when(is_deleted, |this| this.line_through()),
@@ -3084,21 +3095,15 @@ impl OutlinePanel {
                         },
                     )),
             )
-            .border_1()
-            .border_r_2()
-            .rounded_none()
-            .hover(|style| {
-                if is_active {
-                    style
+            .when(is_active, |div| div.bg(selected_color))
+            .when(!is_active, |div| div.hover(|style| style.bg(hover_color)))
+            .when(is_active, |div| {
+                div.child(if panel_focused {
+                    selected_marker(MarkerSide::Left, cx)
                 } else {
-                    let hover_color = cx.theme().colors().ghost_element_hover;
-                    style.bg(hover_color).border_color(hover_color)
-                }
+                    selected_marker_inactive(MarkerSide::Left, cx)
+                })
             })
-            .when(
-                is_active && self.focus_handle.contains_focused(window, cx),
-                |div| div.border_color(cx.theme().colors().panel_focused_border),
-            )
     }
 
     fn entry_name(&self, worktree_id: &WorktreeId, entry: &FsEntryPath, cx: &App) -> String {
@@ -5262,52 +5267,18 @@ impl OutlinePanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let contents = if self.cached_entries.is_empty() {
-            let header = if query.is_some() {
-                "No matches for query"
+            let empty_state = if let Some(query) = query {
+                EmptyState::new("No matching symbols").description(query)
+            } else if self.active_editor().is_none() {
+                EmptyState::new("Open a file to see its outline")
             } else {
-                "No outlines available"
+                EmptyState::new("No symbols in this file")
             };
 
             v_flex()
                 .id("empty-outline-state")
-                .gap_0p5()
-                .flex_1()
-                .justify_center()
                 .size_full()
-                .child(h_flex().justify_center().child(Label::new(header)))
-                .when_some(query, |panel, query| {
-                    panel.child(
-                        h_flex()
-                            .px_0p5()
-                            .justify_center()
-                            .bg(cx.theme().colors().element_selected.opacity(0.2))
-                            .child(Label::new(query)),
-                    )
-                })
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .justify_center()
-                        .child(Label::new("Toggle Panel With").color(Color::Muted))
-                        .child({
-                            let key_binding = match self.position(window, cx) {
-                                DockPosition::Left => {
-                                    KeyBinding::for_action(&workspace::ToggleLeftDock, cx)
-                                        .into_any_element()
-                                }
-                                DockPosition::Bottom => {
-                                    KeyBinding::for_action(&workspace::ToggleBottomDock, cx)
-                                        .into_any_element()
-                                }
-                                DockPosition::Right => {
-                                    KeyBinding::for_action(&workspace::ToggleRightDock, cx)
-                                        .into_any_element()
-                                }
-                            };
-
-                            key_binding
-                        }),
-                )
+                .child(empty_state)
         } else {
             let list_contents = {
                 let items_len = self.cached_entries.len();
@@ -5395,37 +5366,42 @@ impl OutlinePanel {
                                     smallvec::SmallVec::new()
                                 }
                             })
-                            .with_render_fn(cx.entity(), move |outline_panel, params, _, _| {
-                                const LEFT_OFFSET: Pixels = ui::LIST_ITEM_INDENT_GUIDE_LEFT_OFFSET;
+                            .with_render_fn(
+                                cx.entity(),
+                                move |outline_panel, params, window, _| {
+                                    // The guides follow the rows' own inset.
+                                    let left_offset = ui::LIST_ITEM_INDENT_GUIDE_LEFT_OFFSET
+                                        + row_extra_inset().to_pixels(window.rem_size());
 
-                                let indent_size = params.indent_size;
-                                let item_height = params.item_height;
-                                let active_indent_guide_ix = find_active_indent_guide_ix(
-                                    outline_panel,
-                                    &params.indent_guides,
-                                );
+                                    let indent_size = params.indent_size;
+                                    let item_height = params.item_height;
+                                    let active_indent_guide_ix = find_active_indent_guide_ix(
+                                        outline_panel,
+                                        &params.indent_guides,
+                                    );
 
-                                params
-                                    .indent_guides
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(ix, layout)| {
-                                        let bounds = Bounds::new(
-                                            point(
-                                                layout.offset.x * indent_size + LEFT_OFFSET,
-                                                layout.offset.y * item_height,
-                                            ),
-                                            size(px(1.), layout.length * item_height),
-                                        );
-                                        ui::RenderedIndentGuide {
-                                            bounds,
-                                            layout,
-                                            is_active: active_indent_guide_ix == Some(ix),
-                                            hitbox: None,
-                                        }
-                                    })
-                                    .collect()
-                            }),
+                                    params
+                                        .indent_guides
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(|(ix, layout)| {
+                                            let bounds = Bounds::new(
+                                                point(
+                                                    layout.offset.x * indent_size + left_offset,
+                                                    layout.offset.y * item_height,
+                                                ),
+                                                size(px(1.), layout.length * item_height),
+                                            );
+                                            ui::RenderedIndentGuide {
+                                                bounds,
+                                                layout,
+                                                is_active: active_indent_guide_ix == Some(ix),
+                                                hitbox: None,
+                                            }
+                                        })
+                                        .collect()
+                                },
+                            ),
                     )
                 })
             };
@@ -5459,7 +5435,12 @@ impl OutlinePanel {
         v_flex().w_full().flex_1().overflow_hidden().child(contents)
     }
 
-    fn render_filter_footer(&mut self, pinned: bool, cx: &mut Context<Self>) -> Div {
+    fn render_filter_footer(
+        &mut self,
+        pinned: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let (pin_button_id, icon, icon_tooltip) = if pinned {
             ("unpin_button", IconName::Unpin, "Unpin Outline")
         } else {
@@ -5475,68 +5456,103 @@ impl OutlinePanel {
             (IconName::FileCode, "Hide Symbols")
         };
 
-        h_flex()
-            .p_2()
-            .h(Tab::container_height(cx))
-            .justify_between()
-            .border_b_1()
-            .border_color(cx.theme().colors().border)
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_1p5()
-                    .child(
-                        Icon::new(IconName::MagnifyingGlass)
-                            .size(IconSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(self.filter_editor.clone()),
+        let action_button = |id: &'static str, icon: IconName, label: &'static str| {
+            IconButton::new(id, icon)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .aria_label(label)
+        };
+        let filter_focused = self.filter_editor.focus_handle(cx).is_focused(window);
+
+        // View header: the title on the left, the panel's actions on the right.
+        // It is also the handle that drags the panel to another dock.
+        let header = PanelHeader::new("Outline")
+            .id("outline-panel-header")
+            .when(show_symbols_toggle, |this| {
+                this.end_slot(
+                    action_button("toggle_symbols", hide_symbols_icon, hide_symbols_tooltip)
+                        .tooltip(Tooltip::for_action_title_in(
+                            hide_symbols_tooltip,
+                            &ToggleSymbols,
+                            &self.focus_handle,
+                        ))
+                        .on_click(cx.listener(|outline_panel, _, window, cx| {
+                            outline_panel.toggle_symbols(&ToggleSymbols, window, cx);
+                        })),
+                )
+            })
+            .end_slot(
+                action_button(pin_button_id, icon, icon_tooltip)
+                    .toggle_state(pinned)
+                    .tooltip(Tooltip::for_action_title_in(
+                        icon_tooltip,
+                        &ToggleActiveEditorPin,
+                        &self.focus_handle,
+                    ))
+                    .on_click(cx.listener(|outline_panel, _, window, cx| {
+                        outline_panel.toggle_active_editor_pin(&ToggleActiveEditorPin, window, cx);
+                    })),
             )
+            .end_slot(
+                action_button("expand_all", IconName::ExpandVertical, "Expand All")
+                    .tooltip(Tooltip::for_action_title_in(
+                        "Expand All",
+                        &ExpandAllEntries,
+                        &self.focus_handle,
+                    ))
+                    .on_click(cx.listener(|outline_panel, _, window, cx| {
+                        outline_panel.expand_all_entries(&ExpandAllEntries, window, cx);
+                    })),
+            )
+            .end_slot(
+                action_button("collapse_all", IconName::ListCollapse, "Collapse All")
+                    .tooltip(Tooltip::for_action_title_in(
+                        "Collapse All",
+                        &CollapseAllEntries,
+                        &self.focus_handle,
+                    ))
+                    .on_click(cx.listener(|outline_panel, _, window, cx| {
+                        outline_panel.collapse_all_entries(&CollapseAllEntries, window, cx);
+                    })),
+            );
+        let header = panel_drag_source(
+            header,
+            Arc::new(cx.entity()),
+            self.position(window, cx),
+            self.workspace.clone(),
+        );
+
+        v_flex()
+            .flex_none()
+            .w_full()
+            .child(header)
+            // Filter: the shared input, on the 12px inset of the header and the rows.
             .child(
-                h_flex()
-                    .when(has_query, |this| {
-                        this.child(
-                            IconButton::new("clear_filter", IconName::Close)
-                                .shape(IconButtonShape::Square)
-                                .tooltip(Tooltip::text("Clear Filter"))
-                                .on_click(cx.listener(|outline_panel, _, window, cx| {
-                                    outline_panel.filter_editor.update(cx, |editor, cx| {
-                                        editor.set_text("", window, cx);
-                                    });
-                                    cx.notify();
-                                })),
+                div().px_3().py_1p5().child(
+                    InputShell::new()
+                        .size(InputShellSize::Small)
+                        .focused(filter_focused)
+                        .w_full()
+                        .start_slot(
+                            Icon::new(IconName::MagnifyingGlass)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
                         )
-                    })
-                    .when(show_symbols_toggle, |this| {
-                        this.child(
-                            IconButton::new("toggle_symbols", hide_symbols_icon)
-                                .shape(IconButtonShape::Square)
-                                .tooltip(Tooltip::for_action_title_in(
-                                    hide_symbols_tooltip,
-                                    &ToggleSymbols,
-                                    &self.focus_handle,
-                                ))
-                                .on_click(cx.listener(|outline_panel, _, window, cx| {
-                                    outline_panel.toggle_symbols(&ToggleSymbols, window, cx);
-                                })),
-                        )
-                    })
-                    .child(
-                        IconButton::new(pin_button_id, icon)
-                            .tooltip(Tooltip::for_action_title_in(
-                                icon_tooltip,
-                                &ToggleActiveEditorPin,
-                                &self.focus_handle,
-                            ))
-                            .shape(IconButtonShape::Square)
-                            .on_click(cx.listener(|outline_panel, _, window, cx| {
-                                outline_panel.toggle_active_editor_pin(
-                                    &ToggleActiveEditorPin,
-                                    window,
-                                    cx,
-                                );
-                            })),
-                    ),
+                        .child(self.filter_editor.clone())
+                        .when(has_query, |this| {
+                            this.end_slot(
+                                action_button("clear_filter", IconName::Close, "Clear Filter")
+                                    .icon_size(IconSize::XSmall)
+                                    .tooltip(Tooltip::text("Clear Filter"))
+                                    .on_click(cx.listener(|outline_panel, _, window, cx| {
+                                        outline_panel.filter_editor.update(cx, |editor, cx| {
+                                            editor.set_text("", window, cx);
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
+                        }),
+                ),
             )
     }
 
@@ -5771,18 +5787,16 @@ impl Render for OutlinePanel {
                 }),
             )
             .track_focus(&self.focus_handle)
-            .child(self.render_filter_footer(pinned, cx))
+            .child(self.render_filter_footer(pinned, window, cx))
             .when_some(search_query_text, |outline_panel, query_text| {
                 outline_panel.child(
                     h_flex()
-                        .py_1p5()
-                        .px_2()
-                        .h(Tab::container_height(cx))
-                        .gap_0p5()
-                        .border_b_1()
-                        .border_color(cx.theme().colors().border_variant)
-                        .child(Label::new("Searching:").color(Color::Muted))
-                        .child(Label::new(query_text)),
+                        .flex_none()
+                        .h(metrics::sub_header_height(cx))
+                        .px_3()
+                        .gap_1p5()
+                        .child(SectionLabel::new("Searching"))
+                        .child(Label::new(query_text).size(LabelSize::Small).truncate()),
                 )
             })
             .child(self.render_main_contents(query, show_indent_guides, indent_size, window, cx))
@@ -5960,6 +5974,63 @@ fn subscribe_for_editor_events(
             }
         },
     )
+}
+
+/// What a tree row adds on its left: with the list item's own 6px, the first
+/// level of the tree starts on the 12px inset of the panel header.
+fn row_extra_inset() -> Rems {
+    rems_from_px(6_f32)
+}
+
+/// An outline row is a navigation row, not a line of code: the symbol's name
+/// is in the text colour and the words around it (keywords, signature) are
+/// muted, in the code font. Characters matched by the filter take the accent,
+/// as in pickers.
+fn render_outline_label(
+    outline: &Outline,
+    match_ranges: Vec<Range<usize>>,
+    cx: &App,
+) -> AnyElement {
+    let colors = cx.theme().colors();
+    let mut text_style = ui::utils::buffer_text_style(cx);
+    text_style.color = colors.text_muted;
+    text_style.font_size = TextSize::Default.rems(cx).into();
+
+    let name_style = HighlightStyle::color(colors.text);
+    let match_style = HighlightStyle::color(colors.text_accent);
+
+    // Split the text at every range boundary, so no two highlights overlap:
+    // a matched character is drawn as a match whether or not it is in the name.
+    let mut boundaries = outline
+        .name_ranges
+        .iter()
+        .chain(&match_ranges)
+        .flat_map(|range| [range.start, range.end])
+        .collect::<Vec<_>>();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let covers = |ranges: &[Range<usize>], segment: &Range<usize>| {
+        ranges
+            .iter()
+            .any(|range| range.start <= segment.start && segment.end <= range.end)
+    };
+    let highlights = boundaries
+        .windows(2)
+        .filter_map(|window| {
+            let segment = window[0]..window[1];
+            if covers(&match_ranges, &segment) {
+                Some((segment, match_style))
+            } else if covers(&outline.name_ranges, &segment) {
+                Some((segment, name_style))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    StyledText::new(outline.text.clone())
+        .with_default_highlights(&text_style, highlights)
+        .into_any_element()
 }
 
 fn empty_icon() -> AnyElement {

@@ -1,22 +1,27 @@
 [
   // VS Code for macOS. See: https://code.visualstudio.com/docs/reference/default-keybindings
   //
-  // Zed's default keymap is close to VS Code's, so this overlay only contains
+  // The default keymap is close to VS Code's, so this overlay only contains
   // the bindings where the two diverge.
+  //
+  // The AI shortcuts follow Cursor: `cmd-l` opens the chat (with the selection),
+  // `cmd-k` edits inline and `cmd-i` starts a new chat. A bare `cmd-k` has to
+  // fire at once, so, as in Cursor, every `cmd-k` chord moves to the `cmd-r`
+  // prefix (`cmd-r cmd-s`, …).
   {
     "context": "Editor",
     "use_key_equivalents": true,
     "bindings": {
       "shift-alt-f": "editor::Format", // Format Document
-      "cmd-k cmd-f": "editor::FormatSelections", // Format Selection
+      "cmd-r cmd-f": "editor::FormatSelections", // Format Selection
       "shift-alt-i": "editor::SplitSelectionIntoLines", // Insert cursor at end of each line selected
       "alt-z": "editor::ToggleSoftWrap", // Toggle Word Wrap
       "cmd-shift-space": "editor::ShowSignatureHelp", // Trigger Parameter Hints
       "ctrl-shift-cmd-right": "editor::SelectLargerSyntaxNode", // Expand AST Selection
       "ctrl-shift-cmd-left": "editor::SelectSmallerSyntaxNode", // Shrink AST Selection
-      "cmd-k cmd-c": ["editor::ToggleComments", { "advance_downwards": false, "comment_empty_lines": false }], // Add Line Comment (closest analog)
+      "cmd-r cmd-c": ["editor::ToggleComments", { "advance_downwards": false, "comment_empty_lines": false }], // Add Line Comment (closest analog)
       "cmd-/": ["editor::ToggleComments", { "advance_downwards": false, "comment_empty_lines": false }],
-      "cmd-k f12": "editor::GoToDefinitionSplit", // Open Definition to the Side
+      "cmd-r f12": "editor::GoToDefinitionSplit", // Open Definition to the Side
     },
   },
   {
@@ -24,8 +29,10 @@
     "use_key_equivalents": true,
     "bindings": {
       // In VS Code `cmd-k z` is Zen Mode; the word wrap toggle moves to `alt-z`.
-      "cmd-k z": "workspace::ToggleCenteredLayout",
-      "cmd-i": "assistant::InlineAssist", // Inline Chat
+      "cmd-r z": "workspace::ToggleZenMode",
+      "cmd-k": "assistant::InlineAssist", // Edit inline
+      "cmd-l": "agent::AddSelectionToThread", // Open the chat with the selection
+      "cmd-i": "agent::NewThread", // New chat
       "shift-alt-h": "call_hierarchy::ShowIncomingCalls",
     },
   },
@@ -33,14 +40,14 @@
     "context": "!AcpThread > Editor && mode == full",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-enter": null, // Inline Chat lives on `cmd-i` in VS Code
+      "ctrl-enter": null, // Inline edit lives on `cmd-k`
     },
   },
   {
     "context": "Terminal",
     "use_key_equivalents": true,
     "bindings": {
-      "cmd-i": "assistant::InlineAssist", // Terminal Inline Chat
+      "cmd-k": "assistant::InlineAssist", // Terminal inline edit (the shell's own `ctrl-l` still clears)
       "ctrl-enter": null,
     },
   },
@@ -57,6 +64,28 @@
     "bindings": {
       "f5": "debugger::Start", // Start Debugging
       "ctrl-cmd-i": "agent::ToggleFocus", // Open Chat
+      "cmd-l": "agent::ToggleFocus", // Open and focus the chat
+      "cmd-i": "agent::NewThread", // New chat
+      "cmd-r": null, // Chord prefix now; the right dock keeps `cmd-alt-b`
+    },
+  },
+  {
+    // Inside the chat: `cmd-l` goes back to the editor, `cmd-i` starts over and
+    // the Agent/Ask selector takes Cursor's `cmd-.`.
+    "context": "AcpThread",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-i": "agent::NewThread",
+      "cmd-.": "agent::ToggleProfileSelector",
+    },
+  },
+  {
+    "context": "AcpThread > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-l": "agent::ToggleFocus",
+      "cmd-i": "agent::NewThread",
+      "cmd-.": "agent::ToggleProfileSelector",
     },
   },
   {
@@ -86,6 +115,177 @@
     "use_key_equivalents": true,
     "bindings": {
       "shift-alt-h": "call_hierarchy::ToggleDirection",
+    },
+  },
+  // Every `cmd-k` chord of the default keymap, moved to `cmd-r`. Each entry
+  // disables the default chord and binds the same action in the same context.
+  {
+    "context": "Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k cmd-q": null,
+      "cmd-r cmd-q": "editor::Rewrap",
+      "cmd-k q": null,
+      "cmd-r q": "editor::Rewrap",
+      "cmd-k cmd-d": null,
+      "cmd-r cmd-d": ["editor::SelectNext", { "replace_newest": true }],
+      "cmd-k ctrl-cmd-d": null,
+      "cmd-r ctrl-cmd-d": ["editor::SelectPrevious", { "replace_newest": true }],
+      "cmd-k cmd-i": null,
+      "cmd-r cmd-i": "editor::Hover",
+      "cmd-k cmd-b": null,
+      "cmd-r cmd-b": "editor::BlameHover",
+      "cmd-k cmd-/": null,
+      "cmd-r cmd-/": "editor::ToggleBlockComments",
+      "cmd-k cmd-h": null,
+      "cmd-r cmd-h": "call_hierarchy::ShowIncomingCalls",
+      "cmd-k cmd-l": null,
+      "cmd-r cmd-l": "editor::ToggleFold",
+      "cmd-k cmd-[": null,
+      "cmd-r cmd-[": "editor::FoldRecursive",
+      "cmd-k cmd-]": null,
+      "cmd-r cmd-]": "editor::UnfoldRecursive",
+      "cmd-k cmd-1": null,
+      "cmd-r cmd-1": "editor::FoldAtLevel_1",
+      "cmd-k cmd-2": null,
+      "cmd-r cmd-2": "editor::FoldAtLevel_2",
+      "cmd-k cmd-3": null,
+      "cmd-r cmd-3": "editor::FoldAtLevel_3",
+      "cmd-k cmd-4": null,
+      "cmd-r cmd-4": "editor::FoldAtLevel_4",
+      "cmd-k cmd-5": null,
+      "cmd-r cmd-5": "editor::FoldAtLevel_5",
+      "cmd-k cmd-6": null,
+      "cmd-r cmd-6": "editor::FoldAtLevel_6",
+      "cmd-k cmd-7": null,
+      "cmd-r cmd-7": "editor::FoldAtLevel_7",
+      "cmd-k cmd-8": null,
+      "cmd-r cmd-8": "editor::FoldAtLevel_8",
+      "cmd-k cmd-9": null,
+      "cmd-r cmd-9": "editor::FoldAtLevel_9",
+      "cmd-k cmd-0": null,
+      "cmd-r cmd-0": "editor::FoldAll",
+      "cmd-k cmd-j": null,
+      "cmd-r cmd-j": "editor::UnfoldAll",
+      "cmd-k r": null,
+      "cmd-r r": "editor::RevealInFileManager",
+      "cmd-k p": null,
+      "cmd-r p": "editor::CopyPath",
+    },
+  },
+  {
+    "context": "Editor && mode == full",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k z": null,
+    },
+  },
+  {
+    "context": "Pane",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k e": null,
+      "cmd-r e": ["pane::CloseItemsToTheLeft", { "close_pinned": false }],
+      "cmd-k t": null,
+      "cmd-r t": ["pane::CloseItemsToTheRight", { "close_pinned": false }],
+      "cmd-k u": null,
+      "cmd-r u": ["pane::CloseCleanItems", { "close_pinned": false }],
+      "cmd-k w": null,
+      "cmd-r w": ["pane::CloseAllItems", { "close_pinned": false }],
+      "cmd-k cmd-w": null,
+      "cmd-r cmd-w": "workspace::CloseAllItemsAndPanes",
+      "cmd-k shift-enter": null,
+      "cmd-r shift-enter": "pane::TogglePinTab",
+      "cmd-k up": null,
+      "cmd-r up": "pane::SplitUp",
+      "cmd-k down": null,
+      "cmd-r down": "pane::SplitDown",
+      "cmd-k left": null,
+      "cmd-r left": "pane::SplitLeft",
+      "cmd-k right": null,
+      "cmd-r right": "pane::SplitRight",
+    },
+  },
+  {
+    "context": "Editor && extension == md",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k v": null,
+      "cmd-r v": "markdown::OpenPreviewToTheSide",
+    },
+  },
+  {
+    "context": "Editor && extension == svg",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k v": null,
+      "cmd-r v": "svg::OpenPreviewToTheSide",
+    },
+  },
+  {
+    "context": "Editor && (extension == csv || extension == tsv || extension == ssv || extension == psv || extension == jsonl || extension == ndjson)",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k v": null,
+      "cmd-r v": "tabular_data::OpenPreviewToTheSide",
+    },
+  },
+  {
+    "context": "Workspace",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k s": null,
+      "cmd-r s": "workspace::SaveWithoutFormat",
+      "cmd-k cmd-p": null,
+      "cmd-r cmd-p": "workspace::ReopenLastPicker",
+      "cmd-k cmd-s": null,
+      "cmd-r cmd-s": "app::OpenKeymap",
+      "cmd-k cmd-t": null,
+      "cmd-r cmd-t": "theme_selector::Toggle",
+      "cmd-k cmd-shift-t": null,
+      "cmd-r cmd-shift-t": "theme::ToggleMode",
+      "cmd-k n": null,
+      "cmd-r n": "encoding_selector::Toggle",
+      "cmd-k m": null,
+      "cmd-r m": "language_selector::Toggle",
+      "cmd-k cmd-m": null,
+      "cmd-r cmd-m": "toolchain::AddToolchain",
+      "cmd-k cmd-left": null,
+      "cmd-r cmd-left": "workspace::ActivatePaneLeft",
+      "cmd-k cmd-right": null,
+      "cmd-r cmd-right": "workspace::ActivatePaneRight",
+      "cmd-k cmd-up": null,
+      "cmd-r cmd-up": "workspace::ActivatePaneUp",
+      "cmd-k cmd-down": null,
+      "cmd-r cmd-down": "workspace::ActivatePaneDown",
+      "cmd-k shift-left": null,
+      "cmd-r shift-left": "workspace::SwapPaneLeft",
+      "cmd-k shift-right": null,
+      "cmd-r shift-right": "workspace::SwapPaneRight",
+      "cmd-k shift-up": null,
+      "cmd-r shift-up": "workspace::SwapPaneUp",
+      "cmd-k shift-down": null,
+      "cmd-r shift-down": "workspace::SwapPaneDown",
+    },
+  },
+  {
+    "context": "CallHierarchyPicker > Picker > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k cmd-h": null,
+      "cmd-r cmd-h": "call_hierarchy::ToggleDirection",
+      "cmd-k right": null,
+      "cmd-r right": "menu::SelectChild",
+      "cmd-k left": null,
+      "cmd-r left": "menu::SelectParent",
+    },
+  },
+  {
+    "context": "ImageViewer",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k r": null,
+      "cmd-r r": "editor::RevealInFileManager",
     },
   },
 ]

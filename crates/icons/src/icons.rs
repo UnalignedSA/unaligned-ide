@@ -26,9 +26,10 @@ pub enum IconName {
     AiOpenAiGptSub,
     AiOpenCode,
     AiOpenRouter,
+    AiUnaligned,
     AiVercel,
     AiXAi,
-    AiZed,
+    AiApp,
     Archive,
     ArrowCircle,
     ArrowDown,
@@ -211,6 +212,7 @@ pub enum IconName {
     Pin,
     PlayFilled,
     PlayOutlined,
+    Plug,
     Plus,
     Power,
     Public,
@@ -297,22 +299,30 @@ pub enum IconName {
     WholeWord,
     XCircle,
     XCircleFilled,
-    ZedAgent,
-    ZedAgentTwo,
-    ZedAssistant,
-    ZedPredict,
-    ZedPredictDisabled,
-    ZedPredictDown,
-    ZedPredictError,
-    ZedPredictUp,
-    ZedSrcCustom,
-    ZedSrcExtension,
+    AppAgent,
+    AppAgentTwo,
+    AppAssistant,
+    AppPredict,
+    AppPredictDisabled,
+    AppPredictDown,
+    AppPredictError,
+    AppPredictUp,
+    AppSrcCustom,
+    AppSrcExtension,
 }
 
 impl IconName {
     /// Returns the path to this icon.
     pub fn path(&self) -> Arc<str> {
-        let file_stem: &'static str = self.into();
+        // The built-in agent's icon (thread rows, the sidebar, history, the
+        // agent chooser) is the neutral sparkle, not the brand mark that
+        // `zed_agent.svg` holds: the mark is kept for the few places the
+        // design rules list, which draw it themselves or use `AiUnaligned`.
+        let icon = match self {
+            IconName::AppAgent => &IconName::AppAssistant,
+            icon => icon,
+        };
+        let file_stem: &'static str = icon.into();
         format!("icons/{file_stem}.svg").into()
     }
 }

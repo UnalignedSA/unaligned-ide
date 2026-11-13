@@ -1,12 +1,9 @@
-use std::{borrow::Cow, path::PathBuf, time::Duration};
+use std::{borrow::Cow, path::PathBuf};
 
 use acp_thread::MentionUri;
 use agent_client_protocol::v2::schema as acp;
 use editor::Editor;
-use gpui::{
-    Animation, AnimationExt, AnyView, Context, IntoElement, TaskExt, WeakEntity, Window,
-    pulsating_between,
-};
+use gpui::{AnyView, Context, IntoElement, TaskExt, WeakEntity, Window};
 use language::Buffer;
 use rope::Point;
 use settings::Settings;
@@ -127,14 +124,9 @@ impl RenderOnce for MentionCrease {
                     .child(self.label.clone())
                     .map(|this| {
                         if is_loading {
-                            this.with_animation(
-                                "loading-context-crease",
-                                Animation::new(Duration::from_secs(2))
-                                    .repeat()
-                                    .with_easing(pulsating_between(0.4, 0.8)),
-                                |label, delta| label.opacity(delta),
-                            )
-                            .into_any()
+                            // Dimmed while its content loads; no pulse (a
+                            // repeating animation repaints the whole window).
+                            this.opacity(0.6).into_any()
                         } else {
                             this.into_any()
                         }
@@ -234,9 +226,6 @@ pub(crate) fn open_migrated_rule(
             workspace::notifications::NotificationId::unique::<RulesMigratedToSkillsToast>(),
             "Rules have been migrated to Skills.",
         )
-        .on_click("View docs", |_, cx| {
-            cx.open_url("https://zed.dev/docs/ai/skills");
-        })
         .autohide(),
         cx,
     );

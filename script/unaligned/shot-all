@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Takes every scene of script/unaligned/scenes.json, one after the other.
+
+    script/unaligned/shot-all                     all scenes -> .work/shots/<scene>.png
+    script/unaligned/shot-all editor 'theme-*'    only the scenes matching these names or patterns
+    script/unaligned/shot-all --backend offscreen any other option is passed to `shot`
+
+Prints one line per scene and a summary; the exit status is 1 when a scene failed.
+A run of all scenes also writes the result to .work/shots/index.txt.
+"""
+import fnmatch
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
+
+
+def main():
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    patterns, options = [], []
+    arguments = sys.argv[1:]
+    while arguments:
+        argument = arguments.pop(0)
+        if argument in ("-h", "--help"):
+            print(__doc__)
+            return 0
+        if argument.startswith("--"):
+            options.append(argument)
+            # Options of `shot` that take a value.
+            if argument not in ("--retina", "--keep", "--keep-failed") and arguments:
+                options.append(arguments.pop(0))
+        else:
+            patterns.append(argument)
+
+    listing = subprocess.run([str(HERE / "shot"), "--list"], check=True, capture_output=True, text=True).stdout
+    scenes = [line.split()[0] for line in listing.splitlines() if line.strip()]
+    if patterns:
+        scenes = [scene for scene in scenes if any(fnmatch.fnmatch(scene, pattern) for pattern in patterns)]
+    if not scenes:
+        print("shot-all: no scene matches", file=sys.stderr)
+        return 1
+
+    lines, failures = [], 0
+    started = time.time()
+    for scene in scenes:
+        child = subprocess.Popen([str(HERE / "shot"), scene] + options, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            output, errors = child.communicate()
+        except BaseException:
+            # Interrupted: let the running shot stop its instance before leaving.
+            child.terminate()
+            child.wait()
+            raise
+        if child.returncode == 0:
+            # The size is shown so that a picture of the wrong window stands out in the list.
+            size = errors.strip().rsplit(" ", 1)[-1] if errors.strip() else "?"
+            line = f"ok      {scene:<28} {size:<10} {output.strip()}"
+        else:
+            failures += 1
+            reason = " | ".join(line for line in errors.strip().splitlines() if "FAILED" in line or line.startswith(" "))
+            line = f"FAILED  {scene:<28} {reason[:600]}"
+        print(line, flush=True)
+        lines.append(line)
+
+    summary = f"{len(scenes) - failures} ok, {failures} failed, {time.time() - started:.0f} s"
+    print(summary)
+    if not patterns:
+        index = ROOT / ".work" / "shots" / "index.txt"
+        index.parent.mkdir(parents=True, exist_ok=True)
+        index.write_text("\n".join(lines + [summary]) + "\n")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

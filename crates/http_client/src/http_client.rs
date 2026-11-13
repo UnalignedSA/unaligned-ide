@@ -1,3 +1,4 @@
+// Modified by the Unaligned IDE contributors, 2026: see NOTICE at the repository root.
 mod async_body;
 
 use anyhow::Result;
@@ -10,7 +11,11 @@ use parking_lot::Mutex;
 use serde::Serialize;
 #[cfg(feature = "test-support")]
 use std::{any::type_name, fmt};
-use std::{ops::Deref, sync::Arc, time::Duration};
+use std::{
+    ops::Deref,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 pub use url::{Host, Url};
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
@@ -167,6 +172,14 @@ pub trait HttpClient: 'static + Send + Sync {
     fn as_fake(&self) -> &FakeHttpClient {
         panic!("called as_fake on {}", type_name::<Self>())
     }
+
+    /// Whether this client is a [`FakeHttpClient`], which answers from a test
+    /// handler and can never reach the network. Wrappers forward the question
+    /// to the client they wrap.
+    #[cfg(feature = "test-support")]
+    fn is_fake(&self) -> bool {
+        false
+    }
 }
 
 /// An [`HttpClient`] that may have a proxy.
@@ -221,7 +234,23 @@ impl HttpClient for HttpClientWithProxy {
     fn as_fake(&self) -> &FakeHttpClient {
         self.client.as_fake()
     }
+
+    #[cfg(feature = "test-support")]
+    fn is_fake(&self) -> bool {
+        self.client.is_fake()
+    }
 }
+
+/// The message of the error returned by the builders of Zed cloud URLs when
+/// Zed's hosted services are not enabled for this process.
+pub const IDE_CLOUD_UNAVAILABLE_MESSAGE: &str =
+    "Zed cloud services are not available in this build";
+
+/// The developer override that enables Zed's hosted services: the environment
+/// variable that replaces the server URL. Read once per process; an empty
+/// value counts as unset.
+static IDE_SERVER_URL_IS_SET: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("IDE_SERVER_URL").is_some_and(|value| !value.is_empty()));
 
 /// An [`HttpClient`] that has a base URL.
 pub struct HttpClientWithUrl {
@@ -273,50 +302,71 @@ impl HttpClientWithUrl {
         format!("{}{}", self.base_url(), path)
     }
 
-    /// Builds a Zed API URL using the given path.
-    pub fn build_zed_api_url(&self, path: &str, query: &[(&str, &str)]) -> Result<Url> {
-        let base_url = self.base_url();
-        let base_api_url = match base_url.as_ref() {
-            "https://zed.dev" => "https://api.zed.dev",
-            "https://staging.zed.dev" => "https://api-staging.zed.dev",
-            "http://localhost:3000" => "http://localhost:8080",
-            other => other,
-        };
+    /// Whether this client may address Zed's hosted services (the account
+    /// and collaboration server, the cloud API, the hosted models).
+    ///
+    /// They are not part of this build: the answer is `false` unless the
+    /// environment variable `IDE_SERVER_URL` is set, which is the explicit
+    /// developer override that already selects another server. A settings
+    /// value is not enough, because the default `server_url` names Zed's
+    /// production server.
+    ///
+    /// With test support compiled in, a client backed by a
+    /// [`FakeHttpClient`] is also allowed: it cannot reach the network, and
+    /// the tests of the code paths that remain rely on it.
+    pub fn zed_hosted_services_enabled(&self) -> bool {
+        if *IDE_SERVER_URL_IS_SET {
+            return true;
+        }
+        #[cfg(feature = "test-support")]
+        if self.client.is_fake() {
+            return true;
+        }
+        false
+    }
 
-        Ok(Url::parse_with_params(
-            &format!("{}{}", base_api_url, path),
-            query,
-        )?)
+    fn zed_cloud_base_url(&self) -> Result<String> {
+        anyhow::ensure!(
+            self.zed_hosted_services_enabled(),
+            IDE_CLOUD_UNAVAILABLE_MESSAGE
+        );
+        let base_url = self.base_url();
+        Ok(match base_url.as_ref() {
+            "https://zed.dev" => "https://cloud.zed.dev".to_string(),
+            "https://staging.zed.dev" => "https://cloud.zed.dev".to_string(),
+            "http://localhost:3000" => "http://localhost:8787".to_string(),
+            _ => base_url,
+        })
     }
 
     /// Builds a Zed Cloud URL using the given path.
+    ///
+    /// Fails with [`IDE_CLOUD_UNAVAILABLE_MESSAGE`] unless
+    /// [`Self::zed_hosted_services_enabled`].
     pub fn build_zed_cloud_url(&self, path: &str) -> Result<Url> {
-        let base_url = self.base_url();
-        let base_api_url = match base_url.as_ref() {
-            "https://zed.dev" => "https://cloud.zed.dev",
-            "https://staging.zed.dev" => "https://cloud.zed.dev",
-            "http://localhost:3000" => "http://localhost:8787",
-            other => other,
-        };
-
+        let base_api_url = self.zed_cloud_base_url()?;
         Ok(Url::parse(&format!("{}{}", base_api_url, path))?)
     }
 
     /// Builds a Zed Cloud URL using the given path and query params.
+    ///
+    /// Fails with [`IDE_CLOUD_UNAVAILABLE_MESSAGE`] unless
+    /// [`Self::zed_hosted_services_enabled`].
     pub fn build_zed_cloud_url_with_query(&self, path: &str, query: impl Serialize) -> Result<Url> {
-        let base_url = self.base_url();
-        let base_api_url = match base_url.as_ref() {
-            "https://zed.dev" => "https://cloud.zed.dev",
-            "https://staging.zed.dev" => "https://cloud.zed.dev",
-            "http://localhost:3000" => "http://localhost:8787",
-            other => other,
-        };
+        let base_api_url = self.zed_cloud_base_url()?;
         let query = serde_urlencoded::to_string(&query)?;
         Ok(Url::parse(&format!("{}{}?{}", base_api_url, path, query))?)
     }
 
     /// Builds a Zed LLM URL using the given path.
+    ///
+    /// Fails with [`IDE_CLOUD_UNAVAILABLE_MESSAGE`] unless
+    /// [`Self::zed_hosted_services_enabled`].
     pub fn build_zed_llm_url(&self, path: &str, query: &[(&str, &str)]) -> Result<Url> {
+        anyhow::ensure!(
+            self.zed_hosted_services_enabled(),
+            IDE_CLOUD_UNAVAILABLE_MESSAGE
+        );
         let base_url = self.base_url();
         let base_api_url = match base_url.as_ref() {
             "https://zed.dev" => "https://cloud.zed.dev",
@@ -360,6 +410,11 @@ impl HttpClient for HttpClientWithUrl {
     #[cfg(feature = "test-support")]
     fn as_fake(&self) -> &FakeHttpClient {
         self.client.as_fake()
+    }
+
+    #[cfg(feature = "test-support")]
+    fn is_fake(&self) -> bool {
+        self.client.is_fake()
     }
 }
 
@@ -513,5 +568,9 @@ impl HttpClient for FakeHttpClient {
 
     fn as_fake(&self) -> &FakeHttpClient {
         self
+    }
+
+    fn is_fake(&self) -> bool {
+        true
     }
 }

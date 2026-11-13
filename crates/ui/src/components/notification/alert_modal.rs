@@ -118,12 +118,12 @@ impl RenderOnce for AlertModal {
             modal = modal.child(header);
         } else if let Some(title) = self.title {
             modal = modal.child(
-                v_flex()
-                    .pt_3()
-                    .pr_3()
-                    .pl_3()
-                    .pb_1()
-                    .child(Headline::new(title).size(HeadlineSize::Small)),
+                h_flex()
+                    .min_h(rems_from_px(36_f32))
+                    .px_3()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(Label::new(title).weight(gpui::FontWeight::MEDIUM)),
             );
         }
 
@@ -145,13 +145,24 @@ impl RenderOnce for AlertModal {
             let dismiss_label = self.dismiss_label.unwrap_or_else(|| "Cancel".into());
 
             modal = modal.child(
+                // Actions sit right aligned under a line, the primary one last.
                 h_flex()
-                    .p_3()
+                    .px_3()
+                    .py_2()
                     .items_center()
                     .justify_end()
-                    .gap_1()
-                    .child(Button::new(dismiss_label.clone(), dismiss_label).color(Color::Muted))
-                    .child(Button::new(primary_action.clone(), primary_action)),
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(
+                        Button::new(dismiss_label.clone(), dismiss_label)
+                            .style(ButtonStyle::Outlined)
+                            .size(ButtonSize::Medium),
+                    )
+                    .child(
+                        Button::primary(primary_action.clone(), primary_action)
+                            .size(ButtonSize::Medium),
+                    ),
             );
         }
 
@@ -216,7 +227,7 @@ impl Component for AlertModal {
                             )
                             .child(
                                 "Untrusted workspaces are opened in Restricted Mode to protect your system.
-Review .zed/settings.json for any extensions or commands configured by this project.",
+Review .unaligned/settings.json for any extensions or commands configured by this project.",
                             )
                             .child(
                                 v_flex()

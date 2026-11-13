@@ -132,24 +132,20 @@ impl Toggleable for TreeViewItem {
 
 impl RenderOnce for TreeViewItem {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let selected_bg = cx.theme().colors().element_active.opacity(0.5);
+        let selected_bg = cx.theme().colors().element_selected;
 
         let transparent_border = cx.theme().colors().border.opacity(0.);
-        let selected_border = cx.theme().colors().border.opacity(0.4);
+        let selected_border = transparent_border;
         let focused_border = cx.theme().colors().border_focused;
 
-        let item_size = rems_from_px(28_f32);
+        // Same row rhythm as every other tree in the app.
+        let item_size = crate::metrics::row_height(cx);
         let indentation_line = h_flex()
             .h(item_size)
             .w(px(22.))
             .flex_none()
             .justify_center()
-            .child(
-                div()
-                    .w_px()
-                    .h_full()
-                    .bg(cx.theme().colors().border.opacity(0.5)),
-            );
+            .child(div().w_px().h_full().bg(cx.theme().colors().border));
 
         let aria_label = self.label.clone();
         let root_item = self.root_item;
@@ -177,7 +173,7 @@ impl RenderOnce for TreeViewItem {
                     .h(item_size)
                     .pl_0p5()
                     .pr_1()
-                    .gap_2()
+                    .gap_1()
                     .rounded_sm()
                     .border_1()
                     .border_color(transparent_border)
@@ -185,7 +181,9 @@ impl RenderOnce for TreeViewItem {
                     .when(self.selected, |this| {
                         this.border_color(selected_border).bg(selected_bg)
                     })
-                    .hover(|s| s.bg(cx.theme().colors().element_hover))
+                    .when(!self.selected, |this| {
+                        this.hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
+                    })
                     .map(|this| {
                         let label = self.label;
 

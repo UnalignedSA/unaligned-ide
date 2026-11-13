@@ -23,6 +23,7 @@ members = [
     "crates/bedrock",
     "crates/bench_metrics",
     "crates/benchmarks",
+    "crates/branding",
     "crates/breadcrumbs",
     "crates/buffer_diff",
     "crates/call",
@@ -35,7 +36,6 @@ members = [
     "crates/cloud_api_types",
     "crates/cloud_llm_client",
     "crates/codestral",
-    "crates/collab",
     "crates/collab_ui",
     "crates/collections",
     "crates/command_palette",
@@ -56,9 +56,7 @@ members = [
     "crates/deepseek",
     "crates/dev_container",
     "crates/diagnostics",
-    "crates/docs_preprocessor",
     "crates/edit_prediction",
-    "crates/edit_prediction_cli",
     "crates/edit_prediction_context",
     "crates/edit_prediction_metrics",
     "crates/edit_prediction_types",
@@ -68,7 +66,6 @@ members = [
     "crates/encoding_selector",
     "crates/env_var",
     "crates/etw_tracing",
-    "crates/eval_cli",
     "crates/eval_utils",
     "crates/explorer_command_injector",
     "crates/extension",
@@ -245,10 +242,10 @@ members = [
     "crates/worktree_benchmarks",
     "crates/x_ai",
     "crates/x_ai_subscribed",
-    "crates/zed",
-    "crates/zed_actions",
-    "crates/zed_credentials_provider",
-    "crates/zed_env_vars",
+    "crates/ide",
+    "crates/app_actions",
+    "crates/app_credentials_provider",
+    "crates/app_env_vars",
     "crates/zeta_prompt",
     "crates/zlog",
     "crates/zlog_settings",
@@ -259,21 +256,16 @@ members = [
     # Extensions
     #
 
-    "extensions/glsl",
-    "extensions/html",
-    "extensions/proto",
     "extensions/test-extension",
 
     #
     # Tooling
     #
 
-    "tooling/compliance",
-    "tooling/crates_io_client",
     "tooling/perf",
     "tooling/xtask",
 ]
-default-members = ["crates/zed"]
+default-members = ["crates/ide"]
 
 [workspace.package]
 publish = false
@@ -304,6 +296,7 @@ auto_update = { path = "crates/auto_update" }
 auto_update_ui = { path = "crates/auto_update_ui" }
 aws_http_client = { path = "crates/aws_http_client" }
 bedrock = { path = "crates/bedrock" }
+branding = { path = "crates/branding" }
 breadcrumbs = { path = "crates/breadcrumbs" }
 buffer_diff = { path = "crates/buffer_diff" }
 call = { path = "crates/call" }
@@ -316,12 +309,10 @@ cloud_api_client = { path = "crates/cloud_api_client" }
 cloud_api_types = { path = "crates/cloud_api_types" }
 cloud_llm_client = { path = "crates/cloud_llm_client" }
 codestral = { path = "crates/codestral" }
-collab = { path = "crates/collab" }
 collab_ui = { path = "crates/collab_ui" }
 collections = { path = "crates/collections", version = "0.1.0" }
 command_palette = { path = "crates/command_palette" }
 command_palette_hooks = { path = "crates/command_palette_hooks" }
-compliance = { path = "tooling/compliance" }
 component = { path = "crates/component" }
 component_preview = { path = "crates/component_preview" }
 context_server = { path = "crates/context_server" }
@@ -518,9 +509,9 @@ workspace = { path = "crates/workspace" }
 worktree = { path = "crates/worktree" }
 x_ai = { path = "crates/x_ai" }
 x_ai_subscribed = { path = "crates/x_ai_subscribed" }
-zed_actions = { path = "crates/zed_actions" }
-zed_credentials_provider = { path = "crates/zed_credentials_provider" }
-zed_env_vars = { path = "crates/zed_env_vars" }
+app_actions = { path = "crates/app_actions" }
+app_credentials_provider = { path = "crates/app_credentials_provider" }
+app_env_vars = { path = "crates/app_env_vars" }
 zeta_prompt = { path = "crates/zeta_prompt" }
 zlog = { path = "crates/zlog" }
 zlog_settings = { path = "crates/zlog_settings" }
@@ -1149,7 +1140,7 @@ telemetry_events = { codegen-units = 1 }
 theme_selector = { codegen-units = 1 }
 time_format = { codegen-units = 1 }
 ui_input = { codegen-units = 1 }
-zed_actions = { codegen-units = 1 }
+app_actions = { codegen-units = 1 }
 
 [profile.release]
 debug = "limited"
@@ -1157,7 +1148,7 @@ lto = "thin"
 codegen-units = 1
 
 [profile.release.package]
-zed = { codegen-units = 16 }
+ide = { codegen-units = 16 }
 
 [profile.release-fast]
 inherits = "release"

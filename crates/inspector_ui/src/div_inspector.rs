@@ -29,10 +29,10 @@ use util::split_str_with_ranges;
 
 /// Path used for unsaved buffer that contains style json. To support the json language server, this
 /// matches the name used in the generated schemas.
-const ZED_INSPECTOR_STYLE_JSON: &str = if cfg!(target_os = "windows") {
-    r"C:\zed-inspector-style.json"
+const IDE_INSPECTOR_STYLE_JSON: &str = if cfg!(target_os = "windows") {
+    r"C:\ide-inspector-style.json"
 } else {
-    "/zed-inspector-style.json"
+    "/ide-inspector-style.json"
 };
 
 pub(crate) struct DivInspector {
@@ -87,7 +87,7 @@ impl DivInspector {
                 // Open the JSON style buffer in the inspector-specific project, so that it runs the
                 // JSON language server.
                 let json_style_buffer =
-                    Self::create_buffer_in_project(ZED_INSPECTOR_STYLE_JSON, &project, cx).await;
+                    Self::create_buffer_in_project(IDE_INSPECTOR_STYLE_JSON, &project, cx).await;
 
                 // Create Rust style buffer without adding it to the project / buffer_store, so that
                 // Rust Analyzer doesn't get started for it.
@@ -1024,7 +1024,7 @@ mod tests {
         expected.extend([
             paths::tasks_file().clone(),
             paths::debug_scenarios_file().clone(),
-            PathBuf::from(ZED_INSPECTOR_STYLE_JSON),
+            PathBuf::from(IDE_INSPECTOR_STYLE_JSON),
         ]);
         expected.sort();
         assert_eq!(watched_paths(fs), expected);

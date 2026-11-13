@@ -37,11 +37,11 @@ impl TerminalCodegen {
     }
 
     pub fn start(&mut self, prompt_task: Task<LanguageModelRequest>, cx: &mut Context<Self>) {
-        let registry = LanguageModelRegistry::read_global(cx);
-        let Some(model) = registry.inline_assistant_model() else {
+        // A command is a small edit: see `inline_assist_model`.
+        let Some(model) = crate::buffer_codegen::inline_assist_model(0, cx) else {
             return;
         };
-        let provider = registry.provider_for_model(&model);
+        let provider = LanguageModelRegistry::read_global(cx).provider_for_model(&model);
 
         let anthropic_reporter = AnthropicEventReporter::new(&model, cx);
         let session_id = self.session_id;
@@ -143,12 +143,6 @@ impl TerminalCodegen {
             .ok();
         });
         cx.notify();
-    }
-
-    pub fn completion(&self) -> Option<String> {
-        self.transaction
-            .as_ref()
-            .map(|transaction| transaction.completion.clone())
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {

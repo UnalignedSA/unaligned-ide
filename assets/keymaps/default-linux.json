@@ -27,12 +27,12 @@
       "open": "workspace::Open",
       "ctrl-o": "workspace::OpenFiles",
       "ctrl-k ctrl-o": "workspace::Open",
-      "ctrl-=": ["zed::IncreaseBufferFontSize", { "persist": false }],
-      "ctrl-+": ["zed::IncreaseBufferFontSize", { "persist": false }],
-      "ctrl--": ["zed::DecreaseBufferFontSize", { "persist": false }],
-      "ctrl-0": ["zed::ResetBufferFontSize", { "persist": false }],
-      "ctrl-alt-,": "zed::OpenSettingsFile",
-      "ctrl-q": "zed::Quit",
+      "ctrl-=": ["app::IncreaseBufferFontSize", { "persist": false }],
+      "ctrl-+": ["app::IncreaseBufferFontSize", { "persist": false }],
+      "ctrl--": ["app::DecreaseBufferFontSize", { "persist": false }],
+      "ctrl-0": ["app::ResetBufferFontSize", { "persist": false }],
+      "ctrl-alt-,": "app::OpenSettingsFile",
+      "ctrl-q": "app::Quit",
       "f4": "debugger::Start",
       "ctrl-alt-z": "edit_prediction::RatePredictions",
       "ctrl-alt-shift-i": "edit_prediction::ToggleMenu",
@@ -643,7 +643,7 @@
       "shift-f6": "workspace::FocusPreviousPart",
       "ctrl-f6": "workspace::FocusNextPart",
       "alt-open": "projects::OpenRecent",
-      "f11": "zed::ToggleFullScreen",
+      "f11": "app::ToggleFullScreen",
       // Change the default action on `menu::Confirm` by setting the parameter
       // "alt-ctrl-o": ["projects::OpenRecent", { "create_new_window": true }],
       "alt-ctrl-o": "projects::OpenRecent",
@@ -666,7 +666,7 @@
       "shift-new": "workspace::NewWindow",
       "ctrl-shift-n": "workspace::NewWindow",
       "ctrl-`": "terminal_panel::Toggle",
-      "f10": ["app_menu::OpenApplicationMenu", "Zed"],
+      "f10": ["app_menu::OpenApplicationMenu", "App"],
       "alt-1": ["workspace::ActivatePane", 0],
       "alt-2": ["workspace::ActivatePane", 1],
       "alt-3": ["workspace::ActivatePane", 2],
@@ -694,7 +694,7 @@
       "ctrl-shift-h": ["pane::DeploySearch", { "replace_enabled": true }],
       "ctrl-shift-t": "pane::ReopenClosedItem",
       "ctrl-k ctrl-p": "workspace::ReopenLastPicker",
-      "ctrl-k ctrl-s": "zed::OpenKeymap",
+      "ctrl-k ctrl-s": "app::OpenKeymap",
       "ctrl-k ctrl-t": "theme_selector::Toggle",
       "ctrl-k ctrl-shift-t": "theme::ToggleMode",
       "ctrl-alt-super-p": "settings_profile_selector::Toggle",
@@ -725,7 +725,7 @@
       "ctrl-k shift-right": "workspace::SwapPaneRight",
       "ctrl-k shift-up": "workspace::SwapPaneUp",
       "ctrl-k shift-down": "workspace::SwapPaneDown",
-      "ctrl-shift-x": "zed::Extensions",
+      "ctrl-shift-x": "app::Extensions",
       // All task parameters are captured and unchanged between reruns by default.
       // Use the `"reevaluate_context"` parameter to control this.
       "ctrl-shift-r": ["task::Rerun", { "reevaluate_context": false }],
@@ -944,7 +944,6 @@
   {
     "context": "!Terminal",
     "bindings": {
-      "ctrl-shift-c": "collab_panel::ToggleFocus",
     },
   },
   {
@@ -1207,28 +1206,6 @@
     },
   },
   {
-    "context": "CollabPanel && not_editing",
-    "bindings": {
-      "ctrl-backspace": "collab_panel::Remove",
-      "space": "menu::Confirm",
-    },
-  },
-  {
-    "context": "CollabPanel",
-    "bindings": {
-      "alt-up": "collab_panel::MoveChannelUp",
-      "alt-down": "collab_panel::MoveChannelDown",
-      "alt-enter": "collab_panel::OpenSelectedChannelNotes",
-      "shift-enter": "collab_panel::ToggleSelectedChannelFavorite",
-    },
-  },
-  {
-    "context": "(CollabPanel && editing) > Editor",
-    "bindings": {
-      "space": "collab_panel::InsertSpace",
-    },
-  },
-  {
     "context": "ChannelModal",
     "bindings": {
       "tab": "channel_modal::ToggleMode",
@@ -1372,7 +1349,7 @@
     },
   },
   {
-    "context": "ZedPredictModal",
+    "context": "EditPredictionOnboardingModal",
     "bindings": {
       "escape": "menu::Cancel",
     },
@@ -1444,7 +1421,7 @@
       "ctrl-c": "keymap_editor::CopyAction",
       "ctrl-shift-c": "keymap_editor::CopyContext",
       "ctrl-t": "keymap_editor::ShowMatchingKeybinds",
-      "ctrl-e": "zed::OpenKeymapFile",
+      "ctrl-e": "app::OpenKeymapFile",
     },
   },
   {
@@ -1482,13 +1459,11 @@
     "context": "Onboarding",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-=": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "ctrl-+": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "ctrl--": ["zed::DecreaseUiFontSize", { "persist": false }],
-      "ctrl-0": ["zed::ResetUiFontSize", { "persist": false }],
+      "ctrl-=": ["app::IncreaseUiFontSize", { "persist": false }],
+      "ctrl-+": ["app::IncreaseUiFontSize", { "persist": false }],
+      "ctrl--": ["app::DecreaseUiFontSize", { "persist": false }],
+      "ctrl-0": ["app::ResetUiFontSize", { "persist": false }],
       "ctrl-enter": "onboarding::Finish",
-      "alt-shift-l": "onboarding::SignIn",
-      "alt-shift-a": "onboarding::OpenAccount",
     },
   },
   {
@@ -1496,15 +1471,18 @@
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-n": "workspace::NewFile",
-      "ctrl-=": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "ctrl-+": ["zed::IncreaseUiFontSize", { "persist": false }],
-      "ctrl--": ["zed::DecreaseUiFontSize", { "persist": false }],
-      "ctrl-0": ["zed::ResetUiFontSize", { "persist": false }],
+      "ctrl-=": ["app::IncreaseUiFontSize", { "persist": false }],
+      "ctrl-+": ["app::IncreaseUiFontSize", { "persist": false }],
+      "ctrl--": ["app::DecreaseUiFontSize", { "persist": false }],
+      "ctrl-0": ["app::ResetUiFontSize", { "persist": false }],
       "ctrl-1": ["welcome::OpenRecentProject", 0],
       "ctrl-2": ["welcome::OpenRecentProject", 1],
       "ctrl-3": ["welcome::OpenRecentProject", 2],
       "ctrl-4": ["welcome::OpenRecentProject", 3],
       "ctrl-5": ["welcome::OpenRecentProject", 4],
+      "ctrl-6": ["welcome::OpenRecentProject", 5],
+      "ctrl-7": ["welcome::OpenRecentProject", 6],
+      "ctrl-8": ["welcome::OpenRecentProject", 7],
     },
   },
   {
@@ -1520,7 +1498,7 @@
     "context": "!SettingsWindow",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-,": "zed::OpenSettings",
+      "ctrl-,": "app::OpenSettings",
     },
   },
   {
@@ -1663,7 +1641,7 @@
     "bindings": {
       "ctrl-shift-backspace": "worktree_picker::DeleteWorktree",
       "ctrl-alt-shift-backspace": "worktree_picker::ForceDeleteWorktree",
-      "ctrl-shift-c": "zed::OpenWorktreeSetupTasks",
+      "ctrl-shift-c": "app::OpenWorktreeSetupTasks",
     },
   },
   {

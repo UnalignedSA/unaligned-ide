@@ -24,8 +24,13 @@ pub struct AllLanguageModelSettingsContent {
     pub open_router: Option<OpenRouterSettingsContent>,
     pub openai: Option<OpenAiSettingsContent>,
     pub openai_compatible: Option<HashMap<Arc<str>, OpenAiCompatibleSettingsContent>>,
+    pub unaligned: Option<UnalignedSettingsContent>,
     pub vercel_ai_gateway: Option<VercelAiGatewaySettingsContent>,
     pub x_ai: Option<XAiSettingsContent>,
+    /// Upstream's hosted provider, which this product does not offer. Still
+    /// read from older settings files; left out of the schema so that the key
+    /// is not suggested.
+    #[schemars(skip)]
     #[serde(rename = "zed.dev")]
     pub zed_dot_dev: Option<ZedDotDevSettingsContent>,
 }
@@ -51,7 +56,7 @@ pub struct AnthropicCompatibleSettingsContent {
 pub struct AnthropicCompatibleAvailableModel {
     /// The model's name in the provider's API. e.g. claude-3-5-sonnet-latest
     pub name: String,
-    /// The model's name in Zed's UI, such as in the model selector dropdown menu in the assistant panel.
+    /// The model's name in the UI, such as in the model selector dropdown menu in the assistant panel.
     pub display_name: Option<String>,
     /// The model's context window size.
     pub max_tokens: u64,
@@ -93,7 +98,7 @@ impl Default for AnthropicCompatibleModelCapabilities {
 pub struct AnthropicAvailableModel {
     /// The model's name in the Anthropic API. e.g. claude-3-5-sonnet-latest, claude-3-opus-20240229, etc
     pub name: String,
-    /// The model's name in Zed's UI, such as in the model selector dropdown menu in the agent panel.
+    /// The model's name in the UI, such as in the model selector dropdown menu in the agent panel.
     pub display_name: Option<String>,
     /// The model's context window size.
     pub max_tokens: u64,
@@ -216,7 +221,7 @@ pub struct OllamaSettingsContent {
 pub struct OllamaAvailableModel {
     /// The model name in the Ollama API (e.g. "llama3.2:latest")
     pub name: String,
-    /// The model's name in Zed's UI, such as in the model selector dropdown menu in the agent panel.
+    /// The model's name in the UI, such as in the model selector dropdown menu in the agent panel.
     pub display_name: Option<String>,
     /// The Context Length parameter to the model (aka num_ctx or n_ctx)
     pub max_tokens: u64,
@@ -340,7 +345,7 @@ pub struct LlamaCppSettingsContent {
 pub struct LlamaCppAvailableModel {
     /// The model id reported by the llama.cpp server (its `--alias` or the model file path).
     pub name: String,
-    /// The model's name in Zed's UI, such as in the model selector dropdown menu in the agent panel.
+    /// The model's name in the UI, such as in the model selector dropdown menu in the agent panel.
     pub display_name: Option<String>,
     /// The Context Length parameter to the model (aka n_ctx).
     pub max_tokens: u64,
@@ -485,6 +490,15 @@ impl Default for OpenAiCompatibleModelCapabilities {
             max_tokens_parameter: false,
         }
     }
+}
+
+#[with_fallible_options]
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema, MergeFrom)]
+pub struct UnalignedSettingsContent {
+    /// The API's origin, without a path.
+    pub api_url: Option<String>,
+    pub available_models: Option<Vec<VercelAiGatewayAvailableModel>>,
+    pub custom_headers: Option<HashMap<String, String>>,
 }
 
 #[with_fallible_options]

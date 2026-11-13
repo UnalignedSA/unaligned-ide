@@ -12,6 +12,11 @@ workspace = true
 path = "src/audio.rs"
 doctest = false
 
+[features]
+# WebRTC's audio processing module as the echo canceller. Off by default: see
+# the feature of the same name in `livekit_client`.
+webrtc = ["dep:libwebrtc"]
+
 [dependencies]
 anyhow.workspace = true
 collections.workspace = true
@@ -30,4 +35,4 @@ util.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(not(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd")))'.dependencies]
-libwebrtc.workspace = true
+libwebrtc = { workspace = true, optional = true }

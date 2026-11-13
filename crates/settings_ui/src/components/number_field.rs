@@ -11,12 +11,12 @@ use gpui::{
     TextAlign, TextStyleRefinement, WeakEntity,
 };
 
+use app_actions::editor::{MoveDown, MoveUp};
 use settings::{
     CenteredPaddingSettings, CodeFade, DelayMs, FontSize, FontWeightContent, InactiveOpacity,
     MinimumContrast, PixelSetting,
 };
 use ui::prelude::*;
-use zed_actions::editor::{MoveDown, MoveUp};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NumberFieldMode {
@@ -505,11 +505,14 @@ impl<T: NumberFieldType> RenderOnce for NumberField<T> {
             }
         };
 
-        let bg_color = cx.theme().colors().surface_background;
+        // Same rules as `ui::InputShell` on the raised ground, which the text inputs of the
+        // pages use: raised fill, strong line, text colour on focus. The field is three
+        // joined segments (minus, value, plus), so it draws them itself.
+        let bg_color = cx.theme().colors().elevated_surface_background;
         let hover_bg_color = cx.theme().colors().element_hover;
 
-        let border_color = cx.theme().colors().border_variant;
-        let focus_border_color = cx.theme().colors().border_focused;
+        let border_color = cx.theme().colors().border_strong;
+        let focus_border_color = cx.theme().colors().text;
 
         let base_button = |icon: IconName| {
             h_flex()

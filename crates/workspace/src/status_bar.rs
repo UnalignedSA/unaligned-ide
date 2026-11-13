@@ -1,15 +1,156 @@
-use crate::{
-    ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar,
-    sidebar_side_context_menu,
-};
+use crate::{ItemHandle, MultiWorkspace, Pane, SidebarSide};
 use gpui::{
-    Anchor, AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, Role, SharedString, Styled, Subscription, WeakEntity, Window,
+    AnyView, App, Context, Decorations, ElementId, Entity, FocusHandle, Focusable, Hsla,
+    IntoElement, ParentElement, Rems, Render, Role, SharedString, Styled, Subscription, WeakEntity,
+    Window,
 };
 use settings::{SettingsContent, update_settings_file};
 use std::{any::TypeId, sync::Arc};
 use theme::CLIENT_SIDE_DECORATION_ROUNDING;
-use ui::{ContextMenu, Divider, IconPosition, Indicator, Tooltip, prelude::*, right_click_menu};
+use ui::{
+    ButtonLike, ContextMenu, IconButtonShape, IconPosition, micro_label_size, prelude::*,
+    right_click_menu,
+};
+
+/// The 1px line that opens the status bar. It is part of the bar's height.
+const STATUS_BAR_LINE: Pixels = px(1.);
+
+/// How much faster than the right side the left side gives up its width.
+const LEFT_TOOLS_SHRINK: f32 = 10_000.;
+
+/// Height of every status bar item: what is left of the bar
+/// (`ui::metrics::status_bar_height`, 24px at the default density) under its
+/// 1px line. It has no access to the density, so a compact bar clips its
+/// items by a pixel and a comfortable one centres them.
+pub fn status_bar_item_height() -> Rems {
+    rems_from_px(23_f32)
+}
+
+/// Height of a status bar item at the current density: the bar
+/// (`ui::metrics::status_bar_height`) without its 1px line. The items of this
+/// repository's own crates use it through [`status_bar_item`];
+/// [`status_bar_item_height`] is the density-blind form older callers keep.
+pub fn status_bar_item_height_for(cx: &App) -> Rems {
+    Rems(ui::metrics::status_bar_height(cx).0 - rems_from_px(1_f32).0)
+}
+
+/// Height of the row of items: the bar without its line.
+fn status_bar_row_height(window: &Window, cx: &App) -> Pixels {
+    ui::metrics::status_bar_height(cx).to_pixels(window.rem_size()) - STATUS_BAR_LINE
+}
+
+/// Padding on each side of an item's content, so the contents of two
+/// neighbours are 12px apart and the first one starts 8px from the window edge
+/// (with [`STATUS_BAR_SIDE_PADDING`]).
+const STATUS_ITEM_PADDING: Pixels = px(6.);
+
+/// What the row adds on each side of the items.
+const STATUS_BAR_SIDE_PADDING: Pixels = px(2.);
+
+/// A status bar item: a flat button as high as the bar that follows the
+/// density. Its content goes in one [`status_bar_item_content`] child, its
+/// text in [`status_bar_text`], which takes the text colour while the pointer
+/// is over the item.
+pub fn status_bar_item(id: impl Into<ElementId>, cx: &App) -> ButtonLike {
+    ButtonLike::new(id)
+        .style(ButtonStyle::Subtle)
+        // No padding of the button's own: `status_bar_item_content` sets it.
+        .size(ButtonSize::None)
+        .height(status_bar_item_height_for(cx).into())
+}
+
+/// The row inside a [`status_bar_item`]: icon and text 4px apart, padded so
+/// that neighbouring items read 12px apart.
+pub fn status_bar_item_content() -> Div {
+    h_flex()
+        .h_full()
+        // `ButtonSize::None` already pads by one pixel.
+        .px(STATUS_ITEM_PADDING - px(1.))
+        .gap_1()
+}
+
+fn status_bar_micro_text(text: SharedString, cx: &App) -> Div {
+    let colors = cx.theme().colors();
+    let hover_color = colors.text;
+    div()
+        .flex_none()
+        .whitespace_nowrap()
+        .font_buffer(cx)
+        .text_size(micro_label_size())
+        .text_color(colors.text_muted)
+        // `ButtonLike` names its group "": the text follows the item's hover.
+        .group_hover("", move |style| style.text_color(hover_color))
+        .child(text)
+}
+
+/// The text of a status bar item, in micro-label type: code font, 11px,
+/// uppercase, muted, and the text colour while its [`status_bar_item`] is
+/// hovered. For what the interface writes itself (`LN 12, COL 4`, a language,
+/// a branch, a model).
+pub fn status_bar_text(text: impl Into<SharedString>, cx: &App) -> Div {
+    status_bar_micro_text(text.into().to_uppercase().into(), cx)
+}
+
+/// [`status_bar_text`] in a colour that says something (an error count, a low
+/// balance, a call to act): it stays that colour while the item is hovered.
+pub fn status_bar_text_in(text: impl Into<SharedString>, color: Hsla, cx: &App) -> Div {
+    status_bar_text(text, cx)
+        .text_color(color)
+        .group_hover("", move |style| style.text_color(color))
+}
+
+/// Like [`status_bar_text`] but in the case it was written in: for sentences
+/// that come from elsewhere (a compiler message), where capitals would change
+/// the meaning of an identifier.
+pub fn status_bar_message(text: impl Into<SharedString>, cx: &App) -> Div {
+    status_bar_micro_text(text.into(), cx)
+}
+
+/// A flat, full-height status bar button with the button's own padding, kept
+/// for the items of other crates. New items use [`status_bar_item`].
+pub fn status_bar_button(id: impl Into<ElementId>) -> ButtonLike {
+    ButtonLike::new(id)
+        .style(ButtonStyle::Subtle)
+        // `Medium` is only used for its wider horizontal padding; the height
+        // is pinned to the bar.
+        .size(ButtonSize::Medium)
+        .height(status_bar_item_height().into())
+}
+
+/// The icon-only counterpart of [`status_bar_button`].
+pub fn status_bar_icon_button(id: impl Into<ElementId>, icon: IconName) -> IconButton {
+    IconButton::new(id, icon)
+        .shape(IconButtonShape::Wide)
+        .style(ButtonStyle::Subtle)
+        .size(ButtonSize::Default)
+        .icon_size(IconSize::Small)
+        .icon_color(Color::Muted)
+        .width(rems_from_px(28_f32))
+}
+
+/// Text of a status bar item set in the UI font (names, messages).
+pub fn status_bar_label(text: impl Into<SharedString>) -> Label {
+    Label::new(text)
+        .size(LabelSize::Small)
+        .color(Color::Muted)
+        .single_line()
+}
+
+/// Text of a status bar item as a [`Label`] in micro-label type (code font,
+/// 11px, uppercase, muted): `UTF-8`, `LF`, a vim mode. A label cannot follow
+/// the item's hover; [`status_bar_text`] does.
+pub fn status_bar_value(text: impl Into<SharedString>, cx: &App) -> Label {
+    Label::new(text.into().to_uppercase())
+        .size(LabelSize::Custom(micro_label_size()))
+        .color(Color::Muted)
+        .single_line()
+        .buffer_font(cx)
+}
+
+/// An icon placed next to a label inside a [`status_bar_button`].
+pub fn status_bar_icon(icon: IconName) -> Icon {
+    Icon::new(icon).size(IconSize::Small).color(Color::Muted)
+}
 
 /// Describes how a status-bar item can be hidden by the user.
 ///
@@ -70,12 +211,13 @@ trait StatusItemViewHandle: Send {
     fn hide_setting(&self, cx: &App) -> Option<HideStatusItem>;
 }
 
+/// Where the threads sidebar is, for the corners of a window that draws its
+/// own decorations. The status bar has no button for it: the sidebar is
+/// opened by its own action.
 #[derive(Default)]
 struct SidebarStatus {
     open: bool,
     side: SidebarSide,
-    has_notifications: bool,
-    show_toggle: bool,
 }
 
 impl SidebarStatus {
@@ -89,8 +231,6 @@ impl SidebarStatus {
                 Self {
                     open: mw.sidebar_open() && enabled,
                     side: mw.sidebar_side(cx),
-                    has_notifications: mw.sidebar_has_notifications(cx),
-                    show_toggle: enabled,
                 }
             })
             .unwrap_or_default()
@@ -116,7 +256,7 @@ impl Render for StatusBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = SidebarStatus::query(&self.multi_workspace, cx);
 
-        h_flex()
+        v_flex()
             .id("status-bar")
             .track_focus(&self.focus_handle)
             .key_context("StatusBar")
@@ -148,9 +288,7 @@ impl Render for StatusBar {
                 }),
             )
             .w_full()
-            .justify_between()
-            .gap(DynamicSpacing::Base08.rems(cx))
-            .p(DynamicSpacing::Base04.rems(cx))
+            .flex_none()
             .bg(cx.theme().colors().status_bar_background)
             .map(|el| match window.window_decorations() {
                 Decorations::Server => el,
@@ -181,38 +319,54 @@ impl Render for StatusBar {
                     .border_b(px(1.0))
                     .border_color(cx.theme().colors().status_bar_background),
             })
-            .child(self.render_left_tools(&sidebar, cx))
-            .child(self.render_right_tools(&sidebar, cx))
+            // The top line is a child rather than a border: with client-side
+            // decorations the border colour is already used to hide the corner gap.
+            .child(
+                div()
+                    .w_full()
+                    .h(STATUS_BAR_LINE)
+                    .flex_none()
+                    .bg(cx.theme().colors().border),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .h(status_bar_row_height(window, cx))
+                    .px(STATUS_BAR_SIDE_PADDING)
+                    .overflow_hidden()
+                    .justify_between()
+                    .child(self.render_left_tools(cx))
+                    .child(self.render_right_tools(cx)),
+            )
     }
 }
 
 impl StatusBar {
-    fn render_left_tools(
-        &self,
-        sidebar: &SidebarStatus,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// When the window is too narrow for both sides, the bar gives up its
+    /// middle first: the left side is clipped from its right end until nothing
+    /// is left of it, and only then the right side from its left end, so the
+    /// items next to the window's right edge (the AI chip, the language, the
+    /// cursor position) are the last to go.
+    fn render_left_tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // No gap: the items are adjoining full-height hit targets.
         h_flex()
-            .gap_1()
+            .h_full()
             .min_w_0()
+            // Shrinks long before the right side does.
+            .flex_shrink(LEFT_TOOLS_SHRINK)
             .overflow_x_hidden()
-            .when(
-                sidebar.show_toggle && !sidebar.open && sidebar.side == SidebarSide::Left,
-                |this| this.child(self.render_sidebar_toggle(sidebar, cx)),
-            )
             .children(self.left_items.iter().enumerate().map(|(index, item)| {
                 render_hideable_item("status-bar-left", index, item.as_ref(), cx)
             }))
     }
 
-    fn render_right_tools(
-        &self,
-        sidebar: &SidebarStatus,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_right_tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
-            .flex_shrink_0()
-            .gap_1()
+            .h_full()
+            .min_w_0()
+            .flex_shrink(1.)
+            // What does not fit leaves on the left, towards the middle of the bar.
+            .justify_end()
             .overflow_x_hidden()
             .children(
                 self.right_items
@@ -223,69 +377,6 @@ impl StatusBar {
                         render_hideable_item("status-bar-right", index, item.as_ref(), cx)
                     }),
             )
-            .when(
-                sidebar.show_toggle && !sidebar.open && sidebar.side == SidebarSide::Right,
-                |this| this.child(self.render_sidebar_toggle(sidebar, cx)),
-            )
-    }
-
-    fn render_sidebar_toggle(
-        &self,
-        sidebar: &SidebarStatus,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let on_right = sidebar.side == SidebarSide::Right;
-        let has_notifications = sidebar.has_notifications;
-        let indicator_border = cx.theme().colors().status_bar_background;
-
-        let toggle = sidebar_side_context_menu("sidebar-status-toggle-menu", cx)
-            .anchor(if on_right {
-                Anchor::BottomRight
-            } else {
-                Anchor::BottomLeft
-            })
-            .attach(if on_right {
-                Anchor::TopRight
-            } else {
-                Anchor::TopLeft
-            })
-            .trigger(move |_is_active, _window, _cx| {
-                IconButton::new(
-                    "toggle-workspace-sidebar",
-                    if on_right {
-                        IconName::ThreadsSidebarRightClosed
-                    } else {
-                        IconName::ThreadsSidebarLeftClosed
-                    },
-                )
-                .icon_size(IconSize::Small)
-                .tab_index(0isize)
-                .aria_label("Open threads sidebar")
-                .when(has_notifications, |this| {
-                    this.indicator(Indicator::dot().color(Color::Accent))
-                        .indicator_border_color(Some(indicator_border))
-                })
-                .tooltip(move |_, cx| {
-                    Tooltip::for_action("Open Threads Sidebar", &ToggleWorkspaceSidebar, cx)
-                })
-                .on_click(move |_, window, cx| {
-                    if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
-                        multi_workspace.update(cx, |multi_workspace, cx| {
-                            multi_workspace.toggle_sidebar(window, cx);
-                        });
-                    }
-                })
-            });
-
-        h_flex()
-            .gap_0p5()
-            .when(on_right, |this| {
-                this.child(Divider::vertical().color(ui::DividerColor::Border))
-            })
-            .child(toggle)
-            .when(!on_right, |this| {
-                this.child(Divider::vertical().color(ui::DividerColor::Border))
-            })
     }
 }
 
@@ -502,5 +593,140 @@ impl<T: StatusItemView> StatusItemViewHandle for Entity<T> {
 impl From<&dyn StatusItemViewHandle> for AnyView {
     fn from(val: &dyn StatusItemViewHandle) -> Self {
         val.to_any()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Workspace;
+    use fs::FakeFs;
+    use gpui::{TestAppContext, VisualTestContext, size};
+    use project::Project;
+    use settings::SettingsStore;
+
+    /// A status bar item of a fixed width that can be found in the window.
+    struct FixedItem {
+        selector: &'static str,
+        width: Pixels,
+    }
+
+    impl Render for FixedItem {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let selector = self.selector;
+            div()
+                .debug_selector(move || selector.to_string())
+                .flex_none()
+                .w(self.width)
+                .h_full()
+        }
+    }
+
+    impl StatusItemView for FixedItem {
+        fn set_active_pane_item(
+            &mut self,
+            _: Option<&dyn ItemHandle>,
+            _: &mut Window,
+            _: &mut Context<Self>,
+        ) {
+        }
+
+        fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
+            None
+        }
+    }
+
+    fn init_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            cx.set_global(db::AppDatabase::test_new());
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+    }
+
+    #[track_caller]
+    fn horizontal_extent(selector: &'static str, cx: &mut VisualTestContext) -> (Pixels, Pixels) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("no element with the selector {selector}"));
+        (bounds.left(), bounds.right())
+    }
+
+    #[track_caller]
+    fn assert_near(actual: Pixels, expected: Pixels, what: &str) {
+        assert!(
+            (actual - expected).abs() <= px(1.),
+            "{what}: {actual:?}, expected {expected:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_status_bar_gives_up_its_middle_first(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            let left = cx.new(|_| FixedItem {
+                selector: "STATUS-LEFT",
+                width: px(400.),
+            });
+            let right = cx.new(|_| FixedItem {
+                selector: "STATUS-RIGHT",
+                width: px(200.),
+            });
+            workspace.status_bar().update(cx, |status_bar, cx| {
+                status_bar.add_left_item(left, window, cx);
+                status_bar.add_right_item(right, window, cx);
+            });
+        });
+
+        // Room for both: each side sits against its edge, inside the side padding.
+        cx.simulate_resize(size(px(1000.), px(600.)));
+        cx.run_until_parked();
+        let (left_start, left_end) = horizontal_extent("STATUS-LEFT", cx);
+        let (right_start, right_end) = horizontal_extent("STATUS-RIGHT", cx);
+        assert_near(
+            left_start,
+            STATUS_BAR_SIDE_PADDING,
+            "left item, wide window",
+        );
+        assert_near(left_end, px(402.), "left item's end, wide window");
+        assert_near(right_start, px(798.), "right item, wide window");
+        assert_near(right_end, px(998.), "right item's end, wide window");
+
+        // Too narrow for both: the right side keeps its place and its width,
+        // the left side is what gets cut.
+        cx.simulate_resize(size(px(500.), px(600.)));
+        cx.run_until_parked();
+        let (left_start, _) = horizontal_extent("STATUS-LEFT", cx);
+        let (right_start, right_end) = horizontal_extent("STATUS-RIGHT", cx);
+        assert_near(
+            left_start,
+            STATUS_BAR_SIDE_PADDING,
+            "left item, narrow window",
+        );
+        assert_near(right_start, px(298.), "right item, narrow window");
+        assert_near(right_end, px(498.), "right item's end, narrow window");
+
+        // Too narrow for the right side alone: it stays against the window's
+        // right edge and loses its left end.
+        cx.simulate_resize(size(px(150.), px(600.)));
+        cx.run_until_parked();
+        let (right_start, right_end) = horizontal_extent("STATUS-RIGHT", cx);
+        assert_near(right_end, px(148.), "right item's end, very narrow window");
+        assert_near(right_start, px(-52.), "right item, very narrow window");
+    }
+
+    #[gpui::test]
+    async fn test_status_bar_item_height_follows_the_bar(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            let bar = ui::metrics::status_bar_height(cx);
+            let item = status_bar_item_height_for(cx);
+            assert_eq!(item.0, bar.0 - rems_from_px(1_f32).0);
+        });
     }
 }

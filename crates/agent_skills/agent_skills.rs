@@ -794,20 +794,27 @@ pub fn is_agents_skills_path(path: &Path) -> bool {
     false
 }
 
-/// The `zed://` scheme used by share links.
-const SKILL_SHARE_LINK_SCHEME: &str = "zed";
-/// The host (the part after `zed://`) that identifies a skill share link.
+/// The internal scheme (`ide://`) share links have once the app has received
+/// them: the same neutral identifier as `cli::INTERNAL_URL_SCHEME`. A link a
+/// user copies carries the product's registered scheme instead, see
+/// [`encode_skill_share_link`].
+const SKILL_SHARE_LINK_SCHEME: &str = "ide";
+/// The host (the part after `<scheme>://`) that identifies a skill share link.
 const SKILL_SHARE_LINK_HOST: &str = "skill";
 /// The query parameter that carries the embedded `SKILL.md` payload.
 const SKILL_SHARE_LINK_DATA_PARAM: &str = "data";
 
-/// The `zed://` deep-link prefix for a shared skill. Opening a link with this
-/// prefix prompts the recipient to review and install the embedded skill.
+/// The deep-link prefix for a shared skill, in the internal `ide://` form the
+/// link parser sees after the product's own scheme has been translated.
+/// Opening a link with this prefix prompts the recipient to review and
+/// install the embedded skill.
 pub const SKILL_SHARE_LINK_PREFIX: &str =
     concatcp!(SKILL_SHARE_LINK_SCHEME, "://", SKILL_SHARE_LINK_HOST);
 
-/// Build a shareable `zed://skill?data=…` link that fully embeds the given
-/// `SKILL.md` file contents.
+/// Build a shareable `<branding::URL_SCHEME>://skill?data=…` link that fully
+/// embeds the given `SKILL.md` file contents. The link is meant to be sent to
+/// someone else, so it carries the scheme the product registers with the
+/// system, not the internal one.
 ///
 /// The contents are base64url-encoded (no padding) so the link is
 /// self-contained and URL-safe: the recipient doesn't need the skill to be
@@ -816,19 +823,24 @@ pub fn encode_skill_share_link(skill_file_content: &str) -> String {
     use base64::Engine as _;
     let data =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(skill_file_content.as_bytes());
-    let mut url = Url::parse(SKILL_SHARE_LINK_PREFIX).expect("skill share link prefix is valid");
+    let prefix = format!("{}://{SKILL_SHARE_LINK_HOST}", branding::URL_SCHEME);
+    let mut url = Url::parse(&prefix).expect("skill share link prefix is valid");
     url.query_pairs_mut()
         .append_pair(SKILL_SHARE_LINK_DATA_PARAM, &data);
     url.into()
 }
 
-/// Recover the `SKILL.md` contents embedded in a `zed://skill?data=…` link
-/// produced by [`encode_skill_share_link`].
+/// Recover the `SKILL.md` contents embedded in a `…://skill?data=…` link
+/// produced by [`encode_skill_share_link`]. Both forms are accepted: the
+/// product's own scheme, as the link is shared, and the internal `ide://`
+/// form it has once the app has received it.
 pub fn decode_skill_share_link(link: &str) -> Result<String> {
     use base64::Engine as _;
     let url = Url::parse(link).context("skill share link is not a valid URL")?;
+    let scheme = url.scheme();
     anyhow::ensure!(
-        url.scheme() == SKILL_SHARE_LINK_SCHEME && url.host_str() == Some(SKILL_SHARE_LINK_HOST),
+        (scheme == SKILL_SHARE_LINK_SCHEME || scheme.eq_ignore_ascii_case(branding::URL_SCHEME))
+            && url.host_str() == Some(SKILL_SHARE_LINK_HOST),
         "not a skill share link"
     );
     let data = url
@@ -2184,19 +2196,26 @@ description: A skill with no body content
         let content =
             "---\nname: my-skill\ndescription: Does a thing.\n---\n\n## Steps\n\nDo the thing.\n";
         let link = encode_skill_share_link(content);
+        // A shared link carries the product's registered scheme.
+        let public_prefix = format!("{}://skill?data=", branding::URL_SCHEME);
         let data = link
-            .strip_prefix("zed://skill?data=")
+            .strip_prefix(public_prefix.as_str())
             .expect("link should start with the skill share prefix");
         // base64url (no-pad) output must not require percent-encoding.
         assert!(!data.contains('+') && !data.contains('/') && !data.contains('='));
         assert_eq!(decode_skill_share_link(&link).unwrap(), content);
+        // The internal form, as the link parser sees it, decodes too.
+        let internal = format!("{SKILL_SHARE_LINK_PREFIX}?data={data}");
+        assert_eq!(decode_skill_share_link(&internal).unwrap(), content);
     }
 
     #[test]
     fn decode_skill_share_link_rejects_non_skill_links() {
-        assert!(decode_skill_share_link("zed://settings/agent.skills").is_err());
-        assert!(decode_skill_share_link("zed://skill").is_err());
-        assert!(decode_skill_share_link("zed://skill?other=1").is_err());
-        assert!(decode_skill_share_link("zed://skill?data=!!!notbase64").is_err());
+        assert!(decode_skill_share_link("ide://settings/agent.skills").is_err());
+        assert!(decode_skill_share_link("ide://skill").is_err());
+        assert!(decode_skill_share_link("ide://skill?other=1").is_err());
+        assert!(decode_skill_share_link("ide://skill?data=!!!notbase64").is_err());
+        // A well-formed link under a scheme that is not ours is refused.
+        assert!(decode_skill_share_link("other://skill?data=aGk").is_err());
     }
 }

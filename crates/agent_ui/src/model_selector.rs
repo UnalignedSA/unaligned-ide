@@ -5,7 +5,8 @@ use acp_thread::{
 };
 
 use anyhow::Result;
-use collections::{HashSet, IndexMap};
+use app_actions::agent::OpenSettings;
+use collections::{HashMap, HashSet, IndexMap};
 use futures::FutureExt;
 use fuzzy_nucleo::StringMatchCandidate;
 use gpui::{
@@ -13,18 +14,30 @@ use gpui::{
     TaskExt, WeakEntity,
 };
 use itertools::Itertools;
+use language_model::LanguageModelProviderId;
 use picker::{Picker, PickerDelegate};
 use settings::SettingsStore;
 use ui::{DocumentationAside, IntoElement, prelude::*};
 use util::ResultExt;
-use zed_actions::agent::OpenSettings;
 
+use crate::favorite_models::{
+    MAX_RECENT_MODELS, ensure_recent_model, note_recent_model, recent_model_key, recent_models,
+};
+use crate::language_model_selector::{
+    AGENTS_GROUP, AgentRow, FAVORITES_GROUP, ModelFacts, RECENT_GROUP, connected_providers,
+    maker_group_title, provider_models, set_up_agents, split_by_maker,
+};
 use crate::model_search;
 use crate::ui::{
-    ModelSelectorFooter, ModelSelectorHeader, ModelSelectorListItem, documentation_aside_side,
+    ModelHealth, ModelSelectorFooter, ModelSelectorHeader, ModelSelectorListItem,
+    NOTHING_CONNECTED, PRICE_UNIT, connect_a_model_action, documentation_aside_side,
 };
 
 pub type ModelSelector = Picker<ModelPickerDelegate>;
+
+/// Wide enough for a name, its price and its context size on one line, and
+/// narrower than the chat column (400px by default) it opens in.
+pub(crate) const PICKER_WIDTH_REMS: f32 = 23.5;
 
 pub fn acp_model_selector(
     selector: Rc<dyn AgentModelSelector>,
@@ -35,12 +48,62 @@ pub fn acp_model_selector(
     let delegate = ModelPickerDelegate::new(selector, focus_handle, window, cx);
     Picker::list(delegate, window, cx)
         .show_scrollbar(true)
-        .initial_width(rems(20.))
+        .initial_width(rems(PICKER_WIDTH_REMS))
 }
 
 enum ModelPickerEntry {
+    /// The label of a group, under a rule when it is not the first.
     Separator(SharedString),
+    /// The label of a group that continues the connection above it (its next
+    /// maker): no rule.
+    SubSeparator(SharedString),
     Model(AgentModelInfo, bool),
+    /// An agent with its own subscription: choosing it starts a new chat.
+    Agent(AgentRow),
+}
+
+/// What the picker of the built-in agent knows besides the agent's own model
+/// list: the connections behind the models, what was chosen last, and the
+/// agents that could answer instead. Empty for an external agent, whose list
+/// is shown as the agent gives it.
+#[derive(Default)]
+struct PickerLayout {
+    /// What the provider registry says of each model, by the chat's model id
+    /// (`provider id/model id`).
+    facts: HashMap<AgentModelId, ModelFacts>,
+    /// The connected providers in the order of the connection catalog.
+    connections: Vec<LanguageModelProviderId>,
+    /// The models chosen last, most recent first.
+    recents: Vec<AgentModelId>,
+    agents: Vec<AgentRow>,
+}
+
+impl PickerLayout {
+    fn of_built_in_agent(cx: &mut App) -> Self {
+        let recents = recent_models(cx)
+            .into_iter()
+            .map(|key| AgentModelId::new(key.to_string()))
+            .collect();
+
+        let mut facts = HashMap::default();
+        let mut connections = Vec::new();
+        for (provider, title) in connected_providers(cx) {
+            connections.push(provider.id());
+            for (model, model_facts) in provider_models(&*provider, &title, cx) {
+                facts.insert(
+                    AgentModelId::new(recent_model_key(&model).to_string()),
+                    model_facts,
+                );
+            }
+        }
+
+        Self {
+            facts,
+            connections,
+            recents,
+            agents: set_up_agents(cx),
+        }
+    }
 }
 
 pub struct ModelPickerDelegate {
@@ -51,6 +114,9 @@ pub struct ModelPickerDelegate {
     selected_description: Option<(usize, SharedString)>,
     selected_model: Option<AgentModelInfo>,
     favorites: HashSet<AgentModelId>,
+    layout: PickerLayout,
+    /// Whether the agent has answered with its model list at least once.
+    models_loaded: bool,
     _refresh_models_task: Task<()>,
     _settings_subscription: Subscription,
     focus_handle: FocusHandle,
@@ -84,6 +150,8 @@ impl ModelPickerDelegate {
                         this.update_in(cx, |this, window, cx| {
                             this.delegate.models = models.ok();
                             this.delegate.selected_model = selected_model.ok();
+                            this.delegate.models_loaded = true;
+                            this.delegate.refresh_layout(cx);
                             this.refresh(window, cx)
                         })
                     }
@@ -119,6 +187,8 @@ impl ModelPickerDelegate {
             selected_index: 0,
             selected_description: None,
             favorites,
+            layout: PickerLayout::default(),
+            models_loaded: false,
             _refresh_models_task: refresh_models_task,
             _settings_subscription: settings_subscription,
             focus_handle,
@@ -127,6 +197,45 @@ impl ModelPickerDelegate {
 
     pub fn active_model(&self) -> Option<&AgentModelInfo> {
         self.selected_model.as_ref()
+    }
+
+    /// The title of the connection the current model answers through, when
+    /// the model comes from the provider registry.
+    pub fn active_model_connection(&self) -> Option<SharedString> {
+        let model = self.selected_model.as_ref()?;
+        self.layout.facts.get(&model.id)?.connection.clone()
+    }
+
+    /// Whether this is the picker of the built-in agent, whose models are
+    /// those of the connected providers. An external agent brings its own
+    /// list, shown as it gives it.
+    fn lists_connected_providers(&self) -> bool {
+        self.selector.should_render_footer()
+    }
+
+    /// Reads again what the registry says of the models, and counts the
+    /// chat's current model among the recent ones.
+    fn refresh_layout(&mut self, cx: &mut App) {
+        if !self.lists_connected_providers() {
+            return;
+        }
+        self.layout = PickerLayout::of_built_in_agent(cx);
+        if let Some(selected) = &self.selected_model
+            && self.layout.facts.contains_key(&selected.id)
+            && ensure_recent_model(selected.id.to_string(), cx)
+        {
+            self.layout.recents.insert(0, selected.id.clone());
+            self.layout.recents.truncate(MAX_RECENT_MODELS);
+        }
+    }
+
+    /// Nothing is connected: the built-in agent has no model to offer and no
+    /// other agent is set up.
+    fn nothing_connected(&self) -> bool {
+        self.lists_connected_providers()
+            && self.models_loaded
+            && self.models.as_ref().is_none_or(|models| models.is_empty())
+            && self.layout.agents.is_empty()
     }
 
     pub fn favorites_count(&self) -> usize {
@@ -210,13 +319,33 @@ impl PickerDelegate for ModelPickerDelegate {
 
     fn can_select(&self, ix: usize, _window: &mut Window, _cx: &mut Context<Picker<Self>>) -> bool {
         match self.filtered_entries.get(ix) {
-            Some(ModelPickerEntry::Model(_, _)) => true,
-            Some(ModelPickerEntry::Separator(_)) | None => false,
+            Some(ModelPickerEntry::Model(model, _)) => model.disabled.is_none(),
+            Some(ModelPickerEntry::Agent(_)) => true,
+            Some(ModelPickerEntry::Separator(_) | ModelPickerEntry::SubSeparator(_)) | None => {
+                false
+            }
         }
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
         "Select a model…".into()
+    }
+
+    fn no_matches_text(&self, _window: &mut Window, _cx: &mut App) -> Option<SharedString> {
+        // An empty catalogue is not a failed search: say what is missing.
+        if self.nothing_connected() {
+            Some(NOTHING_CONNECTED.into())
+        } else {
+            Some("No matches".into())
+        }
+    }
+
+    fn no_matches_action(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Picker<Self>>,
+    ) -> Option<picker::PickerEmptyAction> {
+        self.nothing_connected().then(connect_a_model_action)
     }
 
     fn update_matches(
@@ -230,6 +359,7 @@ impl PickerDelegate for ModelPickerDelegate {
         cx.spawn_in(window, async move |this, cx| {
             let filtered_models = match this
                 .read_with(cx, |this, cx| {
+                    let query = query.clone();
                     this.delegate.models.clone().map(move |models| {
                         fuzzy_search(models, query, cx.background_executor().clone())
                     })
@@ -242,8 +372,12 @@ impl PickerDelegate for ModelPickerDelegate {
             };
 
             this.update_in(cx, |this, window, cx| {
-                this.delegate.filtered_entries =
-                    info_list_to_picker_entries(filtered_models, &favorites);
+                this.delegate.filtered_entries = info_list_to_picker_entries(
+                    filtered_models,
+                    &favorites,
+                    &this.delegate.layout,
+                    &query,
+                );
                 // Finds the currently selected model in the list
                 let new_index = this
                     .delegate
@@ -267,18 +401,45 @@ impl PickerDelegate for ModelPickerDelegate {
     }
 
     fn confirm(&mut self, _secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
-        if let Some(ModelPickerEntry::Model(model_info, _)) =
-            self.filtered_entries.get(self.selected_index)
-            && model_info.disabled.is_none()
-        {
-            self.selector
-                .select_model(model_info.id.clone(), cx)
-                .detach_and_log_err(cx);
-            self.selected_model = Some(model_info.clone());
-            let current_index = self.selected_index;
-            self.set_selected_index(current_index, window, cx);
-
+        if self.nothing_connected() {
+            // Nothing to choose from: Enter takes the way out the empty
+            // state offers.
+            window.dispatch_action(Box::new(crate::ManageProviders), cx);
             cx.emit(DismissEvent);
+            return;
+        }
+
+        match self.filtered_entries.get(self.selected_index) {
+            Some(ModelPickerEntry::Model(model_info, _)) if model_info.disabled.is_none() => {
+                let model_info = model_info.clone();
+                self.selector
+                    .select_model(model_info.id.clone(), cx)
+                    .detach_and_log_err(cx);
+                if self.layout.facts.contains_key(&model_info.id)
+                    && note_recent_model(model_info.id.to_string(), cx)
+                {
+                    self.layout
+                        .recents
+                        .retain(|recent| recent != &model_info.id);
+                    self.layout.recents.insert(0, model_info.id.clone());
+                    self.layout.recents.truncate(MAX_RECENT_MODELS);
+                    // The "Recent" group is rebuilt for the next opening.
+                    cx.defer_in(window, |picker, window, cx| picker.refresh(window, cx));
+                }
+                self.selected_model = Some(model_info);
+                let current_index = self.selected_index;
+                self.set_selected_index(current_index, window, cx);
+
+                cx.emit(DismissEvent);
+            }
+            Some(ModelPickerEntry::Agent(agent)) => {
+                window.dispatch_action(
+                    Box::new(crate::NewExternalAgentThread::with_agent(agent.id.clone())),
+                    cx,
+                );
+                cx.emit(DismissEvent);
+            }
+            _ => {}
         }
     }
 
@@ -297,10 +458,57 @@ impl PickerDelegate for ModelPickerDelegate {
     ) -> Option<Self::ListItem> {
         match self.filtered_entries.get(ix)? {
             ModelPickerEntry::Separator(title) => {
-                Some(ModelSelectorHeader::new(title, ix > 1).into_any_element())
+                // The unit of the prices, said once on the first label.
+                let lists_token_prices = ix == 0
+                    && self.filtered_entries.iter().any(|entry| {
+                        matches!(
+                            entry,
+                            ModelPickerEntry::Model(model, _)
+                                if model.cost.as_ref().is_some_and(|cost| cost.contains('$'))
+                        )
+                    });
+                Some(
+                    ModelSelectorHeader::new(title, ix > 0)
+                        .detail(lists_token_prices.then_some(PRICE_UNIT))
+                        .into_any_element(),
+                )
             }
+            ModelPickerEntry::SubSeparator(title) => Some(
+                ModelSelectorHeader::new(title, false)
+                    .sub_group(true)
+                    .into_any_element(),
+            ),
+            ModelPickerEntry::Agent(agent) => Some(
+                ModelSelectorListItem::new(ix, agent.name.clone())
+                    .icon(agent.icon)
+                    .secondary_line("Starts a new chat")
+                    .is_focused(selected)
+                    .into_any_element(),
+            ),
             ModelPickerEntry::Model(model_info, is_favorite) => {
-                let is_selected = Some(model_info) == self.selected_model.as_ref();
+                // By id: a row may have dropped its icon (see
+                // `connection_entries`), so it is not equal to the selection.
+                let is_selected = self
+                    .selected_model
+                    .as_ref()
+                    .is_some_and(|selected| selected.id == model_info.id);
+                let facts = self.layout.facts.get(&model_info.id);
+                let health = facts.map(|facts| facts.health).unwrap_or_default();
+                let context = facts.and_then(|facts| facts.context.clone());
+                // "Recent" and "Favorites" are the user's own choices: a
+                // recommendation belongs under the connection.
+                let in_own_group = self
+                    .filtered_entries
+                    .iter()
+                    .position(|entry| {
+                        matches!(
+                            entry,
+                            ModelPickerEntry::Separator(title)
+                                if title != RECENT_GROUP && title != FAVORITES_GROUP
+                        )
+                    })
+                    .is_none_or(|first_connection| ix < first_connection);
+                let tag = facts.and_then(|facts| facts.tag).filter(|_| !in_own_group);
 
                 let is_favorite = *is_favorite;
                 let handle_action_click = {
@@ -342,6 +550,9 @@ impl PickerDelegate for ModelPickerDelegate {
                                 .is_favorite(is_favorite)
                                 .on_toggle_favorite(handle_action_click)
                                 .cost_info(model_cost)
+                                .health(health)
+                                .tag(tag)
+                                .context_hint(context),
                         )
                         .into_any_element(),
                 )
@@ -381,11 +592,198 @@ impl PickerDelegate for ModelPickerDelegate {
             return None;
         }
 
+        // With nothing connected the empty state already offers the way out.
+        if self.nothing_connected() {
+            return None;
+        }
+
+        if crate::simple_mode() {
+            return Some(ModelSelectorFooter::connections(focus_handle).into_any_element());
+        }
+
         Some(ModelSelectorFooter::new(OpenSettings.boxed_clone(), focus_handle).into_any_element())
     }
 }
 
 fn info_list_to_picker_entries(
+    model_list: AgentModelList,
+    favorites: &HashSet<AgentModelId>,
+    layout: &PickerLayout,
+    query: &str,
+) -> Vec<ModelPickerEntry> {
+    let mut entries = match model_list {
+        AgentModelList::Grouped(groups) if !layout.facts.is_empty() => {
+            connection_entries(groups, favorites, layout, query.is_empty())
+        }
+        model_list => agent_list_entries(model_list, favorites),
+    };
+
+    let query = query.to_lowercase();
+    let mut agents = layout
+        .agents
+        .iter()
+        .filter(|agent| query.is_empty() || agent.name.to_lowercase().contains(&query))
+        .peekable();
+    if agents.peek().is_some() {
+        entries.push(ModelPickerEntry::Separator(AGENTS_GROUP.into()));
+        entries.extend(agents.cloned().map(ModelPickerEntry::Agent));
+    }
+
+    entries
+}
+
+/// The list of the built-in agent: what was chosen last, the favourites, then
+/// one group per connection in catalog order. Providers are told apart by id
+/// (through `layout.facts`), never by the name of the agent's groups.
+///
+/// While `is_browsing` (no query) the models of Unaligned are split by maker
+/// and the ones that are down go last; the matches of a query keep the order
+/// of their score and get no "Recent" group.
+fn connection_entries(
+    groups: IndexMap<acp_thread::AgentModelGroupName, Vec<AgentModelInfo>>,
+    favorites: &HashSet<AgentModelId>,
+    layout: &PickerLayout,
+    is_browsing: bool,
+) -> Vec<ModelPickerEntry> {
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    enum Connection {
+        Provider(LanguageModelProviderId),
+        /// A group of the agent that no connected provider accounts for.
+        Named(SharedString),
+    }
+
+    // The agent lists a model once under its provider and may repeat it in a
+    // cross-provider group before ("Recommended"): the last occurrence is the
+    // one under its provider, so that one decides the model's place.
+    let mut seen = HashSet::default();
+    let mut models = Vec::new();
+    for (group_name, group) in groups.into_iter().rev() {
+        for model in group.into_iter().rev() {
+            if seen.insert(model.id.clone()) {
+                models.push((group_name.0.clone(), model));
+            }
+        }
+    }
+    models.reverse();
+
+    let mut entries = Vec::new();
+    // Under a connection's label a row needs no icon. In the groups that mix
+    // connections it says who answers, when there is more than one.
+    let mixes_connections = layout.connections.len() > 1;
+    let entry = |model: &AgentModelInfo, shows_icon: bool| {
+        let mut model = model.clone();
+        if !shows_icon {
+            model.icon = None;
+        }
+        let is_favorite = favorites.contains(&model.id);
+        ModelPickerEntry::Model(model, is_favorite)
+    };
+    let mixed_entry = |model: &AgentModelInfo| entry(model, mixes_connections);
+    let model_entry = |model: &AgentModelInfo| entry(model, false);
+
+    if is_browsing {
+        let recents = layout
+            .recents
+            .iter()
+            .filter_map(|recent| models.iter().find(|(_, model)| &model.id == recent))
+            .take(MAX_RECENT_MODELS)
+            .map(|(_, model)| mixed_entry(model))
+            .collect::<Vec<_>>();
+        if !recents.is_empty() {
+            entries.push(ModelPickerEntry::Separator(RECENT_GROUP.into()));
+            entries.extend(recents);
+        }
+    }
+
+    let favorite_models = models
+        .iter()
+        .filter(|(_, model)| favorites.contains(&model.id))
+        .map(|(_, model)| mixed_entry(model))
+        .collect::<Vec<_>>();
+    if !favorite_models.is_empty() {
+        entries.push(ModelPickerEntry::Separator(FAVORITES_GROUP.into()));
+        entries.extend(favorite_models);
+    }
+
+    let mut by_connection: IndexMap<Connection, (SharedString, Vec<AgentModelInfo>)> =
+        IndexMap::default();
+    for (group_name, model) in models {
+        let facts = layout.facts.get(&model.id);
+        let (connection, title) = match facts.and_then(|facts| facts.provider_id.clone()) {
+            Some(provider_id) => {
+                let title = facts
+                    .and_then(|facts| facts.connection.clone())
+                    .unwrap_or_else(|| group_name.clone());
+                (Connection::Provider(provider_id), title)
+            }
+            None => (Connection::Named(group_name.clone()), group_name),
+        };
+        by_connection
+            .entry(connection)
+            .or_insert_with(|| (title, Vec::new()))
+            .1
+            .push(model);
+    }
+    by_connection.sort_by_cached_key(|connection, _| match connection {
+        Connection::Provider(id) => layout
+            .connections
+            .iter()
+            .position(|connected| connected == id)
+            .unwrap_or(usize::MAX),
+        Connection::Named(_) => usize::MAX,
+    });
+
+    for (connection, (title, models)) in by_connection {
+        if !is_browsing {
+            entries.push(ModelPickerEntry::Separator(title));
+            entries.extend(models.iter().map(&model_entry));
+            continue;
+        }
+
+        let is_unaligned = matches!(
+            &connection,
+            Connection::Provider(id) if id.0.as_ref() == crate::UNALIGNED_PROVIDER_ID
+        );
+        let by_maker = split_by_maker(
+            models,
+            |model| {
+                layout
+                    .facts
+                    .get(&model.id)
+                    .and_then(|facts| facts.org.clone())
+            },
+            |model| {
+                layout
+                    .facts
+                    .get(&model.id)
+                    .is_some_and(|facts| facts.health == ModelHealth::Down)
+            },
+        );
+        let names_makers = is_unaligned && by_maker.iter().any(|(maker, _)| maker.is_some());
+        if !names_makers {
+            entries.push(ModelPickerEntry::Separator(title));
+            for model in by_maker.iter().flat_map(|(_, models)| models) {
+                entries.push(model_entry(model));
+            }
+            continue;
+        }
+        for (index, (maker, models)) in by_maker.iter().enumerate() {
+            let title = maker_group_title(&title, maker.as_ref());
+            entries.push(if index == 0 {
+                ModelPickerEntry::Separator(title)
+            } else {
+                ModelPickerEntry::SubSeparator(title)
+            });
+            entries.extend(models.iter().map(&model_entry));
+        }
+    }
+
+    entries
+}
+
+/// The list of an agent that brings its own models (or of a test): shown in
+/// the agent's order and under the agent's group names.
+fn agent_list_entries(
     model_list: AgentModelList,
     favorites: &HashSet<AgentModelId>,
 ) -> Vec<ModelPickerEntry> {
@@ -404,7 +802,7 @@ fn info_list_to_picker_entries(
 
     let has_favorites = !favorite_models.is_empty();
     if has_favorites {
-        entries.push(ModelPickerEntry::Separator("Favorite".into()));
+        entries.push(ModelPickerEntry::Separator(FAVORITES_GROUP.into()));
         for model in favorite_models {
             entries.push(ModelPickerEntry::Model((*model).clone(), true));
         }
@@ -420,7 +818,14 @@ fn info_list_to_picker_entries(
                 entries.push(ModelPickerEntry::Model(model, is_favorite));
             }
         }
-        AgentModelList::Grouped(index_map) => {
+        AgentModelList::Grouped(mut index_map) => {
+            // The cross-provider "Recommended" group of the built-in agent
+            // would repeat models that already sit under their provider, so
+            // it is left out. (This is the name of a group, not of a
+            // provider: providers are matched by id in `connection_entries`.)
+            if crate::simple_mode() {
+                index_map.shift_remove(&acp_thread::AgentModelGroupName("Recommended".into()));
+            }
             for (group_name, models) in index_map {
                 entries.push(ModelPickerEntry::Separator(group_name.0));
                 for model in models {
@@ -654,7 +1059,8 @@ mod tests {
             .iter()
             .map(|entry| match entry {
                 ModelPickerEntry::Model(info, _) => info.id.as_ref(),
-                ModelPickerEntry::Separator(s) => &s,
+                ModelPickerEntry::Separator(s) | ModelPickerEntry::SubSeparator(s) => s.as_ref(),
+                ModelPickerEntry::Agent(agent) => agent.name.as_ref(),
             })
             .collect()
     }
@@ -737,6 +1143,165 @@ mod tests {
         assert_eq!(results, ["High"]);
     }
 
+    fn facts(
+        provider: &str,
+        connection: &str,
+        org: Option<&str>,
+        health: ModelHealth,
+    ) -> ModelFacts {
+        ModelFacts {
+            provider_id: Some(LanguageModelProviderId::from(provider.to_string())),
+            connection: Some(connection.to_string().into()),
+            org: org.map(|org| org.to_string().into()),
+            health,
+            context: None,
+            tag: None,
+        }
+    }
+
+    /// The layout of a built-in agent with Unaligned and an OpenAI key
+    /// connected and Claude Code set up.
+    fn built_in_agent_layout() -> PickerLayout {
+        let unaligned = crate::UNALIGNED_PROVIDER_ID;
+        PickerLayout {
+            facts: HashMap::from_iter([
+                (
+                    AgentModelId::new("unaligned/gpt"),
+                    facts(unaligned, "Unaligned", Some("OpenAI"), ModelHealth::Up),
+                ),
+                (
+                    AgentModelId::new("unaligned/haiku"),
+                    facts(unaligned, "Unaligned", Some("Anthropic"), ModelHealth::Down),
+                ),
+                (
+                    AgentModelId::new("unaligned/sonnet"),
+                    facts(unaligned, "Unaligned", Some("Anthropic"), ModelHealth::Up),
+                ),
+                (
+                    AgentModelId::new("openai/gpt"),
+                    facts("openai", "OpenAI", None, ModelHealth::Up),
+                ),
+            ]),
+            connections: vec![
+                LanguageModelProviderId::from(unaligned.to_string()),
+                LanguageModelProviderId::from("openai".to_string()),
+            ],
+            recents: vec![
+                AgentModelId::new("unaligned/sonnet"),
+                AgentModelId::new("gone/model"),
+            ],
+            agents: vec![AgentRow {
+                id: project::AgentId::new("claude-acp"),
+                name: "Claude Code".into(),
+                icon: IconName::AiClaude,
+            }],
+        }
+    }
+
+    #[gpui::test]
+    fn test_model_selector_built_in_agent_order(_cx: &mut TestAppContext) {
+        // The agent lists the OpenAI key before Unaligned, repeats a model in
+        // "Recommended" and names its groups after the providers' display
+        // names: none of that decides the order.
+        let models = create_model_list(vec![
+            ("Recommended", vec!["unaligned/sonnet"]),
+            ("OpenAI API", vec!["openai/gpt"]),
+            (
+                "Some Display Name",
+                vec!["unaligned/gpt", "unaligned/haiku", "unaligned/sonnet"],
+            ),
+        ]);
+
+        let entries = info_list_to_picker_entries(
+            models,
+            &create_favorites(vec!["openai/gpt"]),
+            &built_in_agent_layout(),
+            "",
+        );
+
+        assert_eq!(
+            get_entry_labels(&entries),
+            vec![
+                "Recent",
+                "unaligned/sonnet",
+                "Favorites",
+                "openai/gpt",
+                "Unaligned · Anthropic",
+                "unaligned/sonnet",
+                "unaligned/haiku",
+                "Unaligned · OpenAI",
+                "unaligned/gpt",
+                "OpenAI",
+                "openai/gpt",
+                "Agents with their own subscription",
+                "Claude Code",
+            ]
+        );
+        // Only the first maker of a connection sits under a rule.
+        assert!(matches!(&entries[4], ModelPickerEntry::Separator(_)));
+        assert!(matches!(&entries[7], ModelPickerEntry::SubSeparator(_)));
+        assert!(matches!(&entries[9], ModelPickerEntry::Separator(_)));
+    }
+
+    #[gpui::test]
+    fn test_model_selector_built_in_agent_query(_cx: &mut TestAppContext) {
+        // What a search for "son" leaves of the list above.
+        let models = create_model_list(vec![
+            ("Recommended", vec!["unaligned/sonnet"]),
+            (
+                "Some Display Name",
+                vec!["unaligned/sonnet", "unaligned/haiku"],
+            ),
+        ]);
+
+        let entries = info_list_to_picker_entries(
+            models,
+            &create_favorites(vec![]),
+            &built_in_agent_layout(),
+            "son",
+        );
+
+        // No "Recent" group, no split by maker, no agent whose name does not
+        // match; the score order of the matches is kept.
+        assert_eq!(
+            get_entry_labels(&entries),
+            vec!["Unaligned", "unaligned/sonnet", "unaligned/haiku"]
+        );
+
+        let entries = info_list_to_picker_entries(
+            AgentModelList::Grouped(IndexMap::default()),
+            &create_favorites(vec![]),
+            &built_in_agent_layout(),
+            "claude",
+        );
+        assert_eq!(
+            get_entry_labels(&entries),
+            vec!["Agents with their own subscription", "Claude Code"]
+        );
+    }
+
+    #[gpui::test]
+    fn test_model_selector_external_agent_list_is_kept(_cx: &mut TestAppContext) {
+        // An agent that brings its own models: its groups, its order, even
+        // when one of its groups is called like a provider.
+        let models = create_model_list(vec![
+            ("Fast", vec!["flash"]),
+            ("Unaligned", vec!["opus", "sonnet"]),
+        ]);
+
+        let entries = info_list_to_picker_entries(
+            models,
+            &create_favorites(vec![]),
+            &PickerLayout::default(),
+            "",
+        );
+
+        assert_eq!(
+            get_entry_labels(&entries),
+            vec!["Fast", "flash", "Unaligned", "opus", "sonnet"]
+        );
+    }
+
     #[gpui::test]
     fn test_favorites_section_appears_when_favorites_exist(_cx: &mut TestAppContext) {
         let models = create_model_list(vec![
@@ -745,11 +1310,11 @@ mod tests {
         ]);
         let favorites = create_favorites(vec!["zed/gemini"]);
 
-        let entries = info_list_to_picker_entries(models, &favorites);
+        let entries = info_list_to_picker_entries(models, &favorites, &PickerLayout::default(), "");
 
         assert!(matches!(
             entries.first(),
-            Some(ModelPickerEntry::Separator(s)) if s == "Favorite"
+            Some(ModelPickerEntry::Separator(s)) if s == FAVORITES_GROUP
         ));
 
         let model_ids = get_entry_model_ids(&entries);
@@ -761,7 +1326,7 @@ mod tests {
         let models = create_model_list(vec![("zed", vec!["zed/claude", "zed/gemini"])]);
         let favorites = create_favorites(vec![]);
 
-        let entries = info_list_to_picker_entries(models, &favorites);
+        let entries = info_list_to_picker_entries(models, &favorites, &PickerLayout::default(), "");
 
         assert!(matches!(
             entries.first(),
@@ -777,7 +1342,7 @@ mod tests {
         ]);
         let favorites = create_favorites(vec!["zed/claude"]);
 
-        let entries = info_list_to_picker_entries(models, &favorites);
+        let entries = info_list_to_picker_entries(models, &favorites, &PickerLayout::default(), "");
 
         for entry in &entries {
             if let ModelPickerEntry::Model(info, is_favorite) = entry {
@@ -798,7 +1363,7 @@ mod tests {
         ]);
         let favorites = create_favorites(vec!["zed/gemini", "openai/gpt-5"]);
 
-        let entries = info_list_to_picker_entries(models, &favorites);
+        let entries = info_list_to_picker_entries(models, &favorites, &PickerLayout::default(), "");
         let model_ids = get_entry_model_ids(&entries);
 
         assert_eq!(model_ids[0], "zed/gemini");
@@ -819,17 +1384,15 @@ mod tests {
 
         let favorites = create_favorites(vec!["zed/claude"]);
 
-        let entries = info_list_to_picker_entries(models, &favorites);
+        let entries = info_list_to_picker_entries(models, &favorites, &PickerLayout::default(), "");
         let labels = get_entry_labels(&entries);
 
         assert_eq!(
             labels,
             vec![
-                "Favorite",
+                "Favorites",
                 "zed/claude",
-                "Recommended",
-                "zed/claude",
-                "anthropic/claude",
+                // The cross-provider "Recommended" group is not listed.
                 "Zed",
                 "zed/claude",
                 "zed/gpt-5",
@@ -865,11 +1428,11 @@ mod tests {
         ]);
         let favorites = create_favorites(vec!["zed/gemini"]);
 
-        let entries = info_list_to_picker_entries(models, &favorites);
+        let entries = info_list_to_picker_entries(models, &favorites, &PickerLayout::default(), "");
 
         assert!(matches!(
             entries.first(),
-            Some(ModelPickerEntry::Separator(s)) if s == "Favorite"
+            Some(ModelPickerEntry::Separator(s)) if s == FAVORITES_GROUP
         ));
 
         assert!(entries.iter().any(|e| matches!(
@@ -917,7 +1480,7 @@ mod tests {
         ]);
         let favorites = create_favorites(vec!["favorite-model"]);
 
-        let entries = info_list_to_picker_entries(models, &favorites);
+        let entries = info_list_to_picker_entries(models, &favorites, &PickerLayout::default(), "");
 
         for entry in &entries {
             if let ModelPickerEntry::Model(info, is_favorite) = entry {

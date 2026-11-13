@@ -31,7 +31,6 @@ pub(crate) fn render_edit_prediction_setup_page(
 ) -> AnyElement {
     let providers = [
         Some(render_provider_dropdown(window, cx)),
-        Some(render_zed_provider(settings_window, window, cx).into_any_element()),
         render_github_copilot_provider(settings_window, window, cx)
             .map(IntoElement::into_any_element),
         Some(
@@ -129,12 +128,29 @@ fn render_provider_dropdown(window: &mut Window, cx: &mut App) -> AnyElement {
     let current_provider = AllLanguageSettings::get_global(cx)
         .edit_predictions
         .provider;
-    let current_provider_name = current_provider.display_name().unwrap_or("No provider set");
+    // Upstream's hosted source needs an account this product does not have: a
+    // stored `zed` suggests nothing, so the value reads "Off".
+    let current_provider_name = match current_provider {
+        settings::EditPredictionProvider::Zed => "Off",
+        provider => provider.display_name().unwrap_or("Off"),
+    };
 
     let menu = ContextMenu::build(window, cx, move |mut menu, _, cx| {
         let available_providers = get_available_providers(cx);
         let fs = <dyn fs::Fs>::global(cx);
 
+        menu = menu.toggleable_entry(
+            "Off",
+            current_provider == settings::EditPredictionProvider::None,
+            IconPosition::Start,
+            None,
+            {
+                let fs = fs.clone();
+                move |_, cx| {
+                    set_completion_provider(fs.clone(), cx, settings::EditPredictionProvider::None);
+                }
+            },
+        );
         for provider in available_providers {
             let Some(name) = provider.display_name() else {
                 continue;
@@ -155,7 +171,7 @@ fn render_provider_dropdown(window: &mut Window, cx: &mut App) -> AnyElement {
         .id("provider-selector")
         .min_w_0()
         .gap_1p5()
-        .child(SettingsSectionHeader::new("Active Provider").no_padding(true))
+        .child(SettingsSectionHeader::new("Source").no_padding(true))
         .child(
             h_flex()
                 .pt_2p5()
@@ -167,9 +183,9 @@ fn render_provider_dropdown(window: &mut Window, cx: &mut App) -> AnyElement {
                         .w_full()
                         .min_w_0()
                         .max_w_1_2()
-                        .child(Label::new("Provider"))
+                        .child(Label::new("Tab Completion"))
                         .child(
-                            Label::new("Select which provider to use for edit predictions.")
+                            Label::new("Tab completion is separate from chat: an Unaligned key does not give it yet. Choose what suggests code as you type.")
                                 .size(LabelSize::Small)
                                 .color(Color::Muted),
                         ),
@@ -200,7 +216,7 @@ fn render_api_key_provider(
     cx: &mut Context<SettingsWindow>,
 ) -> impl IntoElement {
     let weak_page = cx.weak_entity();
-    let credentials_provider = zed_credentials_provider::global(cx);
+    let credentials_provider = app_credentials_provider::global(cx);
     _ = window.use_keyed_state(current_url(cx), cx, |_, cx| {
         let task = api_key_state.update(cx, |key_state, cx| {
             key_state.load_if_needed(
@@ -229,7 +245,7 @@ fn render_api_key_provider(
     });
 
     let write_key = move |api_key: Option<String>, cx: &mut App| {
-        let credentials_provider = zed_credentials_provider::global(cx);
+        let credentials_provider = app_credentials_provider::global(cx);
         api_key_state
             .update(cx, |key_state, cx| {
                 let url = current_url(cx);
@@ -321,7 +337,7 @@ fn render_api_key_provider(
                         .when_some(env_var_name, |this, env_var_name| {
                             this.child({
                                 let label = format!(
-                                    "Or set the {} env var and restart Zed.",
+                                    "Or set the {} environment variable and restart the IDE.",
                                     env_var_name.as_ref()
                                 );
                                 Label::new(label).size(LabelSize::Small).color(Color::Muted)
@@ -874,63 +890,6 @@ fn mercury_settings() -> Box<[SettingsPageItem]> {
         metadata: None,
         files: USER,
     })])
-}
-
-fn zed_settings() -> Box<[SettingsPageItem]> {
-    Box::new([SettingsPageItem::SettingItem(SettingItem {
-        title: "Prediction Debounce",
-        description: "Delay in milliseconds before automatically requesting a prediction after typing stops. Set to 0 to request predictions immediately.",
-        field: Box::new(SettingField {
-            organization_override: None,
-            pick: |settings| {
-                settings
-                    .project
-                    .all_languages
-                    .edit_predictions
-                    .as_ref()?
-                    .zed
-                    .as_ref()?
-                    .prediction_debounce
-                    .as_ref()
-            },
-            write: |settings, value, _app: &App| {
-                settings
-                    .project
-                    .all_languages
-                    .edit_predictions
-                    .get_or_insert_default()
-                    .zed
-                    .get_or_insert_default()
-                    .prediction_debounce = value;
-            },
-            json_path: Some("edit_predictions.zed.prediction_debounce"),
-        }),
-        metadata: None,
-        files: USER,
-    })])
-}
-
-fn render_zed_provider(
-    settings_window: &SettingsWindow,
-    window: &mut Window,
-    cx: &mut Context<SettingsWindow>,
-) -> impl IntoElement {
-    let zed_settings = zed_settings();
-    let additional_fields = settings_window
-        .render_sub_page_items_section(zed_settings.iter().enumerate(), true, window, cx)
-        .into_any_element();
-
-    v_flex()
-        .id("zed")
-        .min_w_0()
-        .pt_8()
-        .gap_1p5()
-        .child(
-            SettingsSectionHeader::new("Zed Predictions")
-                .icon(IconName::ZedPredict)
-                .no_padding(true),
-        )
-        .child(div().px_neg_8().child(additional_fields))
 }
 
 fn copilot_settings() -> Box<[SettingsPageItem]> {

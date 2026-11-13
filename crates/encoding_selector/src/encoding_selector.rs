@@ -322,7 +322,7 @@ impl PickerDelegate for EncodingSelectorDelegate {
         Some(
             ListItem::new(ix)
                 .inset(true)
-                .spacing(ListItemSpacing::Sparse)
+                .spacing(ListItemSpacing::Dense)
                 .toggle_state(selected)
                 .child(HighlightedLabel::new(label, mat.positions.clone())),
         )

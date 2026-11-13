@@ -1,83 +1,74 @@
-# Contributing to Zed
+# Contributing to Unaligned IDE
 
-Thank you for helping us make Zed better!
+Unaligned IDE is a code editor made for coding with AI. It is a fork of the Zed editor: most of the code under `crates/` comes from that project, and the fork keeps its licences and its credit (see [`NOTICE`](NOTICE)).
 
-## Before you start
+The project is in pre-release. Changes are welcome; read this page first.
 
-- **Keep no more than three PRs open at a time.**
-  This limit helps us keep up with reviews and ensures all contributors get a fair share of our reviewing capacity.
-  Start with one and see it through; we're lucky to get a lot of contributions, and the pattern we've seen is that landing your first PR dramatically improves the odds for every PR after it.
-  A stack of open PRs on the other hand tends to go stale as `main` changes.
-- **Discuss features with us before you start writing code for them**.
-  If there isn't a GitHub issue with staff confirmation that we want it, start a [GitHub discussion](https://github.com/zed-industries/zed/discussions), not a PR or a new issue.
-  This especially applies to changes to the Zed Extension API.
-  - Before proposing a larger feature, read the [Zed Feature Process](./docs/src/development/feature-process.md) for the context, integration points, and design decisions to cover.
+## Build it
 
-All activity in Zed forums is subject to our [Code of Conduct](https://zed.dev/code-of-conduct).
+[`README.md`](README.md), section "Build from source", has the commands for Linux, Windows and macOS. The Rust toolchain is pinned in `rust-toolchain.toml`.
 
-### Things we will (probably) not merge
+Start a development build with `--user-data-dir <directory>`, so that its settings, data and logs stay in that directory.
 
-There are few hard-and-fast rules, but we typically don't merge:
+## Where the documentation is
 
-- **Changes that can be provided by an extension**, such as new languages or themes. See the [extension development docs](https://zed.dev/docs/extensions/developing-extensions).
-- **Extension API changes without prior discussion** involving Zed staff.
-- **New file icons.** Our default icons are hand-designed to fit together; please don't submit off-the-shelf SVGs.
-- **Features whose complexity outweighs their benefit**, in our judgement, for the number of people who would use them.
-- **Giant refactorings.**
-- **Non-trivial changes without tests.**
-- **Style-only code changes that don't alter app logic.** Reducing allocations, removing `.unwrap()`s, and fixing typos are welcome; making code "more readable" alone may not be.
-- **LLM-generated work the author doesn't understand.**
+Everything written for contributors is in [`docs/unaligned/`](docs/unaligned/):
 
-### We love PRs that...
+- [`CHARTER.md`](docs/unaligned/CHARTER.md): what the product is, its design language, the state of the fork and its rules. Read it before a first change.
+- [`PLATFORM-CHECKS.md`](docs/unaligned/PLATFORM-CHECKS.md): type-checking for Linux and Windows from another system.
+- [`SCREENSHOTS.md`](docs/unaligned/SCREENSHOTS.md): taking pictures of the application from the command line (macOS).
+- [`NETWORK.md`](docs/unaligned/NETWORK.md): which hosts the application contacts, and how that is measured.
+- [`PACKAGING.md`](docs/unaligned/PACKAGING.md): what can be packaged and how.
 
-- **Fix or extend the docs**: browse [docs issues](https://github.com/zed-industries/zed/issues?q=is%3Aissue%20state%3Aopen%20type%3ADocs).
-- **Close issues curated for the community:** [good first issues](https://github.com/zed-industries/zed/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22.contrib%2Fgood%20first%20issue%22), [good non-first issues](https://github.com/zed-industries/zed/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22.contrib%2Fgood%20non-first%20issue%22).
-- **Fix bugs**: start with [triaged bugs with confirmed reproduction steps](https://github.com/zed-industries/zed/issues?q=is%3Aissue%20state%3Aopen%20type%3ABug%20label%3Astate%3Areproducible), or browse [area labels](https://github.com/zed-industries/zed/labels?q=area%3A*) for parts of Zed you care about.
-  Select a label, then add `type:Bug` to the search.
-- **Make existing features work for more people** through small enhancements, such as support for more platforms or modes.
-- **Add small features**, like keybindings or actions you miss from other editors.
-- **Join a Community Program** like [Let's Git Together](https://github.com/zed-industries/zed/issues/41541) or [The Guild](https://zed.dev/community/guild).
-- **Build features we've explicitly invited contributions for**, listed on the [community feature board](https://github.com/orgs/zed-industries/projects/78/views/4).
+The rules for Rust and GPUI code are in [`.rules`](.rules) (`AGENTS.md` and `CLAUDE.md` are links to the same file).
 
-## AI Policy
+The product's name, identifiers and addresses live in one file, `crates/branding/brand.env`. Use `branding::PRODUCT_NAME` and its siblings in code, never a literal name.
 
-We welcome the use of LLMs for coding, but we hold a high bar for all contributions, and **we expect a human in the loop who genuinely understands the work an LLM produces** on their behalf.
+## Names
 
-For that reason, we **don't accept contributions from autonomous agents**. Pull requests that appear to violate this may be closed without notice.
+The application is the cargo package `ide` (`crates/ide`) and its binary is `unaligned-ide`. Actions are in the `app::` namespace, environment variables start with `IDE_`, a project's own settings folder is `.unaligned/`, and the app's internal links are `ide://`. These names replaced upstream's on 2026-11-13, through `script/unaligned/rename-upstream-names`; its header lists what it renames and what it leaves alone on purpose (licence texts, the extension API, Rust identifiers inside the crates).
 
-**Don't rely on LLMs to write the whole thing for you when communicating with the maintainers** (meaning replies to comments, PR descriptions, and alike). The readers are humans, and we'd like to hear from you, not from a model (we have models at home).
+- Do not give a new file, crate, action, variable or settings key upstream's name. `script/unaligned/check-branding` reports such a name in the text it scans; its header says what that is.
+- To merge upstream: check its commit out on a temporary branch, run `script/unaligned/rename-upstream-names` there, commit, and merge that branch. Then `cargo check` regenerates `Cargo.lock`.
 
-If you're a non-native English speaker using an LLM to thoroughly edit or translate your messages to the maintainers, we'd encourage you to **put the machine translation in a quote block and include the original text in your native language after it**.
+## Checks to run before sending a change
 
-If you think it's helpful/necessary to **share context from a chat with an LLM**, please put the **relevant part of it** in a quote block (e.g., using `>`), **disclose it as AI-generated**, and add your own commentary explaining **why it's relevant and what you take from it**.
+From the root of the repository:
 
-This policy was adapted from [ripgrep's AI policy](https://github.com/BurntSushi/ripgrep/blob/f0cec341ab95c25c691ad3d5754d4bd9eedde21f/AI_POLICY.md).
+| Command | What it checks | Needs |
+| --- | --- | --- |
+| `cargo fmt --all -- --check` | formatting | the pinned toolchain |
+| `./script/clippy` | lints, with warnings as errors | the pinned toolchain |
+| `cargo test -p <crate>` | the tests of the crates you changed | the pinned toolchain |
+| `script/unaligned/check-branding` | no text a user can read or reach presents the product as its upstream | Python 3 |
+| `script/unaligned/check-themes` | the bundled themes: required tokens, colours, contrast | Python 3 |
+| `script/unaligned/check-linux` | the application type-checks for Linux | Docker |
+| `script/unaligned/check-windows` | the application type-checks for Windows | Docker |
+| `./script/check-keymaps` and `./script/check-todos` | keymap files and unfinished-code markers | git |
 
-## Sending changes
+Each of the `script/unaligned/check-*` commands ends with a `PASS` or `FAIL` line. `check-linux` and `check-windows` accept `-p <crate>` to check less than the whole application; run them after any change to platform-specific code or to a crate's dependencies.
 
-**Build and run Zed locally, then manually test your changes before opening a PR.** Follow the guide for [macOS](./docs/src/development/macos.md), [Linux](./docs/src/development/linux.md), [Windows](./docs/src/development/windows.md), or [FreeBSD](./docs/src/development/freebsd.md).
+The workflow in [`.github/workflows/check.yml`](.github/workflows/check.yml) is set up to run on pull requests that come from forks; [`.github/workflows/README.md`](.github/workflows/README.md) says what it runs and what a green run does and does not prove.
 
-When preparing your PR:
+## What makes a change easy to accept
 
-- **Review your own work**, including any AI-assisted code. Follow the [pull request template](./.github/pull_request_template.md?plain=1) for testing details and the self-review checklist.
-- **For visual changes, attach screenshots or a video** and work through the [UI/UX checklist](./docs/src/development/ui-checklist.md). For non-visual improvements and changes, include benchmarks or other artifacts produced when testing.
-- **Keep each PR about one thing**, leaving unrelated features and refactoring for another PR.
-- **Sign the [Contributor License Agreement](https://zed.dev/cla)** so that your contribution can be merged.
+- One subject per change.
+- Tests for behaviour that can be tested.
+- For a visible change, a screenshot. On macOS, `script/unaligned/shot` takes one from the command line (see `SCREENSHOTS.md`).
+- Say what you ran and what you could not run. Linux and Windows are the release targets: say so if you could only try your change on another system.
+- No secrets in the repository: no API keys in files, logs or screenshots.
+- You must understand and be able to explain what you send, whatever tool wrote it.
 
-**Opening a PR does not guarantee a merge.** We may decline a change that doesn't fit Zed's direction or quality standards, even after you've put work into it. Confirming interest early and following this guide give your PR the best chance.
+## Licence of contributions
 
-**Pinging maintainers by username or emailing them does not raise your PR's priority**; it takes time away from review.
+Unaligned IDE is licensed under the GNU General Public License, version 3 or later ([`LICENSE-GPL`](LICENSE-GPL)). GPUI and some support crates are under the Apache License 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE)). The `license` field of a crate's `Cargo.toml` says which one covers it.
 
-## Resources
+A contribution is accepted under the licence of the crate it changes: GPL-3.0-or-later, or Apache-2.0 for the crates that say so. Only send code you have the right to contribute under that licence.
 
-### UI/UX checklist
+Do not remove or edit licence files, `NOTICE` or copyright lines. A new crate declares its licence in `Cargo.toml` and carries a `LICENSE-GPL` or `LICENSE-APACHE` link like the others (`script/check-licenses` verifies this).
 
-For UI changes, use the [UI/UX checklist](./docs/src/development/ui-checklist.md) in the development docs.
+## Bugs and questions
 
-### Bird's-eye view of Zed
+Bugs and questions go to the issue tracker of the source repository.
 
-For a tour of the main crates, see the [codebase overview](https://zed.dev/docs/development#birds-eye-view-of-zed) in the development docs.
-
-### Packaging Zed
-
-Check our [notes for packaging Zed](https://zed.dev/docs/development/linux#notes-for-packaging-zed).
+Conduct in the project's spaces is covered by [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).

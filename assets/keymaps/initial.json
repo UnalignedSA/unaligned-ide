@@ -1,9 +1,8 @@
-// Zed keymap
+// Your key bindings
 //
-// For information on binding keys, see the Zed
-// documentation: https://zed.dev/docs/key-bindings
+// The keymap editor (`App: Open Keymap` in the command palette) edits this file for you.
 //
-// To see the default key bindings run `zed: open default keymap`
+// To see the default key bindings run `App: Open Default Keymap`
 // from the command palette.
 [
   {

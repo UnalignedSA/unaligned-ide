@@ -587,7 +587,7 @@ impl EditPredictionSettings {
         match delegate_name {
             "copilot" => Duration::from_millis(self.copilot.prediction_debounce.0),
             "codestral" => Duration::from_millis(self.codestral.prediction_debounce.0),
-            "zed-predict" => self.debounce_for(self.provider),
+            "ide-predict" => self.debounce_for(self.provider),
             _ => Duration::ZERO,
         }
     }
@@ -997,7 +997,9 @@ impl settings::Settings for AllLanguageSettings {
                 prompt_format: openai_compatible_settings.prompt_format.unwrap().into(),
                 prediction_debounce: openai_compatible_settings.prediction_debounce.unwrap(),
             });
-        let zed_settings = edit_predictions.zed.unwrap();
+        // Upstream's hosted predictions are not offered and have no entry in
+        // `assets/settings/default.json`; the key still parses in old files.
+        let zed_settings = edit_predictions.zed.unwrap_or_default();
         let mercury_settings = edit_predictions.mercury.unwrap();
 
         let mut file_types: FxHashMap<Arc<str>, (GlobSet, Vec<String>)> = FxHashMap::default();
@@ -1054,7 +1056,7 @@ impl settings::Settings for AllLanguageSettings {
                 ollama: ollama_settings,
                 open_ai_compatible_api: openai_compatible_settings,
                 zed: ZedEditPredictionSettings {
-                    prediction_debounce: zed_settings.prediction_debounce.unwrap(),
+                    prediction_debounce: zed_settings.prediction_debounce.unwrap_or_default(),
                 },
                 mercury: MercuryEditPredictionSettings {
                     prediction_debounce: mercury_settings.prediction_debounce.unwrap(),

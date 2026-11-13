@@ -313,7 +313,7 @@ impl PickerDelegate for ProjectSymbolsDelegate {
         Some(
             ListItem::new(ix)
                 .inset(true)
-                .spacing(ListItemSpacing::Sparse)
+                .spacing(ListItemSpacing::Dense)
                 .toggle_state(selected)
                 .child(
                     v_flex()

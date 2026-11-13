@@ -5,6 +5,8 @@
 //! This crate provides theme settings integration for Zed,
 //! bridging the theme system with the settings infrastructure.
 
+#[cfg(test)]
+mod bundled_themes_tests;
 mod schema;
 mod settings;
 
@@ -15,10 +17,10 @@ use anyhow::{Context as _, Result};
 use gpui::{App, Font, HighlightStyle, Pixels, Refineable, ScrollDelta, px};
 use gpui_util::ResultExt;
 use theme::{
-    AccentColors, Appearance, AppearanceContent, DEFAULT_DARK_THEME, DEFAULT_ICON_THEME_NAME,
-    GlobalTheme, LoadThemes, PlayerColor, PlayerColors, StatusColors, SyntaxTheme,
-    SystemAppearance, SystemColors, Theme, ThemeColors, ThemeFamily, ThemeRegistry,
-    ThemeSettingsProvider, ThemeStyles, default_color_scales, try_parse_color,
+    AccentColors, Appearance, AppearanceContent, CornerStyle, DEFAULT_DARK_THEME,
+    DEFAULT_ICON_THEME_NAME, DerivedColors, GlobalTheme, LoadThemes, PlayerColor, PlayerColors,
+    StatusColors, SyntaxTheme, SystemAppearance, SystemColors, Theme, ThemeColors, ThemeFamily,
+    ThemeRegistry, ThemeSettingsProvider, ThemeStyles, default_color_scales, try_parse_color,
 };
 
 pub use crate::schema::{
@@ -99,6 +101,8 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
     let mut prev_theme_overrides = (
         settings.experimental_theme_overrides.clone(),
         settings.theme_overrides.clone(),
+        settings.corners,
+        settings.accent,
     );
 
     cx.observe_global::<SettingsStore>(move |cx| {
@@ -115,6 +119,8 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
         let theme_overrides = (
             settings.experimental_theme_overrides.clone(),
             settings.theme_overrides.clone(),
+            settings.corners,
+            settings.accent,
         );
 
         if buffer_font_size_settings != prev_buffer_font_size_settings {
@@ -174,8 +180,12 @@ fn configured_theme(cx: &mut App) -> Arc<Theme> {
             if themes.extensions_loaded() {
                 log::error!("{err}");
             }
+            // The default for this appearance may itself be missing (a build without the light
+            // theme of the family, or tests that load only the base theme): then the family's
+            // dark theme, then the theme compiled into the binary, which is always registered.
             themes
                 .get(default_theme(*system_appearance))
+                .or_else(|_| themes.get(default_theme(Appearance::Dark)))
                 .unwrap_or_else(|_| themes.get(DEFAULT_DARK_THEME).unwrap())
         }
     };
@@ -322,6 +332,13 @@ pub fn refine_theme(theme: &ThemeContent) -> Theme {
     );
     theme::apply_theme_color_defaults(&mut theme_colors_refinement, &refined_player_colors);
     refined_theme_colors.refine(&theme_colors_refinement);
+    // The tokens that fall back to another colour of the theme are resolved here, once, after the
+    // file's own values are in place, so that nothing is derived while rendering.
+    refined_theme_colors.derive_colors(
+        DerivedColors::unset_in(&theme_colors_refinement),
+        refined_player_colors.local().cursor,
+        appearance,
+    );
 
     let mut refined_accent_colors = match theme.appearance {
         AppearanceContent::Light => AccentColors::light(),
@@ -354,6 +371,11 @@ pub fn refine_theme(theme: &ThemeContent) -> Theme {
         .window_background_appearance
         .map(|w| w.into_gpui())
         .unwrap_or_default();
+    let corners = theme
+        .style
+        .corners
+        .map(corner_style_from_content)
+        .unwrap_or_default();
 
     Theme {
         id: uuid::Uuid::new_v4().to_string(),
@@ -362,12 +384,22 @@ pub fn refine_theme(theme: &ThemeContent) -> Theme {
         styles: ThemeStyles {
             system: SystemColors::default(),
             window_background_appearance,
+            corners,
             accents: refined_accent_colors,
             colors: refined_theme_colors,
             status: refined_status_colors,
             player: refined_player_colors,
             syntax: syntax_theme,
         },
+    }
+}
+
+/// Converts the corner style written in a theme file into the theme's [`CornerStyle`].
+pub fn corner_style_from_content(content: ::settings::CornerStyleContent) -> CornerStyle {
+    match content {
+        ::settings::CornerStyleContent::Square => CornerStyle::Square,
+        ::settings::CornerStyleContent::Soft => CornerStyle::Soft,
+        ::settings::CornerStyleContent::Round => CornerStyle::Round,
     }
 }
 

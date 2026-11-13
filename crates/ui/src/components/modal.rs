@@ -155,13 +155,18 @@ impl ParentElement for ModalHeader {
 impl RenderOnce for ModalHeader {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let mut children = self.children;
+        // An empty header is only spacing; a real one is a title bar closed by a line.
+        let is_title_bar = self.headline.is_some()
+            || self.icon.is_some()
+            || self.show_dismiss_button
+            || self.show_back_button
+            || !children.is_empty();
 
         if let Some(headline) = self.headline {
             children.insert(
                 0,
-                Headline::new(headline)
-                    .size(HeadlineSize::Small)
-                    .color(Color::Muted)
+                Label::new(headline)
+                    .weight(FontWeight::MEDIUM)
                     .into_any_element(),
             );
         }
@@ -172,9 +177,19 @@ impl RenderOnce for ModalHeader {
             .justify_between()
             .w_full()
             .px(DynamicSpacing::Base12.rems(cx))
-            .pt(DynamicSpacing::Base08.rems(cx))
-            .pb(DynamicSpacing::Base04.rems(cx))
             .gap(DynamicSpacing::Base08.rems(cx))
+            .map(|this| {
+                if is_title_bar {
+                    this.min_h(rems_from_px(36_f32))
+                        .py(DynamicSpacing::Base06.rems(cx))
+                        .mb(DynamicSpacing::Base08.rems(cx))
+                        .border_b_1()
+                        .border_color(cx.theme().colors().border)
+                } else {
+                    this.pt(DynamicSpacing::Base08.rems(cx))
+                        .pb(DynamicSpacing::Base04.rems(cx))
+                }
+            })
             .when(self.show_back_button, |this| {
                 this.child(
                     IconButton::new("back", IconName::ArrowLeft)
@@ -210,7 +225,12 @@ impl RenderOnce for ModalHeader {
                             }),
                     )
                     .when_some(self.description, |this, description| {
-                        this.child(Label::new(description).color(Color::Muted).mb_2().flex_1())
+                        this.child(
+                            Label::new(description)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .flex_1(),
+                        )
                     }),
             )
     }
@@ -282,12 +302,13 @@ impl RenderOnce for ModalFooter {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         h_flex()
             .w_full()
-            .p(DynamicSpacing::Base08.rems(cx))
+            .px(DynamicSpacing::Base12.rems(cx))
+            .py(DynamicSpacing::Base08.rems(cx))
             .flex_none()
             .justify_between()
-            .gap_1()
+            .gap_2()
             .border_t_1()
-            .border_color(cx.theme().colors().border_variant)
+            .border_color(cx.theme().colors().border)
             .child(div().when_some(self.start_slot, |this, start_slot| this.child(start_slot)))
             .child(div().when_some(self.end_slot, |this, end_slot| this.child(end_slot)))
     }
@@ -357,8 +378,8 @@ impl ParentElement for Section {
 
 impl RenderOnce for Section {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let mut section_bg = cx.theme().colors().text;
-        section_bg.fade_out(0.96);
+        // A contained section is a sunken well with a 1px line.
+        let section_bg = cx.theme().colors().background;
 
         let children = if self.contained {
             v_flex()
@@ -449,8 +470,11 @@ impl RenderOnce for SectionHeader {
                     .gap(DynamicSpacing::Base04.rems(cx))
                     .child(
                         div().flex_1().child(
-                            Label::new(self.label.clone())
-                                .size(LabelSize::Small)
+                            // Section label: mono, uppercase, faint.
+                            Label::new(self.label.to_uppercase())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Placeholder)
+                                .buffer_font(cx)
                                 .into_element(),
                         ),
                     )

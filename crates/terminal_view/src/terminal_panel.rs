@@ -11,9 +11,9 @@ use collections::HashMap;
 use db::kvp::KeyValueStore;
 use futures::{channel::oneshot, future::join_all};
 use gpui::{
-    Action, Anchor, App, AsyncApp, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, IntoElement, ParentElement, Pixels, Render, Styled, Task, TaskExt, WeakEntity,
-    Window, actions,
+    Action, Anchor, AnyElement, App, AsyncApp, AsyncWindowContext, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, IntoElement, ParentElement, Pixels, Render, Styled, Task, TaskExt,
+    WeakEntity, Window, actions,
 };
 use itertools::Itertools;
 use project::{Fs, Project};
@@ -38,7 +38,7 @@ use workspace::{
 };
 
 use anyhow::{Result, anyhow};
-use zed_actions::assistant::InlineAssist;
+use app_actions::assistant::InlineAssist;
 
 const TERMINAL_PANEL_KEY: &str = "TerminalPanel";
 
@@ -87,6 +87,15 @@ pub struct TerminalPanel {
     deferred_tasks: HashMap<TaskId, Task<()>>,
     assistant_enabled: bool,
     active: bool,
+    /// Whether the panel is in the bottom dock, as last seen when it was
+    /// drawn. The dock it is actually in, not the `dock` setting, which a
+    /// project or a profile can override.
+    in_bottom_dock: bool,
+    /// Whether the header of the bottom dock stands in for the tab bar of the
+    /// panel's pane: the panel is in the bottom dock with one pane holding at
+    /// most one terminal. The pane then hides its tab bar and the header shows
+    /// its buttons (see `Panel::header_actions`).
+    tab_bar_in_header: bool,
 }
 
 impl TerminalPanel {
@@ -107,6 +116,8 @@ impl TerminalPanel {
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
             active: false,
+            in_bottom_dock: false,
+            tab_bar_in_header: false,
         };
         terminal_panel.apply_tab_bar_buttons(&terminal_panel.active_pane, cx);
         terminal_panel
@@ -125,6 +136,7 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) {
         let assistant_enabled = self.assistant_enabled;
+        let terminal_panel = cx.weak_entity();
         terminal_pane.update(cx, |pane, cx| {
             pane.set_render_tab_bar_buttons(cx, move |pane, window, cx| {
                 let split_context = pane
@@ -142,13 +154,20 @@ impl TerminalPanel {
                     return (None, None);
                 }
                 let focus_handle = pane.focus_handle(cx);
+                // The bottom dock's header already has a maximize button.
+                let show_zoom_button = !terminal_panel
+                    .read_with(cx, |terminal_panel, _| terminal_panel.in_bottom_dock)
+                    .unwrap_or(false);
                 let right_children = h_flex()
                     .gap(DynamicSpacing::Base02.rems(cx))
                     .child(
                         PopoverMenu::new("terminal-tab-bar-popover-menu")
                             .trigger_with_tooltip(
-                                IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
-                                Tooltip::text("New…"),
+                                IconButton::new("plus", IconName::Plus)
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Muted)
+                                    .hover_color(Color::Default),
+                                Tooltip::text("New Terminal…"),
                             )
                             .anchor(Anchor::TopRight)
                             .with_handle(pane.new_item_context_menu_handle.clone())
@@ -165,7 +184,7 @@ impl TerminalPanel {
                                         // context menu will be gone the moment we spawn the modal.
                                         .action(
                                             "Spawn Task",
-                                            zed_actions::Spawn::modal().boxed_clone(),
+                                            app_actions::Spawn::modal().boxed_clone(),
                                         )
                                 });
 
@@ -181,7 +200,9 @@ impl TerminalPanel {
                         PopoverMenu::new("terminal-pane-tab-bar-split")
                             .trigger_with_tooltip(
                                 IconButton::new("terminal-pane-split", IconName::Split)
-                                    .icon_size(IconSize::Small),
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Muted)
+                                    .hover_color(Color::Default),
                                 Tooltip::text("Split Pane"),
                             )
                             .anchor(Anchor::TopRight)
@@ -202,22 +223,26 @@ impl TerminalPanel {
                                 }
                             }),
                     )
-                    .child({
+                    .when(show_zoom_button, |this| {
                         let zoomed = pane.is_zoomed();
-                        IconButton::new("toggle_zoom", IconName::Maximize)
-                            .icon_size(IconSize::Small)
-                            .toggle_state(zoomed)
-                            .selected_icon(IconName::Minimize)
-                            .on_click(cx.listener(|pane, _, window, cx| {
-                                pane.toggle_zoom(&workspace::ToggleZoom, window, cx);
-                            }))
-                            .tooltip(move |_window, cx| {
-                                Tooltip::for_action(
-                                    if zoomed { "Zoom Out" } else { "Zoom In" },
-                                    &ToggleZoom,
-                                    cx,
-                                )
-                            })
+                        this.child(
+                            IconButton::new("toggle_zoom", IconName::Maximize)
+                                .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
+                                .hover_color(Color::Default)
+                                .toggle_state(zoomed)
+                                .selected_icon(IconName::Minimize)
+                                .on_click(cx.listener(|pane, _, window, cx| {
+                                    pane.toggle_zoom(&workspace::ToggleZoom, window, cx);
+                                }))
+                                .tooltip(move |_window, cx| {
+                                    Tooltip::for_action(
+                                        if zoomed { "Zoom Out" } else { "Zoom In" },
+                                        &ToggleZoom,
+                                        cx,
+                                    )
+                                }),
+                        )
                     })
                     .into_any_element()
                     .into();
@@ -489,6 +514,7 @@ impl TerminalPanel {
                                 .update_in(cx, |panel, window, cx| {
                                     panel.center.split(&pane, &new_pane, direction, cx);
                                     window.focus(&new_pane.focus_handle(cx), cx);
+                                    cx.notify();
                                 })
                                 .ok();
                         })
@@ -524,6 +550,17 @@ impl TerminalPanel {
             }
 
             _ => {}
+        }
+        // The number of terminals and panes decides whether the dock's header
+        // or the pane's own tab bar is shown: both follow the panel.
+        if matches!(
+            event,
+            pane::Event::AddItem { .. }
+                | pane::Event::RemovedItem { .. }
+                | pane::Event::Remove { .. }
+                | pane::Event::Split { .. }
+        ) {
+            cx.notify();
         }
     }
 
@@ -1198,6 +1235,83 @@ impl TerminalPanel {
         })
     }
 
+    /// One pane holding at most one terminal: nothing a tab bar would add.
+    fn has_single_terminal(&self, cx: &App) -> bool {
+        let panes = self.center.panes();
+        panes.len() == 1 && panes[0].read(cx).items_len() <= 1
+    }
+
+    /// "New Terminal" and "Split Pane", as the pane's tab bar shows them, for
+    /// the header of the bottom dock.
+    fn render_header_actions(&self, cx: &App) -> AnyElement {
+        let pane = self.active_pane.read(cx);
+        let focus_handle = pane.focus_handle(cx);
+        let split_context = pane
+            .active_item()
+            .and_then(|item| item.downcast::<TerminalView>())
+            .map(|terminal_view| terminal_view.read(cx).focus_handle.clone());
+
+        h_flex()
+            .gap_1()
+            .child(
+                PopoverMenu::new("terminal-header-new-menu")
+                    .trigger_with_tooltip(
+                        IconButton::new("terminal-header-new", IconName::Plus)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .hover_color(Color::Default)
+                            .aria_label("New Terminal"),
+                        Tooltip::text("New Terminal…"),
+                    )
+                    .anchor(Anchor::TopRight)
+                    .with_handle(pane.new_item_context_menu_handle.clone())
+                    .menu(move |window, cx| {
+                        let focus_handle = focus_handle.clone();
+                        let menu = ContextMenu::build(window, cx, |menu, _, _| {
+                            menu.context(focus_handle.clone())
+                                .action(
+                                    "New Terminal",
+                                    workspace::NewTerminal::default().boxed_clone(),
+                                )
+                                .action("Spawn Task", app_actions::Spawn::modal().boxed_clone())
+                        });
+
+                        Some(menu)
+                    }),
+            )
+            .when(self.assistant_enabled, |this| {
+                this.when_some(split_context.clone(), |this, focus_handle| {
+                    this.child(InlineAssistTabBarButton { focus_handle })
+                })
+            })
+            .child(
+                PopoverMenu::new("terminal-header-split-menu")
+                    .trigger_with_tooltip(
+                        IconButton::new("terminal-header-split", IconName::Split)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .hover_color(Color::Default)
+                            .aria_label("Split Pane"),
+                        Tooltip::text("Split Pane"),
+                    )
+                    .anchor(Anchor::TopRight)
+                    .with_handle(pane.split_item_context_menu_handle.clone())
+                    .menu(move |window, cx| {
+                        ContextMenu::build(window, cx, |menu, _, _| {
+                            menu.when_some(split_context.clone(), |menu, split_context| {
+                                menu.context(split_context)
+                            })
+                            .action("Split Right", SplitRight::default().boxed_clone())
+                            .action("Split Left", SplitLeft::default().boxed_clone())
+                            .action("Split Up", SplitUp::default().boxed_clone())
+                            .action("Split Down", SplitDown::default().boxed_clone())
+                        })
+                        .into()
+                    }),
+            )
+            .into_any_element()
+    }
+
     fn has_no_terminals(&self, cx: &App) -> bool {
         self.active_pane.read(cx).items_len() == 0 && self.pending_terminals_to_add == 0
     }
@@ -1326,7 +1440,15 @@ pub fn new_terminal_pane(
         pane.set_zoomed(zoomed, cx);
         pane.set_can_navigate(false, cx);
         pane.display_nav_history_buttons(None);
-        pane.set_should_display_tab_bar(|_, _| true);
+        // One terminal in the bottom dock: the dock's header is the only row,
+        // and it shows this bar's buttons. The bar comes back with a second
+        // terminal, a split, or in a side dock.
+        let tab_bar_terminal_panel = terminal_panel.downgrade();
+        pane.set_should_display_tab_bar(move |_, cx| {
+            !tab_bar_terminal_panel
+                .read_with(cx, |terminal_panel, _| terminal_panel.tab_bar_in_header)
+                .unwrap_or(false)
+        });
         pane.set_zoom_out_on_close(false);
 
         let split_closure_terminal_panel = terminal_panel.downgrade();
@@ -1413,10 +1535,10 @@ impl Render for FailedToSpawnTerminal {
             .menu(move |window, cx| {
                 Some(ContextMenu::build(window, cx, |context_menu, _, _| {
                     context_menu
-                        .action("Open Settings", zed_actions::OpenSettings.boxed_clone())
+                        .action("Open Settings", app_actions::OpenSettings.boxed_clone())
                         .action(
                             "Edit settings.json",
-                            zed_actions::OpenSettingsFile.boxed_clone(),
+                            app_actions::OpenSettingsFile.boxed_clone(),
                         )
                 }))
             })
@@ -1450,7 +1572,7 @@ impl Render for FailedToSpawnTerminal {
                         ButtonLike::new("open-settings-ui")
                             .child(Label::new("Edit Settings").size(LabelSize::Small))
                             .on_click(|_, window, cx| {
-                                window.dispatch_action(zed_actions::OpenSettings.boxed_clone(), cx);
+                                window.dispatch_action(app_actions::OpenSettings.boxed_clone(), cx);
                             }),
                         popover_menu.into_any_element(),
                     )),
@@ -1472,6 +1594,18 @@ impl EventEmitter<PanelEvent> for TerminalPanel {}
 
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let panel_id = cx.entity_id();
+        self.in_bottom_dock = self
+            .workspace
+            .read_with(cx, |workspace, cx| {
+                workspace
+                    .bottom_dock()
+                    .read(cx)
+                    .panel_index_for_id(panel_id)
+                    .is_some()
+            })
+            .unwrap_or(false);
+        self.tab_bar_in_header = self.in_bottom_dock && self.has_single_terminal(cx);
         let registrar = cx
             .try_global::<workspace::PaneSearchBarCallbacks>()
             .map(|callbacks| {
@@ -1596,6 +1730,7 @@ impl Render for TerminalPanel {
                                             );
                                             let new_pane = new_pane.read(cx);
                                             window.focus(&new_pane.focus_handle(cx), cx);
+                                            cx.notify();
                                         },
                                     );
                                 }
@@ -1733,6 +1868,22 @@ impl Panel for TerminalPanel {
         self.active_pane.read(cx).is_zoomed()
     }
 
+    fn supports_zoom(&self, _window: &Window, _cx: &App) -> bool {
+        true
+    }
+
+    fn header_actions(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        // Only the bottom dock asks, and it draws before the panel does.
+        self.in_bottom_dock = true;
+        self.tab_bar_in_header = self.has_single_terminal(cx);
+        self.tab_bar_in_header
+            .then(|| self.render_header_actions(cx))
+    }
+
     fn set_zoomed(&mut self, zoomed: bool, _: &mut Window, cx: &mut Context<Self>) {
         for pane in self.center.panes() {
             pane.update(cx, |pane, cx| {
@@ -1858,8 +2009,11 @@ struct InlineAssistTabBarButton {
 impl RenderOnce for InlineAssistTabBarButton {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let focus_handle = self.focus_handle;
-        IconButton::new("terminal_inline_assistant", IconName::ZedAssistant)
+        IconButton::new("terminal_inline_assistant", IconName::AppAssistant)
             .icon_size(IconSize::Small)
+            .icon_color(Color::Muted)
+            .hover_color(Color::Default)
+            .aria_label("Inline Assist")
             .on_click({
                 let focus_handle = focus_handle.clone();
                 move |_, window, cx| {
@@ -1952,7 +2106,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_prepare_script_like_task() {
-        let user_command = r#"REPO_URL=$(git remote get-url origin | sed -e \"s/^git@\\(.*\\):\\(.*\\)\\.git$/https:\\/\\/\\1\\/\\2/\"); COMMIT_SHA=$(git log -1 --format=\"%H\" -- \"${ZED_RELATIVE_FILE}\"); echo \"${REPO_URL}/blob/${COMMIT_SHA}/${ZED_RELATIVE_FILE}#L${ZED_ROW}-$(echo $(($(wc -l <<< \"$ZED_SELECTED_TEXT\") + $ZED_ROW - 1)))\" | xclip -selection clipboard"#.to_string();
+        let user_command = r#"REPO_URL=$(git remote get-url origin | sed -e \"s/^git@\\(.*\\):\\(.*\\)\\.git$/https:\\/\\/\\1\\/\\2/\"); COMMIT_SHA=$(git log -1 --format=\"%H\" -- \"${IDE_RELATIVE_FILE}\"); echo \"${REPO_URL}/blob/${COMMIT_SHA}/${IDE_RELATIVE_FILE}#L${IDE_ROW}-$(echo $(($(wc -l <<< \"$IDE_SELECTED_TEXT\") + $IDE_ROW - 1)))\" | xclip -selection clipboard"#.to_string();
         let expected_cwd = PathBuf::from("/some/work");
 
         let input = SpawnInTerminal {
@@ -2857,7 +3011,7 @@ mod tests {
         cx.run_until_parked();
 
         let button_bounds = cx
-            .debug_bounds("ICON-ZedAssistant")
+            .debug_bounds("ICON-AppAssistant")
             .expect("inline assist button should be rendered in the terminal tab bar");
         cx.simulate_mouse_move(button_bounds.center(), None, Modifiers::default());
 
@@ -3347,6 +3501,70 @@ mod tests {
         assert_eq!(
             center_items_after, center_items_before,
             "Center pane should not gain a new terminal when panel is focused"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_single_terminal_in_bottom_dock_uses_the_dock_header(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+        let new_terminal = |cx: &mut TestAppContext| {
+            window_handle
+                .update(cx, |multi_workspace, window, cx| {
+                    multi_workspace.workspace().update(cx, |workspace, cx| {
+                        TerminalPanel::new_terminal(
+                            workspace,
+                            &workspace::NewTerminal::default(),
+                            window,
+                            cx,
+                        );
+                    })
+                })
+                .expect("Failed to dispatch new_terminal");
+            cx.run_until_parked();
+        };
+        // Number of terminals, whether the panel saw itself in the bottom
+        // dock, whether its pane leaves its tab bar to the dock's header, and
+        // whether the panel gives the header its buttons.
+        let state = |cx: &mut TestAppContext| {
+            window_handle
+                .update(cx, |_, window, cx| {
+                    terminal_panel.update(cx, |panel, cx| {
+                        (
+                            panel.active_pane.read(cx).items_len(),
+                            panel.in_bottom_dock,
+                            panel.tab_bar_in_header,
+                            panel.header_actions(window, cx).is_some(),
+                        )
+                    })
+                })
+                .expect("Failed to read the terminal panel")
+        };
+
+        new_terminal(cx);
+        window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    if !workspace.bottom_dock().read(cx).is_open() {
+                        workspace.toggle_dock(DockPosition::Bottom, window, cx);
+                    }
+                })
+            })
+            .expect("Failed to open the bottom dock");
+        cx.run_until_parked();
+        assert_eq!(
+            state(cx),
+            (1, true, true, true),
+            "one terminal in the bottom dock: the dock's header is the only row"
+        );
+
+        new_terminal(cx);
+        assert_eq!(
+            state(cx),
+            (2, true, false, false),
+            "a second terminal brings the terminal's own tab bar back"
         );
     }
 

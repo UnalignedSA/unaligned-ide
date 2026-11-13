@@ -1,0 +1,191 @@
+# The fork's own checks: compile the product and run the focused tests on Linux
+# and Windows, on GitHub-hosted runners, with no secret.
+#
+# Hand-written. Upstream's generated workflows (paid runners, upstream's
+# secrets, triage bots) and their generator are not in this repository.
+# What this proves and what it does not: see README.md next to this file.
+name: Check
+
+# Not on every push while the repository is private: the two jobs are hours of
+# machine time, counted against the plan's minutes. Put `push: branches: ["**"]`
+# back here when the repository is public (hosted machines are then free).
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  CARGO_INCREMENTAL: "0"
+  # No debug info: saves disk and time. Both are needed: Cargo.toml sets the
+  # build-override profile separately, and leaving one at its value makes cargo
+  # compile the crates shared by build scripts and the app twice.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"
+  # RUSTFLAGS is left alone on purpose: .cargo/config.toml sets what is needed,
+  # and the variable would replace it.
+  # Never define IDE_MINIDUMP_ENDPOINT or IDE_CLIENT_CHECKSUM_SEED in a workflow:
+  # a build that sees the first one turns crash uploads back on.
+  #
+  # Tests that fail for a known reason are skipped by name here (`--skip <name>`),
+  # so that any other failure turns the job red. The three it listed were fixed;
+  # the list is empty.
+  SKIP_KNOWN_FAILURES: ""
+
+jobs:
+  linux:
+    name: Linux
+    # A pull request from a branch of this repository is already covered by the
+    # push run of that branch; only pull requests from forks run here.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    # Not ubuntu-22.04: GitHub is retiring that image (slower queues since
+    # 2026-09-17, removed on 2027-04-17). script/linux has a branch for 24.04.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      # As upstream's Linux jobs; script/linux installs clang.
+      CC: clang
+      CXX: clang++
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+
+      - name: System packages
+        run: ./script/linux
+
+      # Without a name, this installs the version, components and targets of
+      # rust-toolchain.toml (rustup 1.28 and later; the runners have 1.29).
+      # Explicit on purpose: installation as a side effect of `rustup show`
+      # changed between rustup releases.
+      - name: Rust toolchain
+        id: toolchain
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show
+          cargo --version
+
+      - name: Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+
+      # From here on every step runs even when an earlier one failed, so that
+      # one run reports everything that is wrong.
+      - name: Formatting
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo fmt --all -- --check
+
+      - name: Keymaps
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: ./script/check-keymaps
+
+      - name: Unfinished-code markers
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: ./script/check-todos
+
+      - name: Themes
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: python3 script/unaligned/check-themes
+
+      # A merge from upstream can bring its workflows back. A workflow of your
+      # own goes in the list below.
+      - name: Only the fork's workflows
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: |
+          unexpected="$(find .github/workflows -mindepth 1 ! -name check.yml ! -name build.yml ! -name release.yml ! -name README.md)"
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected file in .github/workflows (did a merge from upstream bring its automation back?)"
+            echo "$unexpected"
+            exit 1
+          fi
+
+      - name: Check the application
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo check -p ide --locked
+
+      - name: Check the command-line tool and the remote server
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo check -p cli -p remote_server --locked
+
+      - name: Focused tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo test -p settings -p theme -p theme_settings -p ui -p workspace -p title_bar -p language_models -p auto_update --locked --no-fail-fast -- ${{ env.SKIP_KNOWN_FAILURES }}
+
+      - name: Disk space at the end
+        if: ${{ always() }}
+        run: |
+          df -h /
+          du -sh target || true
+
+  windows:
+    name: Windows
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: windows-2022
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # One command per step in this job: PowerShell only reports the exit code
+      # of the last command of a step.
+      - name: Git, long paths
+        run: git config --global core.longpaths true
+
+      # The same bytes as on Linux and macOS, whatever the runner's default.
+      - name: Git, no line-ending conversion
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      # Information only: must never stop the job.
+      - name: Disk space at the start
+        continue-on-error: true
+        run: Get-PSDrive -PSProvider FileSystem
+
+      - name: Rust toolchain
+        id: toolchain
+        run: rustup toolchain install --no-self-update
+
+      - name: Show the toolchain
+        continue-on-error: true
+        run: rustup show
+
+      - name: Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+
+      - name: Check the application
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo check -p ide --locked
+
+      - name: Check the command-line tool and the Windows helpers
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo check -p cli -p auto_update_helper -p explorer_command_injector --locked
+
+      - name: Focused tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo test -p settings -p workspace --locked --no-fail-fast -- ${{ env.SKIP_KNOWN_FAILURES }}
+
+      - name: Disk space at the end
+        if: ${{ always() }}
+        continue-on-error: true
+        run: Get-PSDrive -PSProvider FileSystem

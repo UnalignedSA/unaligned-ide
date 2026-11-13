@@ -23,9 +23,9 @@ impl ProgressBar {
             id: id.into(),
             value,
             max_value,
-            bg_color: cx.theme().colors().background,
+            bg_color: cx.theme().colors().element_selected,
             over_color: cx.theme().status().error,
-            fg_color: cx.theme().status().info,
+            fg_color: cx.theme().colors().text,
         }
     }
 
@@ -67,19 +67,14 @@ impl RenderOnce for ProgressBar {
         div()
             .id(self.id.clone())
             .w_full()
-            .h_2()
-            .p_0p5()
-            .rounded_full()
+            // A 3px rule that fills up; its ends follow the theme's corners.
+            .h(px(3.))
+            .rounded_pill()
             .bg(self.bg_color)
-            .shadow(vec![gpui::BoxShadow::new(
-                px(0.),
-                px(1.),
-                gpui::black().opacity(0.08),
-            )])
             .child(
                 div()
                     .h_full()
-                    .rounded_full()
+                    .rounded_pill()
                     .when(self.value > self.max_value, |div| div.bg(self.over_color))
                     .when(self.value <= self.max_value, |div| div.bg(self.fg_color))
                     .w(relative(fill_width)),

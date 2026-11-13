@@ -1,13 +1,13 @@
 #![allow(missing_docs)]
 
-use gpui::{App, Hsla, SharedString, WindowBackgroundAppearance};
+use gpui::{App, Hsla, Rgba, SharedString, WindowBackgroundAppearance};
 use refineable::Refineable;
 use std::sync::Arc;
 use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 
 use crate::{
-    AccentColors, ActiveTheme, PlayerColors, StatusColors, StatusColorsRefinement, SyntaxTheme,
-    SystemColors,
+    AccentColors, ActiveTheme, Appearance, PlayerColors, StatusColors, StatusColorsRefinement,
+    SyntaxTheme, SystemColors,
 };
 
 #[derive(Refineable, Clone, Debug, PartialEq)]
@@ -25,6 +25,11 @@ pub struct ThemeColors {
     pub border_transparent: Hsla,
     /// Border color. Used for disabled elements, like a disabled input or button.
     pub border_disabled: Hsla,
+    /// Border color. Used for the outline of things the user can type in or press (inputs, outlined
+    /// buttons, key caps) and for the edge of raised surfaces.
+    ///
+    /// Theme key `border.strong`; `border` when the theme does not set it.
+    pub border_strong: Hsla,
     /// Border color. Used for elevated surfaces, like a context menu, popup, or dialog.
     pub elevated_surface_background: Hsla,
     /// Background Color. Used for grounded surfaces like a panel or tab.
@@ -95,6 +100,28 @@ pub struct ThemeColors {
     pub text_disabled: Hsla,
     /// Text Color. Color used for emphasis or highlighting certain text, like an active filter or a matched character in a search.
     pub text_accent: Hsla,
+    /// Text Color. The faintest text that must still be readable: section labels, panel titles,
+    /// table headers.
+    ///
+    /// Theme key `text.faint`; `text.muted` when the theme does not set it (the placeholder
+    /// colour of most themes is too weak for a label).
+    pub text_faint: Hsla,
+    /// Background Color. The fill of the primary action of a view, and of the marker of the
+    /// active or selected thing.
+    ///
+    /// Theme key `accent.background`; the local player's cursor colour when the theme does not
+    /// set it.
+    pub accent_background: Hsla,
+    /// Background Color. The hover state of an element filled with `accent_background`.
+    ///
+    /// Theme key `accent.hover`; `accent_background` lightened (dark themes) or darkened (light
+    /// themes) when the theme does not set it.
+    pub accent_hover: Hsla,
+    /// Text Color. Text and icons drawn on `accent_background`.
+    ///
+    /// Theme key `accent.foreground`; black or white, whichever contrasts more with
+    /// `accent_background`, when the theme does not set it.
+    pub accent_foreground: Hsla,
     /// Fill Color. Used for the default fill color of an icon.
     pub icon: Hsla,
     /// Fill Color. Used for the muted or deemphasized fill color of an icon.
@@ -354,6 +381,7 @@ pub enum ThemeColorField {
     BorderSelected,
     BorderTransparent,
     BorderDisabled,
+    BorderStrong,
     ElevatedSurfaceBackground,
     SurfaceBackground,
     Background,
@@ -374,6 +402,10 @@ pub enum ThemeColorField {
     TextPlaceholder,
     TextDisabled,
     TextAccent,
+    TextFaint,
+    AccentBackground,
+    AccentHover,
+    AccentForeground,
     Icon,
     IconMuted,
     IconDisabled,
@@ -462,7 +494,147 @@ pub enum ThemeColorField {
     VersionControlIgnored,
 }
 
+/// The tokens of [`ThemeColors`] that fall back to another colour of the theme when a theme file
+/// does not state them. A `true` field means "derive this one".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DerivedColors {
+    pub accent_background: bool,
+    pub accent_hover: bool,
+    pub accent_foreground: bool,
+    pub border_strong: bool,
+    pub text_faint: bool,
+}
+
+impl DerivedColors {
+    /// Every derived token.
+    pub fn all() -> Self {
+        Self {
+            accent_background: true,
+            accent_hover: true,
+            accent_foreground: true,
+            border_strong: true,
+            text_faint: true,
+        }
+    }
+
+    /// The derived tokens that the given refinement does not state.
+    pub fn unset_in(refinement: &ThemeColorsRefinement) -> Self {
+        Self {
+            accent_background: refinement.accent_background.is_none(),
+            accent_hover: refinement.accent_hover.is_none(),
+            accent_foreground: refinement.accent_foreground.is_none(),
+            border_strong: refinement.border_strong.is_none(),
+            text_faint: refinement.text_faint.is_none(),
+        }
+    }
+
+    /// The tokens that are set in both.
+    pub fn and(self, other: Self) -> Self {
+        Self {
+            accent_background: self.accent_background && other.accent_background,
+            accent_hover: self.accent_hover && other.accent_hover,
+            accent_foreground: self.accent_foreground && other.accent_foreground,
+            border_strong: self.border_strong && other.border_strong,
+            text_faint: self.text_faint && other.text_faint,
+        }
+    }
+}
+
+/// How much the hover of an accent fill moves in lightness: lighter on dark themes, darker on light.
+const ACCENT_HOVER_LIGHTNESS_STEP: f32 = 0.08;
+
+/// The relative luminance of a colour as defined by WCAG 2 (alpha is ignored).
+fn relative_luminance(color: Hsla) -> f32 {
+    fn linear(channel: f32) -> f32 {
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    let rgba = Rgba::from(color);
+    0.2126 * linear(rgba.r) + 0.7152 * linear(rgba.g) + 0.0722 * linear(rgba.b)
+}
+
+/// The WCAG 2 contrast ratio between two opaque colours, from 1.0 to 21.0.
+pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
+    let a = relative_luminance(a);
+    let b = relative_luminance(b);
+    let (lighter, darker) = if a >= b { (a, b) } else { (b, a) };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
 impl ThemeColors {
+    /// The hover state of an accent fill: lightened on dark themes, darkened on light ones.
+    pub fn accent_hover_for(accent_background: Hsla, appearance: Appearance) -> Hsla {
+        let mut hover = accent_background;
+        hover.l = match appearance {
+            Appearance::Dark => (hover.l + ACCENT_HOVER_LIGHTNESS_STEP).min(1.0),
+            Appearance::Light => (hover.l - ACCENT_HOVER_LIGHTNESS_STEP).max(0.0),
+        };
+        hover
+    }
+
+    /// The text colour for an accent fill: black or white, whichever has the higher WCAG
+    /// contrast with it.
+    pub fn accent_foreground_for(accent_background: Hsla) -> Hsla {
+        let white = gpui::white();
+        let black = gpui::black();
+        if contrast_ratio(black, accent_background) > contrast_ratio(white, accent_background) {
+            black
+        } else {
+            white
+        }
+    }
+
+    /// Which derived tokens currently hold exactly their fallback value.
+    ///
+    /// Used before applying an override, so that a token that was following another colour keeps
+    /// following it when that colour is overridden.
+    pub fn derived_colors_in_sync(
+        &self,
+        local_cursor: Hsla,
+        appearance: Appearance,
+    ) -> DerivedColors {
+        DerivedColors {
+            accent_background: self.accent_background == local_cursor,
+            accent_hover: self.accent_hover
+                == Self::accent_hover_for(self.accent_background, appearance),
+            accent_foreground: self.accent_foreground
+                == Self::accent_foreground_for(self.accent_background),
+            border_strong: self.border_strong == self.border,
+            text_faint: self.text_faint == self.text_muted,
+        }
+    }
+
+    /// Fills the selected derived tokens from the colours they fall back to.
+    ///
+    /// `local_cursor` is the local player's cursor colour (`players[0].cursor`). Call this once
+    /// when a theme is built, after the theme file's own values are applied: nothing is derived
+    /// at render time.
+    pub fn derive_colors(
+        &mut self,
+        which: DerivedColors,
+        local_cursor: Hsla,
+        appearance: Appearance,
+    ) {
+        if which.accent_background {
+            self.accent_background = local_cursor;
+        }
+        if which.accent_hover {
+            self.accent_hover = Self::accent_hover_for(self.accent_background, appearance);
+        }
+        if which.accent_foreground {
+            self.accent_foreground = Self::accent_foreground_for(self.accent_background);
+        }
+        if which.border_strong {
+            self.border_strong = self.border;
+        }
+        if which.text_faint {
+            self.text_faint = self.text_muted;
+        }
+    }
+
     pub fn panel_background_for_overlay(&self) -> Hsla {
         if self.background.a >= 1.0 || self.panel_background.a >= 1.0 {
             self.background.blend(self.panel_background)
@@ -479,6 +651,7 @@ impl ThemeColors {
             ThemeColorField::BorderSelected => self.border_selected,
             ThemeColorField::BorderTransparent => self.border_transparent,
             ThemeColorField::BorderDisabled => self.border_disabled,
+            ThemeColorField::BorderStrong => self.border_strong,
             ThemeColorField::ElevatedSurfaceBackground => self.elevated_surface_background,
             ThemeColorField::SurfaceBackground => self.surface_background,
             ThemeColorField::Background => self.background,
@@ -499,6 +672,10 @@ impl ThemeColors {
             ThemeColorField::TextPlaceholder => self.text_placeholder,
             ThemeColorField::TextDisabled => self.text_disabled,
             ThemeColorField::TextAccent => self.text_accent,
+            ThemeColorField::TextFaint => self.text_faint,
+            ThemeColorField::AccentBackground => self.accent_background,
+            ThemeColorField::AccentHover => self.accent_hover,
+            ThemeColorField::AccentForeground => self.accent_foreground,
             ThemeColorField::Icon => self.icon,
             ThemeColorField::IconMuted => self.icon_muted,
             ThemeColorField::IconDisabled => self.icon_disabled,
@@ -620,10 +797,37 @@ pub fn all_theme_colors(cx: &mut App) -> Vec<(Hsla, SharedString)> {
         .collect()
 }
 
+/// How round a theme draws the corners of buttons, inputs, menus and other surfaces.
+///
+/// It is applied through [`gpui::set_corner_radius_scale`] when the theme becomes active.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CornerStyle {
+    /// No rounding: every named radius is zero.
+    Square,
+    /// Half of the usual rounding.
+    Soft,
+    /// The usual rounding. This is what a theme gets when it does not say.
+    #[default]
+    Round,
+}
+
+impl CornerStyle {
+    /// The factor applied to the named corner radii for this style.
+    pub fn scale(self) -> f32 {
+        match self {
+            Self::Square => 0.0,
+            Self::Soft => 0.5,
+            Self::Round => 1.0,
+        }
+    }
+}
+
 #[derive(Refineable, Clone, Debug, PartialEq)]
 pub struct ThemeStyles {
     /// The background appearance of the window.
     pub window_background_appearance: WindowBackgroundAppearance,
+    /// How round the corners of buttons, inputs, menus and other surfaces are.
+    pub corners: CornerStyle,
     pub system: SystemColors,
     /// An array of colors used for theme elements that iterate through a series of colors.
     ///
@@ -643,7 +847,6 @@ pub struct ThemeStyles {
 
 #[cfg(test)]
 mod tests {
-    use gpui::Rgba;
     use serde_json::json;
 
     use super::*;
@@ -669,6 +872,75 @@ mod tests {
                 "panel {panel:#010x}, background {background:#010x}"
             );
         }
+    }
+
+    #[test]
+    fn corner_style_drives_the_named_radii() {
+        // The only test of this crate that touches the process-wide scale.
+        assert_eq!(CornerStyle::default(), CornerStyle::Round);
+        assert_eq!(gpui::corner_radius_scale(), 1.0);
+        assert_eq!(gpui::scaled_radius(0.25), gpui::rems(0.25));
+
+        gpui::set_corner_radius_scale(CornerStyle::Soft.scale());
+        assert_eq!(gpui::scaled_radius(0.25), gpui::rems(0.125));
+
+        gpui::set_corner_radius_scale(CornerStyle::Square.scale());
+        assert_eq!(gpui::scaled_radius(1.5), gpui::rems(0.));
+
+        gpui::set_corner_radius_scale(f32::NAN);
+        assert_eq!(gpui::corner_radius_scale(), 0.0);
+        gpui::set_corner_radius_scale(-1.0);
+        assert_eq!(gpui::corner_radius_scale(), 0.0);
+
+        gpui::set_corner_radius_scale(CornerStyle::Round.scale());
+        assert_eq!(gpui::corner_radius_scale(), 1.0);
+    }
+
+    #[test]
+    fn default_colors_resolve_the_derived_tokens() {
+        for (colors, appearance, cursor) in [
+            (
+                ThemeColors::dark(),
+                Appearance::Dark,
+                PlayerColors::dark().local().cursor,
+            ),
+            (
+                ThemeColors::light(),
+                Appearance::Light,
+                PlayerColors::light().local().cursor,
+            ),
+        ] {
+            assert_eq!(
+                colors.derived_colors_in_sync(cursor, appearance),
+                DerivedColors::all()
+            );
+        }
+
+        let fallback = crate::fallback_themes::zed_default_dark();
+        assert_eq!(
+            fallback
+                .colors()
+                .derived_colors_in_sync(fallback.players().local().cursor, Appearance::Dark),
+            DerivedColors::all()
+        );
+        assert_eq!(fallback.corners(), CornerStyle::Round);
+    }
+
+    #[test]
+    fn contrast_ratio_matches_wcag() {
+        let white = gpui::white();
+        let black = gpui::black();
+        assert!((contrast_ratio(white, black) - 21.0).abs() < 0.01);
+        assert!((contrast_ratio(black, white) - 21.0).abs() < 0.01);
+        assert!((contrast_ratio(white, white) - 1.0).abs() < 0.001);
+
+        // White on the brand red #e5322d is about 4.4:1 (below AA), black about 4.8:1.
+        let red: Hsla = gpui::rgb(0xe5322d).into();
+        let on_white = contrast_ratio(white, red);
+        let on_black = contrast_ratio(black, red);
+        assert!((4.2..4.6).contains(&on_white), "{on_white}");
+        assert!((4.6..5.0).contains(&on_black), "{on_black}");
+        assert_eq!(ThemeColors::accent_foreground_for(red), black);
     }
 
     #[test]

@@ -315,7 +315,7 @@ pub(crate) struct ThreadSandboxGrants {
     unsandboxed: bool,
     /// Whether the user approved running commands *without* a sandbox for the
     /// rest of the thread when the OS sandbox could not be created (the
-    /// fallback prompt's "Allow for this thread"). Distinct from
+    /// fallback prompt's "Allow for this chat"). Distinct from
     /// `unsandboxed`, which records a model-requested escape; this is a
     /// user-acknowledged degradation because the sandbox is unavailable.
     sandbox_fallback: bool,
@@ -396,7 +396,7 @@ impl ThreadSandboxGrants {
     }
 
     /// Whether the user allowed running commands unsandboxed for the rest of
-    /// the thread (the fallback prompt's "Allow for this thread"). Distinct
+    /// the thread (the fallback prompt's "Allow for this chat"). Distinct
     /// from the persistent `allow_unsandboxed` setting.
     pub fn fallback_granted_for_thread(&self) -> bool {
         self.sandbox_fallback

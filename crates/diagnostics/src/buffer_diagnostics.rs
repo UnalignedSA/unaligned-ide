@@ -913,6 +913,17 @@ impl Render for BufferDiagnosticsEditor {
                 .text_center()
                 .bg(cx.theme().colors().editor_background)
                 .child(
+                    Icon::new(IconName::Check)
+                        .size(IconSize::Medium)
+                        .color(Color::Success),
+                )
+                .child(
+                    Label::new("PROBLEMS")
+                        .size(LabelSize::XSmall)
+                        .buffer_font(cx)
+                        .color(Color::Muted),
+                )
+                .child(
                     div()
                         .h_flex()
                         .child(Label::new(label).color(Color::Muted))

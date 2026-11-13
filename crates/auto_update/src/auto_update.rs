@@ -1,101 +1,41 @@
+//! Update checks against the product's own releases.
+//!
+//! This crate never downloads and never installs anything. A check asks the
+//! GitHub Releases of the repository named in the brand file
+//! (`branding::releases_repository()`), compares the latest release with the
+//! running version and, when it is newer, remembers it as an
+//! [`AvailableUpdate`]: a version and the address of the release's page, which
+//! the user opens in a browser. While the brand file names no repository,
+//! nothing is contacted at all.
+//!
+//! Upstream's updater (a download from its own release service, then an
+//! in-place install by `rsync`, a disk image or an installer) is gone: it would
+//! have replaced this application with upstream's builds.
+
 use anyhow::{Context as _, Result};
 use client::Client;
-use db::kvp::KeyValueStore;
-use futures_lite::StreamExt;
+use futures::channel::oneshot;
 use gpui::{
-    App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, EventEmitter, Global,
-    Task, TaskExt, Window, actions,
+    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, PromptLevel, Task,
+    Window, actions,
 };
-use http_client::{HttpClient, HttpClientWithUrl};
-use paths::remote_servers_dir;
-use release_channel::{AppCommitSha, ReleaseChannel};
+use http_client::HttpClient;
+use release_channel::ReleaseChannel;
 use semver::Version;
-use serde::{Deserialize, Serialize};
 use settings::{RegisterSetting, Settings, SettingsStore};
-use smol::fs::File;
-use smol::{
-    fs,
-    io::{AsyncReadExt, AsyncWriteExt},
-};
-use std::mem;
-use std::{
-    env::{
-        self,
-        consts::{ARCH, OS},
-    },
-    ffi::OsStr,
-    ffi::OsString,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
-use util::command::new_command;
+use std::{env, fmt, path::PathBuf, sync::Arc, time::Duration};
 use workspace::Workspace;
 
-const SHOULD_SHOW_UPDATE_NOTIFICATION_KEY: &str = "auto-updater-should-show-updated-notification";
+/// How long a running app waits between two automatic checks. One request a
+/// day stays far below what GitHub allows an anonymous caller (60 an hour for
+/// one network address).
+const POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
-#[derive(Debug)]
-struct MissingDependencyError(String);
+/// The owner of upstream's repository. A brand file that names it would make
+/// the app announce upstream's releases as its own, so it counts as "none".
+const UPSTREAM_REPOSITORY_OWNER: &str = "zed-industries";
 
-impl std::fmt::Display for MissingDependencyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for MissingDependencyError {}
-const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
-const NIGHTLY_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
-const REMOTE_SERVER_CACHE_LIMIT: usize = 5;
-
-#[cfg(target_os = "linux")]
-fn linux_rsync_install_hint() -> &'static str {
-    let os_release = match std::fs::read_to_string("/etc/os-release") {
-        Ok(os_release) => os_release,
-        Err(_) => return "Please install rsync using your package manager",
-    };
-
-    let mut distribution_ids = Vec::new();
-    for line in os_release.lines() {
-        let trimmed = line.trim();
-        if let Some(value) = trimmed.strip_prefix("ID=") {
-            distribution_ids.push(value.trim_matches('"').to_ascii_lowercase());
-        } else if let Some(value) = trimmed.strip_prefix("ID_LIKE=") {
-            for id in value.trim_matches('"').split_whitespace() {
-                distribution_ids.push(id.to_ascii_lowercase());
-            }
-        }
-    }
-
-    let package_manager_hint = if distribution_ids
-        .iter()
-        .any(|distribution_id| distribution_id == "arch")
-    {
-        Some("Install it with: sudo pacman -S rsync")
-    } else if distribution_ids
-        .iter()
-        .any(|distribution_id| distribution_id == "debian" || distribution_id == "ubuntu")
-    {
-        Some("Install it with: sudo apt install rsync")
-    } else if distribution_ids.iter().any(|distribution_id| {
-        distribution_id == "fedora"
-            || distribution_id == "rhel"
-            || distribution_id == "centos"
-            || distribution_id == "rocky"
-            || distribution_id == "almalinux"
-    }) {
-        Some("Install it with: sudo dnf install rsync")
-    } else if distribution_ids
-        .iter()
-        .any(|distribution_id| distribution_id == "nixos")
-    {
-        Some("Install pkgs.rsync from nixpkgs")
-    } else {
-        None
-    };
-
-    package_manager_hint.unwrap_or("Please install rsync using your package manager")
-}
+const NOT_SET_UP_MESSAGE: &str = "Updates are not set up for this build yet.";
 
 actions!(
     auto_update,
@@ -109,56 +49,22 @@ actions!(
     ]
 );
 
-#[derive(Serialize, Debug)]
-pub struct AssetQuery<'a> {
-    asset: &'a str,
-    os: &'a str,
-    arch: &'a str,
-    metrics_id: Option<&'a str>,
-    system_id: Option<&'a str>,
-    is_staff: Option<bool>,
-}
-
+/// What the updater is doing.
+///
+/// A newer release is not a status: see [`AutoUpdater::available_update`].
+/// This build downloads and installs nothing, so there is no status for it.
 #[derive(Clone, Debug)]
 pub enum AutoUpdateStatus {
     Idle,
     Checking,
-    Downloading {
-        version: Version,
-        /// Download progress as a fraction in the range `0.0..=1.0`, or `None`
-        /// when the total download size is not yet known.
-        progress: Option<f32>,
-    },
-    Installing {
-        version: Version,
-    },
-    Updated {
-        version: Version,
-    },
-    Errored {
-        error: Arc<anyhow::Error>,
-    },
+    Errored { error: Arc<anyhow::Error> },
 }
 
 impl PartialEq for AutoUpdateStatus {
-    // `progress` is deliberately not compared: two `Downloading` statuses for
-    // the same version are equal regardless of how far the download is.
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (AutoUpdateStatus::Idle, AutoUpdateStatus::Idle) => true,
             (AutoUpdateStatus::Checking, AutoUpdateStatus::Checking) => true,
-            (
-                AutoUpdateStatus::Downloading { version: v1, .. },
-                AutoUpdateStatus::Downloading { version: v2, .. },
-            ) => v1 == v2,
-            (
-                AutoUpdateStatus::Installing { version: v1 },
-                AutoUpdateStatus::Installing { version: v2 },
-            ) => v1 == v2,
-            (
-                AutoUpdateStatus::Updated { version: v1 },
-                AutoUpdateStatus::Updated { version: v2 },
-            ) => v1 == v2,
             (AutoUpdateStatus::Errored { error: e1 }, AutoUpdateStatus::Errored { error: e2 }) => {
                 e1.to_string() == e2.to_string()
             }
@@ -167,11 +73,43 @@ impl PartialEq for AutoUpdateStatus {
     }
 }
 
-impl AutoUpdateStatus {
-    pub fn is_updated(&self) -> bool {
-        matches!(self, Self::Updated { .. })
+/// A release newer than the running build, found by a check. Nothing is
+/// downloaded: `url` is the release's page, for the user's browser.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AvailableUpdate {
+    pub version: Version,
+    pub url: String,
+}
+
+/// The result of asking for the latest release.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateCheck {
+    /// The brand file names no releases repository: nothing was requested.
+    NotConfigured,
+    /// No published release is newer than the running build.
+    UpToDate,
+    /// A newer release exists.
+    Available(AvailableUpdate),
+}
+
+/// GitHub answered 403 or 429: too many anonymous requests came from this
+/// network address during the last hour.
+#[derive(Debug)]
+pub struct RateLimited {
+    status: u16,
+}
+
+impl fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GitHub refused the update check (HTTP {}): too many requests from this network address. Try again later.",
+            self.status
+        )
     }
 }
+
+impl std::error::Error for RateLimited {}
 
 pub enum AutoUpdateEvent {
     /// A manual check received a release response and found no newer version.
@@ -180,79 +118,23 @@ pub enum AutoUpdateEvent {
 
 pub struct AutoUpdater {
     status: AutoUpdateStatus,
+    available_update: Option<AvailableUpdate>,
+    dismissed_update: Option<Version>,
     current_version: Version,
+    releases_repository: Option<String>,
     client: Arc<Client>,
     pending_poll: Option<Task<Option<()>>>,
-    quit_subscription: Option<gpui::Subscription>,
+    manual_check_finished: Option<oneshot::Sender<Option<AvailableUpdate>>>,
     update_check_type: UpdateCheckType,
     _wake_subscription: gpui::Subscription,
     dismissed_status: Option<AutoUpdateStatus>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct ReleaseAsset {
-    pub version: String,
-    pub url: String,
-}
-
-struct MacOsUnmounter<'a> {
-    mount_path: PathBuf,
-    background_executor: &'a BackgroundExecutor,
-}
-
-impl MacOsUnmounter<'_> {
-    /// Unmounts the disk image and waits for completion. This must happen
-    /// before the `InstallerDir` is dropped: deleting the temp dir while the
-    /// image is still mounted inside it fails silently and leaks the
-    /// directory (and the downloaded DMG) in the system temp dir.
-    async fn unmount(mut self) {
-        let mount_path = mem::take(&mut self.mount_path);
-        unmount_disk_image(&mount_path).await;
-    }
-}
-
-impl Drop for MacOsUnmounter<'_> {
-    fn drop(&mut self) {
-        let mount_path = mem::take(&mut self.mount_path);
-        // Safety net for early exits and cancellation; the happy path calls
-        // `unmount`, which leaves the path empty.
-        if mount_path.as_os_str().is_empty() {
-            return;
-        }
-        self.background_executor
-            .spawn(async move { unmount_disk_image(&mount_path).await })
-            .detach();
-    }
-}
-
-async fn unmount_disk_image(mount_path: &Path) {
-    let unmount_output = new_command("hdiutil")
-        .args(["detach", "-force"])
-        .arg(mount_path)
-        .output()
-        .await;
-    match unmount_output {
-        Ok(output) if output.status.success() => {
-            log::info!("Successfully unmounted the disk image");
-        }
-        Ok(output) => {
-            log::error!(
-                "Failed to unmount disk image: {:?}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Err(error) => {
-            log::error!("Error while trying to unmount disk image: {:?}", error);
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, RegisterSetting)]
 struct AutoUpdateSetting(bool);
 
-/// Whether or not to automatically check for updates.
-///
-/// Default: true
+/// Whether to ask once a day if a newer version has been released. A newer
+/// version is only announced, never downloaded or installed.
 impl Settings for AutoUpdateSetting {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         Self(content.auto_update.unwrap())
@@ -265,27 +147,39 @@ struct GlobalAutoUpdate(Option<Entity<AutoUpdater>>);
 impl Global for GlobalAutoUpdate {}
 
 pub fn init(client: Arc<Client>, cx: &mut App) {
-    cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+    let releases_repository = configured_releases_repository();
+    let has_repository = releases_repository.is_some();
+    cx.observe_new(move |workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(|_, action, window, cx| check(action, window, cx));
 
-        workspace.register_action(|_, action, _, cx| {
-            view_release_notes(action, cx);
-        });
+        // Without a repository there are no release notes to open: the action
+        // gets no handler, so menus show it disabled.
+        if has_repository {
+            workspace.register_action(|_, action, _, cx| {
+                view_release_notes(action, cx);
+            });
+        }
     })
     .detach();
 
+    init_updater(releases_repository, update_explanation(), client, cx);
+}
+
+/// Creates the updater. It polls only when all of this holds: a releases
+/// repository is configured, no packager explanation is present, the release
+/// channel checks for updates and the `auto_update` setting is on.
+fn init_updater(
+    releases_repository: Option<String>,
+    update_explanation: Option<String>,
+    client: Arc<Client>,
+    cx: &mut App,
+) {
+    let has_repository = releases_repository.is_some();
     let version = release_channel::AppVersion::global(cx);
     let auto_updater = cx.new(|cx| {
-        let updater = AutoUpdater::new(version, client, cx);
+        let updater = AutoUpdater::new(version, releases_repository, client, cx);
 
-        let poll_for_updates = ReleaseChannel::try_global(cx)
-            .map(|channel| channel.poll_for_updates())
-            .unwrap_or(false);
-
-        if option_env!("ZED_UPDATE_EXPLANATION").is_none()
-            && env::var("ZED_UPDATE_EXPLANATION").is_err()
-            && poll_for_updates
-        {
+        if has_repository && update_explanation.is_none() && channel_checks_for_updates(cx) {
             let mut update_subscription = AutoUpdateSetting::get_global(cx)
                 .0
                 .then(|| updater.start_polling(cx));
@@ -307,14 +201,74 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
     cx.set_global(GlobalAutoUpdate(Some(auto_updater)));
 }
 
-pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
-    if let Some(message) = option_env!("ZED_UPDATE_EXPLANATION")
+/// The `owner/repo` slug update checks ask, or `None` when the brand file
+/// names none.
+fn configured_releases_repository() -> Option<String> {
+    validated_releases_repository(branding::releases_repository()?)
+}
+
+/// Accepts a GitHub `owner/repo` slug and nothing else. Upstream's own
+/// repository is refused: its releases are not this product's.
+fn validated_releases_repository(slug: &str) -> Option<String> {
+    let is_name = |name: &str| {
+        !name.is_empty()
+            && name != "."
+            && name != ".."
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    let Some((owner, repository)) = slug.split_once('/') else {
+        log::error!("update checks are off: {slug:?} is not an `owner/repo` slug");
+        return None;
+    };
+    if !is_name(owner) || !is_name(repository) {
+        log::error!("update checks are off: {slug:?} is not an `owner/repo` slug");
+        return None;
+    }
+    if owner.eq_ignore_ascii_case(UPSTREAM_REPOSITORY_OWNER) {
+        log::error!("update checks are off: {slug:?} is upstream's repository, not this product's");
+        return None;
+    }
+    Some(slug.to_string())
+}
+
+/// The text a packager gave, at build time or at run time, to say how this
+/// installation is updated. When present the app checks nothing by itself.
+fn update_explanation() -> Option<String> {
+    option_env!("IDE_UPDATE_EXPLANATION")
         .map(ToOwned::to_owned)
-        .or_else(|| env::var("ZED_UPDATE_EXPLANATION").ok())
-    {
+        .or_else(|| env::var("IDE_UPDATE_EXPLANATION").ok())
+}
+
+fn channel_checks_for_updates(cx: &App) -> bool {
+    ReleaseChannel::try_global(cx)
+        .map(|channel| channel.poll_for_updates())
+        .unwrap_or(false)
+}
+
+/// The product's site without its scheme, as written in a sentence.
+fn website_name() -> &'static str {
+    let url = branding::WEBSITE_URL;
+    let url = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    url.trim_end_matches('/')
+}
+
+pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
+    check_with_explanation(update_explanation(), window, cx);
+}
+
+fn check_with_explanation(update_explanation: Option<String>, window: &mut Window, cx: &mut App) {
+    if let Some(message) = update_explanation {
         drop(window.prompt(
-            gpui::PromptLevel::Info,
-            "Zed was installed via a package manager.",
+            PromptLevel::Info,
+            &format!(
+                "{} was installed via a package manager.",
+                branding::PRODUCT_NAME
+            ),
             Some(&message),
             &["OK"],
             cx,
@@ -322,43 +276,86 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
         return;
     }
 
-    if !ReleaseChannel::try_global(cx)
-        .map(|channel| channel.poll_for_updates())
-        .unwrap_or(false)
-    {
-        return;
-    }
-
-    if let Some(updater) = AutoUpdater::get(cx) {
-        updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
-    } else {
+    let Some(updater) = AutoUpdater::get(cx) else {
         drop(window.prompt(
-            gpui::PromptLevel::Info,
+            PromptLevel::Info,
             "Could not check for updates",
-            Some("Auto-updates disabled for non-bundled app."),
+            Some("The update check is not available in this build."),
             &["OK"],
             cx,
         ));
+        return;
+    };
+
+    if updater.read(cx).releases_repository.is_none() {
+        drop(window.prompt(
+            PromptLevel::Info,
+            NOT_SET_UP_MESSAGE,
+            Some(&format!(
+                "New versions will be announced on {}.",
+                website_name()
+            )),
+            &["OK"],
+            cx,
+        ));
+        return;
     }
+
+    if !channel_checks_for_updates(cx) {
+        drop(window.prompt(
+            PromptLevel::Info,
+            "Development builds do not check for updates.",
+            None,
+            &["OK"],
+            cx,
+        ));
+        return;
+    }
+
+    let finished = updater.update(cx, |updater, cx| updater.check_manually(cx));
+    window
+        .spawn(cx, async move |cx| {
+            // An up-to-date answer and an error are shown by the title bar.
+            let Ok(Some(update)) = finished.await else {
+                return;
+            };
+            let answer = cx
+                .prompt(
+                    PromptLevel::Info,
+                    &format!(
+                        "{} {} is available",
+                        branding::PRODUCT_NAME,
+                        update.version
+                    ),
+                    Some("This build does not install updates itself: download the new version from its release page."),
+                    &["Open Release Page", "Later"],
+                )
+                .await;
+            if let Ok(0) = answer {
+                cx.update(|_, cx| cx.open_url(&update.url)).ok();
+            }
+        })
+        .detach();
 }
 
+/// The page that describes the running version: its release on GitHub for a
+/// stable or preview build, the list of releases otherwise. `None` while the
+/// brand file names no releases repository.
 pub fn release_notes_url(cx: &mut App) -> Option<String> {
     let release_channel = ReleaseChannel::try_global(cx)?;
+    let auto_updater = AutoUpdater::get(cx)?;
+    let auto_updater = auto_updater.read(cx);
+    let repository = auto_updater.releases_repository.as_deref()?;
     let url = match release_channel {
         ReleaseChannel::Stable | ReleaseChannel::Preview => {
-            let auto_updater = AutoUpdater::get(cx)?;
-            let auto_updater = auto_updater.read(cx);
             let mut current_version = auto_updater.current_version.clone();
             current_version.pre = semver::Prerelease::EMPTY;
             current_version.build = semver::BuildMetadata::EMPTY;
-            let release_channel = release_channel.dev_name();
-            let path = format!("/releases/{release_channel}/{current_version}");
-            auto_updater.client.http_client().build_url(&path)
+            release_page_url(repository, &format!("v{current_version}"))
         }
-        ReleaseChannel::Nightly => {
-            "https://github.com/zed-industries/zed/commits/nightly/".to_string()
+        ReleaseChannel::Nightly | ReleaseChannel::Dev => {
+            format!("https://github.com/{repository}/releases")
         }
-        ReleaseChannel::Dev => "https://github.com/zed-industries/zed/commits/main/".to_string(),
     };
     Some(url)
 }
@@ -369,47 +366,8 @@ pub fn view_release_notes(_: &ViewReleaseNotes, cx: &mut App) -> Option<()> {
     None
 }
 
-#[cfg(not(target_os = "windows"))]
-const INSTALLER_DIR_PREFIX: &str = "zed-auto-update";
-
-#[cfg(not(target_os = "windows"))]
-struct InstallerDir(tempfile::TempDir);
-
-#[cfg(not(target_os = "windows"))]
-impl InstallerDir {
-    async fn new() -> Result<Self> {
-        Ok(Self(
-            tempfile::Builder::new()
-                .prefix(INSTALLER_DIR_PREFIX)
-                .tempdir()?,
-        ))
-    }
-
-    fn path(&self) -> &Path {
-        self.0.path()
-    }
-}
-
-#[cfg(target_os = "windows")]
-struct InstallerDir(PathBuf);
-
-#[cfg(target_os = "windows")]
-impl InstallerDir {
-    async fn new() -> Result<Self> {
-        let installer_dir = std::env::current_exe()?
-            .parent()
-            .context("No parent dir for Zed.exe")?
-            .join("updates");
-        if smol::fs::metadata(&installer_dir).await.is_ok() {
-            smol::fs::remove_dir_all(&installer_dir).await?;
-        }
-        smol::fs::create_dir(&installer_dir).await?;
-        Ok(Self(installer_dir))
-    }
-
-    fn path(&self) -> &Path {
-        self.0.as_path()
-    }
+fn release_page_url(repository: &str, tag: &str) -> String {
+    format!("https://github.com/{repository}/releases/tag/{tag}")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -431,27 +389,15 @@ impl AutoUpdater {
         cx.default_global::<GlobalAutoUpdate>().0.clone()
     }
 
-    fn new(current_version: Version, client: Arc<Client>, cx: &mut Context<Self>) -> Self {
-        // On windows, executable files cannot be overwritten while they are
-        // running, so we must wait to overwrite the application until quitting
-        // or restarting. When quitting the app, we spawn the auto update helper
-        // to finish the auto update process after Zed exits. When restarting
-        // the app after an update, we use `set_restart_path` to run the auto
-        // update helper instead of the app, so that it can overwrite the app
-        // and then spawn the new binary.
-        #[cfg(target_os = "windows")]
-        let quit_subscription = Some(cx.on_app_quit(|_, _| finalize_auto_update_on_quit()));
-        #[cfg(not(target_os = "windows"))]
-        let quit_subscription = None;
-
-        cx.on_app_restart(|this, _| {
-            this.quit_subscription.take();
-        })
-        .detach();
-
-        // A download or check that was in flight when the machine went to sleep
-        // is almost certainly riding a TCP connection that silently died during
-        // suspend, so it would otherwise appear to stall indefinitely.
+    fn new(
+        current_version: Version,
+        releases_repository: Option<String>,
+        client: Arc<Client>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // A check that was in flight when the machine went to sleep is almost
+        // certainly riding a TCP connection that silently died during suspend,
+        // so it would otherwise appear to stall indefinitely.
         let wake_subscription = cx.on_system_wake({
             let this = cx.entity().downgrade();
             move |cx| {
@@ -461,10 +407,13 @@ impl AutoUpdater {
 
         Self {
             status: AutoUpdateStatus::Idle,
+            available_update: None,
+            dismissed_update: None,
             current_version,
+            releases_repository,
             client,
             pending_poll: None,
-            quit_subscription,
+            manual_check_finished: None,
             update_check_type: UpdateCheckType::Automatic,
             _wake_subscription: wake_subscription,
             dismissed_status: None,
@@ -472,12 +421,7 @@ impl AutoUpdater {
     }
 
     fn restart_after_wake(&mut self, cx: &mut Context<Self>) {
-        // Only network phases can be safely restarted. `Installing` is a local
-        // operation (mounting a dmg, rsync, etc.) that must not be interrupted.
-        if !matches!(
-            self.status,
-            AutoUpdateStatus::Checking | AutoUpdateStatus::Downloading { .. }
-        ) {
+        if !matches!(self.status, AutoUpdateStatus::Checking) {
             return;
         }
 
@@ -487,29 +431,13 @@ impl AutoUpdater {
         self.poll(check_type, cx);
     }
 
+    /// Checks now, then once every [`POLL_INTERVAL`] for as long as the
+    /// returned task is kept.
     pub fn start_polling(&self, cx: &mut Context<Self>) -> Task<Result<()>> {
-        let poll_interval =
-            ReleaseChannel::try_global(cx).map_or(POLL_INTERVAL, |channel| match channel {
-                ReleaseChannel::Nightly => NIGHTLY_POLL_INTERVAL,
-                _ => POLL_INTERVAL,
-            });
-
         cx.spawn(async move |this, cx| {
-            if cfg!(target_os = "windows") {
-                use util::ResultExt;
-
-                cleanup_windows()
-                    .await
-                    .context("failed to cleanup old directories")
-                    .log_err();
-            }
-
-            #[cfg(all(not(target_os = "windows"), not(test)))]
-            cx.background_spawn(cleanup_stale_installer_dirs()).detach();
-
             loop {
                 this.update(cx, |this, cx| this.poll(UpdateCheckType::Automatic, cx))?;
-                cx.background_executor().timer(poll_interval).await;
+                cx.background_executor().timer(POLL_INTERVAL).await;
             }
         })
     }
@@ -518,9 +446,12 @@ impl AutoUpdater {
         self.update_check_type
     }
 
+    /// Asks for the latest release, unless a check is already running. Does
+    /// nothing, and contacts nothing, without a releases repository.
     pub fn poll(&mut self, check_type: UpdateCheckType, cx: &mut Context<Self>) {
         if check_type.is_manual() {
             self.dismissed_status = None;
+            self.dismissed_update = None;
         }
         if self.pending_poll.is_some() {
             if self.update_check_type == UpdateCheckType::Automatic {
@@ -531,40 +462,75 @@ impl AutoUpdater {
         }
         self.update_check_type = check_type;
 
+        let Some(repository) = self.releases_repository.clone() else {
+            self.finish_check(Ok(UpdateCheck::NotConfigured), cx);
+            return;
+        };
+        let http_client = self.client.http_client();
+        let installed_version = self.current_version.clone();
+
+        self.status = AutoUpdateStatus::Checking;
+        log::info!("checking {repository} for a newer release");
         cx.notify();
 
         self.pending_poll = Some(cx.spawn(async move |this, cx| {
-            let result = Self::update(this.upgrade()?, cx).await;
-            this.update(cx, |this, cx| {
-                this.pending_poll = None;
-                if let Err(error) = result {
-                    let is_missing_dependency =
-                        error.downcast_ref::<MissingDependencyError>().is_some();
-                    this.status = match check_type {
-                        UpdateCheckType::Automatic if is_missing_dependency => {
-                            log::warn!("auto-update: {}", error);
-                            AutoUpdateStatus::Errored {
-                                error: Arc::new(error),
-                            }
-                        }
-                        // Be quiet if the check was automated (e.g. when offline)
-                        UpdateCheckType::Automatic => {
-                            log::info!("auto-update check failed: error:{:?}", error);
-                            AutoUpdateStatus::Idle
-                        }
-                        UpdateCheckType::Manual => {
-                            log::error!("auto-update failed: error:{:?}", error);
-                            AutoUpdateStatus::Errored {
-                                error: Arc::new(error),
-                            }
-                        }
-                    };
-
-                    cx.notify();
-                }
-            })
-            .ok()
+            let result =
+                check_latest_release(Some(&repository), installed_version, http_client).await;
+            this.update(cx, |this, cx| this.finish_check(result, cx))
+                .ok()
         }));
+    }
+
+    /// Starts a check on the user's request. The receiver gets the newer
+    /// release if there is one, and `None` in every other case.
+    fn check_manually(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> oneshot::Receiver<Option<AvailableUpdate>> {
+        let (finished, receiver) = oneshot::channel();
+        self.manual_check_finished = Some(finished);
+        self.poll(UpdateCheckType::Manual, cx);
+        receiver
+    }
+
+    fn finish_check(&mut self, result: Result<UpdateCheck>, cx: &mut Context<Self>) {
+        self.pending_poll = None;
+        let check_type = self.update_check_type;
+        let mut found = None;
+        self.status = match result {
+            Ok(UpdateCheck::Available(update)) => {
+                log::info!("version {} is available at {}", update.version, update.url);
+                self.available_update = Some(update.clone());
+                found = Some(update);
+                AutoUpdateStatus::Idle
+            }
+            Ok(UpdateCheck::UpToDate) => {
+                self.available_update = None;
+                if check_type.is_manual() {
+                    cx.emit(AutoUpdateEvent::UpToDate);
+                }
+                AutoUpdateStatus::Idle
+            }
+            Ok(UpdateCheck::NotConfigured) => AutoUpdateStatus::Idle,
+            Err(error) => match check_type {
+                // Be quiet if the check was automated (offline, or refused by
+                // GitHub for an hour): the next attempt is a day away.
+                UpdateCheckType::Automatic => {
+                    log::info!("update check failed, next attempt in a day: {error:#}");
+                    AutoUpdateStatus::Idle
+                }
+                UpdateCheckType::Manual => {
+                    log::error!("update check failed: {error:#}");
+                    AutoUpdateStatus::Errored {
+                        error: Arc::new(error),
+                    }
+                }
+            },
+        };
+        if let Some(finished) = self.manual_check_finished.take() {
+            finished.send(found).ok();
+        }
+        cx.notify();
     }
 
     pub fn current_version(&self) -> Version {
@@ -573,6 +539,23 @@ impl AutoUpdater {
 
     pub fn status(&self) -> AutoUpdateStatus {
         self.status.clone()
+    }
+
+    /// The newer release found by the last successful check, unless the user
+    /// dismissed that version. A manual check brings a dismissed one back.
+    pub fn available_update(&self) -> Option<AvailableUpdate> {
+        self.available_update
+            .clone()
+            .filter(|update| self.dismissed_update.as_ref() != Some(&update.version))
+    }
+
+    /// Stops announcing the release that is available now. A later release is
+    /// announced again.
+    pub fn dismiss_available_update(&mut self, cx: &mut Context<Self>) {
+        if let Some(update) = &self.available_update {
+            self.dismissed_update = Some(update.version.clone());
+            cx.notify();
+        }
     }
 
     pub fn dismissed_status(&self) -> Option<AutoUpdateStatus> {
@@ -593,1295 +576,732 @@ impl AutoUpdater {
         true
     }
 
-    // If you are packaging Zed and need to override the place it downloads SSH remotes from,
-    // you can override this function. You should also update get_remote_server_release_url to return
-    // Ok(None).
+    /// Remote server builds are not published for this product, so there is
+    /// nothing to download: this always fails, without any request. A remote
+    /// project therefore opens only where a matching server is already on the
+    /// host, or from a development build, which compiles its own.
+    ///
+    /// Upstream fetched its own `zed-remote-server` here; that binary must
+    /// never be uploaded to a user's host by this application.
     pub async fn download_remote_server_release(
-        release_channel: ReleaseChannel,
-        version: Option<Version>,
+        _release_channel: ReleaseChannel,
+        _version: Option<Version>,
         os: &str,
         arch: &str,
-        set_status: impl Fn(&str, &mut AsyncApp) + Send + 'static,
-        cx: &mut AsyncApp,
+        _set_status: impl Fn(&str, &mut AsyncApp) + Send + 'static,
+        _cx: &mut AsyncApp,
     ) -> Result<PathBuf> {
-        let this = cx.update(|cx| {
-            cx.default_global::<GlobalAutoUpdate>()
-                .0
-                .clone()
-                .context("auto-update not initialized")
-        })?;
-
-        set_status("Fetching remote server release", cx);
-        let release = Self::get_release_asset(
-            &this,
-            release_channel,
-            version,
-            "zed-remote-server",
-            os,
-            arch,
-            cx,
+        anyhow::bail!(
+            "{} does not publish remote server builds yet, so there is none to download for {os} {arch}",
+            branding::PRODUCT_NAME
         )
-        .await?;
-
-        let servers_dir = paths::remote_servers_dir();
-        let channel_dir = servers_dir.join(release_channel.dev_name());
-        let platform_dir = channel_dir.join(format!("{}-{}", os, arch));
-        let version_path = platform_dir.join(format!("{}.gz", release.version));
-        smol::fs::create_dir_all(&platform_dir).await.ok();
-
-        let client = this.read_with(cx, |this, _| this.client.http_client());
-
-        if smol::fs::metadata(&version_path).await.is_err() {
-            log::info!(
-                "downloading zed-remote-server {os} {arch} version {}",
-                release.version
-            );
-            set_status("Downloading remote server", cx);
-            download_remote_server_binary(&version_path, release, client).await?;
-        }
-
-        if let Err(error) =
-            cleanup_remote_server_cache(&platform_dir, &version_path, REMOTE_SERVER_CACHE_LIMIT)
-                .await
-        {
-            log::warn!(
-                "Failed to clean up remote server cache in {:?}: {error:#}",
-                platform_dir
-            );
-        }
-
-        Ok(version_path)
     }
 
+    /// Always `Ok(None)`: there is no address a remote host could download a
+    /// server from (see [`Self::download_remote_server_release`]).
     pub async fn get_remote_server_release_url(
-        channel: ReleaseChannel,
-        version: Option<Version>,
-        os: &str,
-        arch: &str,
-        cx: &mut AsyncApp,
+        _channel: ReleaseChannel,
+        _version: Option<Version>,
+        _os: &str,
+        _arch: &str,
+        _cx: &mut AsyncApp,
     ) -> Result<Option<String>> {
-        let this = cx.update(|cx| {
-            cx.default_global::<GlobalAutoUpdate>()
-                .0
-                .clone()
-                .context("auto-update not initialized")
-        })?;
-
-        let release =
-            Self::get_release_asset(&this, channel, version, "zed-remote-server", os, arch, cx)
-                .await?;
-
-        Ok(Some(release.url))
+        Ok(None)
     }
+}
 
-    async fn get_release_asset(
-        this: &Entity<Self>,
-        release_channel: ReleaseChannel,
-        version: Option<Version>,
-        asset: &str,
-        os: &str,
-        arch: &str,
-        cx: &mut AsyncApp,
-    ) -> Result<ReleaseAsset> {
-        let client = this.read_with(cx, |this, _| this.client.clone());
+/// Asks GitHub for the latest release of `repository` and compares it with the
+/// running version. This is the only request the crate ever makes; without a
+/// repository it makes none.
+async fn check_latest_release(
+    repository: Option<&str>,
+    installed_version: Version,
+    http_client: Arc<dyn HttpClient>,
+) -> Result<UpdateCheck> {
+    let Some(repository) = repository else {
+        return Ok(UpdateCheck::NotConfigured);
+    };
 
-        let (system_id, metrics_id, is_staff) = if client.telemetry().metrics_enabled() {
-            (
-                client.telemetry().system_id(),
-                client.telemetry().metrics_id(),
-                client.telemetry().is_staff(),
-            )
-        } else {
-            (None, None, None)
-        };
-
-        let version = if let Some(mut version) = version {
-            version.pre = semver::Prerelease::EMPTY;
-            version.build = semver::BuildMetadata::EMPTY;
-            version.to_string()
-        } else {
-            "latest".to_string()
-        };
-        let http_client = client.http_client();
-
-        let path = format!("/releases/{}/{}/asset", release_channel.dev_name(), version,);
-        let url = http_client.build_zed_cloud_url_with_query(
-            &path,
-            AssetQuery {
-                os,
-                arch,
-                asset,
-                metrics_id: metrics_id.as_deref(),
-                system_id: system_id.as_deref(),
-                is_staff,
-            },
-        )?;
-
-        let mut response = http_client
-            .get(url.as_str(), Default::default(), true)
-            .await?;
-        let mut body = Vec::new();
-        response.body_mut().read_to_end(&mut body).await?;
-
-        anyhow::ensure!(
-            response.status().is_success(),
-            "failed to fetch release: {:?}",
-            String::from_utf8_lossy(&body),
-        );
-
-        serde_json::from_slice(body.as_slice()).with_context(|| {
-            format!(
-                "error deserializing release {:?}",
-                String::from_utf8_lossy(&body),
-            )
-        })
-    }
-
-    async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
-        let (client, installed_version, previous_status, release_channel) =
-            this.read_with(cx, |this, cx| {
-                (
-                    this.client.http_client(),
-                    this.current_version.clone(),
-                    this.status.clone(),
-                    ReleaseChannel::try_global(cx).unwrap_or(ReleaseChannel::Stable),
-                )
-            });
-
-        Self::check_dependencies()?;
-
-        this.update(cx, |this, cx| {
-            this.status = AutoUpdateStatus::Checking;
-            log::info!("Auto Update: checking for updates");
-            cx.notify();
-        });
-
-        let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
-        let fetched_version = fetched_release_data.clone().version;
-        let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
-        let newer_version = Self::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version,
-            previous_status.clone(),
-        )?;
-
-        let Some(newer_version) = newer_version else {
-            this.update(cx, |this, cx| {
-                this.status = match previous_status {
-                    AutoUpdateStatus::Updated { .. } => previous_status,
-                    _ => {
-                        if this.update_check_type.is_manual() {
-                            cx.emit(AutoUpdateEvent::UpToDate);
-                        }
-                        AutoUpdateStatus::Idle
-                    }
-                };
-                cx.notify();
-            });
-            return Ok(());
-        };
-
-        this.update(cx, |this, cx| {
-            this.status = AutoUpdateStatus::Downloading {
-                version: newer_version.clone(),
-                progress: None,
-            };
-            cx.notify();
-        });
-
-        let installer_dir = InstallerDir::new()
-            .await
-            .context("Failed to create installer dir")?;
-        let target_path = Self::target_path(&installer_dir).await?;
-        let progress_entity = this.clone();
-        let mut progress_cx = cx.clone();
-        download_release(
-            &target_path,
-            fetched_release_data,
-            client,
-            move |progress| {
-                progress_entity.update(&mut progress_cx, |this, cx| {
-                    if let AutoUpdateStatus::Downloading {
-                        progress: current_progress,
-                        ..
-                    } = &mut this.status
-                    {
-                        *current_progress = progress;
-                        cx.notify();
-                    }
+    let release =
+        match github_releases::latest_github_release(repository, false, false, http_client).await {
+            Ok(release) => release,
+            Err(error) if no_release_is_published(&error) => return Ok(UpdateCheck::UpToDate),
+            Err(error) => {
+                return Err(match refused_with_status(&error) {
+                    Some(status @ (403 | 429)) => RateLimited { status }.into(),
+                    _ => error.context(format!("could not read the releases of {repository}")),
                 });
-            },
-        )
-        .await
-        .with_context(|| format!("Failed to download update to {}", target_path.display()))?;
-
-        this.update(cx, |this, cx| {
-            this.status = AutoUpdateStatus::Installing {
-                version: newer_version.clone(),
-            };
-            cx.notify();
-        });
-
-        #[cfg(test)]
-        let install_result = match cx
-            .try_read_global::<tests::InstallOverride, _>(|g, _| g.0.clone())
-            .map(|test_install| test_install(&target_path, cx))
-        {
-            Some(result) => result,
-            None => return Ok(()),
+            }
         };
 
-        #[cfg(not(test))]
-        let install_result = {
-            let running_app_path = cx.update(|cx| cx.app_path())?;
-            let background_executor = cx.background_executor().clone();
-            let channel = cx.update(|cx| ReleaseChannel::global(cx).dev_name());
-            cx.background_spawn(Self::install_release(
-                installer_dir,
-                target_path.clone(),
-                running_app_path,
-                channel,
-                background_executor,
-            ))
-            .await
-        };
-        let new_binary_path = install_result
-            .with_context(|| format!("Failed to install update at: {}", target_path.display()))?;
-        if let Some(new_binary_path) = new_binary_path {
-            cx.update(|cx| cx.set_restart_path(new_binary_path));
-        }
-
-        this.update(cx, |this, cx| {
-            this.set_should_show_update_notification(true, cx)
-                .detach_and_log_err(cx);
-            this.status = AutoUpdateStatus::Updated {
-                version: newer_version,
-            };
-            cx.notify();
-        });
-        Ok(())
-    }
-
-    fn check_if_fetched_version_is_newer(
-        release_channel: ReleaseChannel,
-        app_commit_sha: Result<Option<String>>,
-        installed_version: Version,
-        fetched_version: String,
-        status: AutoUpdateStatus,
-    ) -> Result<Option<Version>> {
-        let fetched_version = fetched_version.parse::<Version>()?;
-
-        match release_channel {
-            ReleaseChannel::Nightly => {
-                let should_download = if let AutoUpdateStatus::Updated { version } = status {
-                    fetched_version != version
-                } else {
-                    let fetched_sha = fetched_version.build.as_str().rsplit('.').next();
-                    app_commit_sha
-                        .ok()
-                        .flatten()
-                        .is_none_or(|sha| fetched_sha != Some(sha.as_str()))
-                };
-                Ok(should_download.then_some(fetched_version))
-            }
-            _ => {
-                let current_version = if let AutoUpdateStatus::Updated { version } = status {
-                    version
-                } else {
-                    installed_version
-                };
-                Ok(Self::check_if_fetched_version_is_newer_non_nightly(
-                    current_version,
-                    fetched_version,
-                ))
-            }
-        }
-    }
-
-    fn check_dependencies() -> Result<()> {
-        #[cfg(target_os = "linux")]
-        if which::which("rsync").is_err() {
-            let install_hint = linux_rsync_install_hint();
-            return Err(MissingDependencyError(format!(
-                "rsync is required for auto-updates but is not installed. {install_hint}"
-            ))
-            .into());
-        }
-
-        #[cfg(target_os = "macos")]
-        anyhow::ensure!(
-            which::which("rsync").is_ok(),
-            "Could not auto-update because the required rsync utility was not found."
-        );
-
-        Ok(())
-    }
-
-    async fn target_path(installer_dir: &InstallerDir) -> Result<PathBuf> {
-        let filename = match OS {
-            "macos" => anyhow::Ok("Zed.dmg"),
-            "linux" => Ok("zed.tar.gz"),
-            "windows" => Ok("Zed.exe"),
-            unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
-        }?;
-
-        Ok(installer_dir.path().join(filename))
-    }
-
-    #[cfg_attr(test, allow(dead_code))]
-    async fn install_release(
-        installer_dir: InstallerDir,
-        target_path: PathBuf,
-        running_app_path: PathBuf,
-        channel: &str,
-        background_executor: BackgroundExecutor,
-    ) -> Result<Option<PathBuf>> {
-        match OS {
-            "macos" => {
-                install_release_macos(
-                    &installer_dir,
-                    &target_path,
-                    running_app_path,
-                    &background_executor,
-                )
-                .await
-            }
-            "linux" => {
-                install_release_linux(&installer_dir, &target_path, channel, running_app_path).await
-            }
-            "windows" => install_release_windows(&target_path).await,
-            unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
-        }
-    }
-
-    fn check_if_fetched_version_is_newer_non_nightly(
-        mut installed_version: Version,
-        fetched_version: Version,
-    ) -> Option<Version> {
-        // For non-nightly releases, ignore build and pre-release fields as they're not provided by our endpoints right now.
-        installed_version.pre = semver::Prerelease::EMPTY;
-        installed_version.build = semver::BuildMetadata::EMPTY;
-        (fetched_version > installed_version).then_some(fetched_version)
-    }
-
-    pub fn set_should_show_update_notification(
-        &self,
-        should_show: bool,
-        cx: &App,
-    ) -> Task<Result<()>> {
-        let kvp = KeyValueStore::global(cx);
-        cx.background_spawn(async move {
-            if should_show {
-                kvp.write_kvp(
-                    SHOULD_SHOW_UPDATE_NOTIFICATION_KEY.to_string(),
-                    "".to_string(),
-                )
-                .await?;
-            } else {
-                kvp.delete_kvp(SHOULD_SHOW_UPDATE_NOTIFICATION_KEY.to_string())
-                    .await?;
-            }
-            Ok(())
-        })
-    }
-
-    pub fn should_show_update_notification(&self, cx: &App) -> Task<Result<bool>> {
-        let kvp = KeyValueStore::global(cx);
-        cx.background_spawn(async move {
-            Ok(kvp.read_kvp(SHOULD_SHOW_UPDATE_NOTIFICATION_KEY)?.is_some())
-        })
-    }
+    let fetched_version = parse_release_tag(&release.tag_name)?;
+    Ok(match newer_version(installed_version, fetched_version) {
+        Some(version) => UpdateCheck::Available(AvailableUpdate {
+            version,
+            url: release_page_url(repository, &release.tag_name),
+        }),
+        None => UpdateCheck::UpToDate,
+    })
 }
 
-async fn download_remote_server_binary(
-    target_path: &PathBuf,
-    release: ReleaseAsset,
-    client: Arc<HttpClientWithUrl>,
-) -> Result<()> {
-    let temp = tempfile::Builder::new().tempfile_in(remote_servers_dir())?;
-    let mut temp_file = File::create(&temp).await?;
-
-    let mut response = client.get(&release.url, Default::default(), true).await?;
-    anyhow::ensure!(
-        response.status().is_success(),
-        "failed to download remote server release: {:?}",
-        response.status()
-    );
-    smol::io::copy(response.body_mut(), &mut temp_file).await?;
-    smol::fs::rename(&temp, &target_path).await?;
-
-    Ok(())
+/// The HTTP status of a request GitHub refused. `latest_github_release` only
+/// reports it as text ("status error 403, response: …").
+fn refused_with_status(error: &anyhow::Error) -> Option<u16> {
+    error.chain().find_map(|cause| {
+        let message = cause.to_string();
+        let status = message.strip_prefix("status error ")?;
+        status.split(',').next()?.trim().parse().ok()
+    })
 }
 
-async fn cleanup_remote_server_cache(
-    platform_dir: &Path,
-    keep_path: &Path,
-    limit: usize,
-) -> Result<()> {
-    if limit == 0 {
-        return Ok(());
-    }
-
-    let mut entries = smol::fs::read_dir(platform_dir).await?;
-    let now = SystemTime::now();
-    let mut candidates = Vec::new();
-
-    while let Some(entry) = entries.next().await {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension() != Some(OsStr::new("gz")) {
-            continue;
-        }
-
-        let mtime = if path == keep_path {
-            now
-        } else {
-            smol::fs::metadata(&path)
-                .await
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH)
-        };
-
-        candidates.push((path, mtime));
-    }
-
-    if candidates.len() <= limit {
-        return Ok(());
-    }
-
-    candidates.sort_by(|(path_a, time_a), (path_b, time_b)| {
-        time_b.cmp(time_a).then_with(|| path_a.cmp(path_b))
-    });
-
-    for (index, (path, _)) in candidates.into_iter().enumerate() {
-        if index < limit || path == keep_path {
-            continue;
-        }
-
-        if let Err(error) = smol::fs::remove_file(&path).await {
-            log::warn!(
-                "Failed to remove old remote server archive {:?}: {}",
-                path,
-                error
-            );
-        }
-    }
-
-    Ok(())
+/// Whether `latest_github_release` failed because the repository has no
+/// published release (it reports that as an error, with this text).
+fn no_release_is_published(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string() == "finding a prerelease")
 }
 
-async fn download_release(
-    target_path: &Path,
-    release: ReleaseAsset,
-    client: Arc<HttpClientWithUrl>,
-    mut on_progress: impl FnMut(Option<f32>),
-) -> Result<()> {
-    let mut target_file = File::create(&target_path).await?;
-
-    let mut response = client.get(&release.url, Default::default(), true).await?;
-    anyhow::ensure!(
-        response.status().is_success(),
-        "failed to download update: {:?}",
-        response.status()
-    );
-
-    let total_bytes = response
-        .headers()
-        .get(http_client::http::header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|total_bytes| *total_bytes > 0);
-
-    let mut downloaded_bytes: u64 = 0;
-    let mut last_reported_percent: Option<u8> = None;
-    let mut buffer = [0u8; 8192];
-    let body = response.body_mut();
-    loop {
-        let bytes_read = body.read(&mut buffer).await?;
-        if bytes_read == 0 {
-            break;
-        }
-        target_file.write_all(&buffer[..bytes_read]).await?;
-        downloaded_bytes += bytes_read as u64;
-
-        if let Some(total_bytes) = total_bytes {
-            let fraction = (downloaded_bytes as f32 / total_bytes as f32).clamp(0.0, 1.0);
-            // Only report when the whole-number percentage changes to avoid notifying the UI on every chunk.
-            let percent = (fraction * 100.0) as u8;
-            if last_reported_percent != Some(percent) {
-                last_reported_percent = Some(percent);
-                on_progress(Some(fraction));
-            }
-        }
-    }
-    target_file.flush().await?;
-    if total_bytes.is_some() && last_reported_percent != Some(100) {
-        on_progress(Some(1.0));
-    }
-    log::info!("downloaded update. path:{:?}", target_path);
-
-    Ok(())
+/// Release tags are the version, with or without a leading `v`.
+fn parse_release_tag(tag: &str) -> Result<Version> {
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    version
+        .parse::<Version>()
+        .with_context(|| format!("release tag {tag:?} is not a version"))
 }
 
-async fn install_release_linux(
-    temp_dir: &InstallerDir,
-    downloaded_tar_gz: &Path,
-    channel: &str,
-    running_app_path: PathBuf,
-) -> Result<Option<PathBuf>> {
-    let home_dir = PathBuf::from(env::var("HOME").context("no HOME env var set")?);
-
-    let extracted = temp_dir.path().join("zed");
-    fs::create_dir_all(&extracted)
-        .await
-        .context("failed to create directory into which to extract update")?;
-
-    let mut cmd = new_command("tar");
-    cmd.arg("-xzf")
-        .arg(&downloaded_tar_gz)
-        .arg("-C")
-        .arg(&extracted);
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| "failed to extract: {cmd}")?;
-
-    anyhow::ensure!(
-        output.status.success(),
-        "failed to extract {:?} to {:?}: {:?}",
-        downloaded_tar_gz,
-        extracted,
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let suffix = if channel != "stable" {
-        format!("-{}", channel)
-    } else {
-        String::default()
-    };
-    let app_folder_name = format!("zed{}.app", suffix);
-
-    let from = extracted.join(&app_folder_name);
-    let mut to = home_dir.join(".local");
-
-    let expected_suffix = format!("{}/libexec/zed-editor", app_folder_name);
-
-    if let Some(prefix) = running_app_path
-        .to_str()
-        .and_then(|str| str.strip_suffix(&expected_suffix))
-    {
-        to = PathBuf::from(prefix);
-    }
-
-    let mut cmd = new_command("rsync");
-    cmd.args(["-av", "--delete"]).arg(&from).arg(&to);
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| "failed to rsync: {cmd}")?;
-
-    anyhow::ensure!(
-        output.status.success(),
-        "failed to copy Zed update from {:?} to {:?}: {:?}",
-        from,
-        to,
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    Ok(Some(to.join(expected_suffix)))
-}
-
-async fn install_release_macos(
-    temp_dir: &InstallerDir,
-    downloaded_dmg: &Path,
-    running_app_path: PathBuf,
-    background_executor: &BackgroundExecutor,
-) -> Result<Option<PathBuf>> {
-    let running_app_filename = running_app_path
-        .file_name()
-        .with_context(|| format!("invalid running app path {running_app_path:?}"))?;
-
-    let mount_path = temp_dir.path().join("Zed");
-    let mut mounted_app_path: OsString = mount_path.join(running_app_filename).into();
-
-    mounted_app_path.push("/");
-    let mut cmd = new_command("hdiutil");
-    cmd.args(["attach", "-nobrowse"])
-        .arg(&downloaded_dmg)
-        .arg("-mountroot")
-        .arg(temp_dir.path());
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| "failed to mount: {cmd}")?;
-
-    anyhow::ensure!(
-        output.status.success(),
-        "failed to mount: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let unmounter = MacOsUnmounter {
-        mount_path: mount_path.clone(),
-        background_executor,
-    };
-
-    let mut cmd = new_command("rsync");
-    cmd.args(["-av", "--delete", "--exclude", "Icon?"])
-        .arg(&mounted_app_path)
-        .arg(&running_app_path);
-    let rsync_output = cmd.output().await;
-
-    // Await the unmount (even if rsync failed) so that the installer temp dir
-    // can be deleted once this function returns.
-    unmounter.unmount().await;
-
-    let output = rsync_output.with_context(|| "failed to rsync: {cmd}")?;
-
-    anyhow::ensure!(
-        output.status.success(),
-        "failed to copy app: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    Ok(None)
-}
-
-/// Removes stale installer dirs from the system temp dir. Older Zed versions
-/// leaked one per update by deleting the dir while the downloaded disk image
-/// was still mounted inside it, which made the deletion fail silently.
-#[cfg(any(rust_analyzer, all(not(target_os = "windows"), not(test))))]
-async fn cleanup_stale_installer_dirs() {
-    const STALE_INSTALLER_DIR_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-
-    let temp_dir = std::env::temp_dir();
-    let Ok(mut entries) = fs::read_dir(&temp_dir).await else {
-        log::warn!("failed to read temp dir {temp_dir:?} while cleaning up installer dirs");
-        return;
-    };
-    while let Some(entry) = entries.next().await {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(INSTALLER_DIR_PREFIX)
-        {
-            continue;
-        }
-        // Leave recent dirs alone, as they may belong to an update currently
-        // in progress in another Zed instance.
-        let is_stale = entry.metadata().await.ok().is_some_and(|metadata| {
-            metadata.is_dir()
-                && metadata.modified().ok().is_some_and(|modified| {
-                    SystemTime::now()
-                        .duration_since(modified)
-                        .is_ok_and(|age| age > STALE_INSTALLER_DIR_AGE)
-                })
-        });
-        if is_stale {
-            if let Err(error) = fs::remove_dir_all(entry.path()).await {
-                log::warn!(
-                    "failed to remove stale installer dir {:?}: {error}",
-                    entry.path()
-                );
-            } else {
-                log::info!("removed stale installer dir {:?}", entry.path());
-            }
-        }
-    }
-}
-
-async fn cleanup_windows() -> Result<()> {
-    let parent = std::env::current_exe()?
-        .parent()
-        .context("No parent dir for Zed.exe")?
-        .to_owned();
-
-    // keep in sync with crates/auto_update_helper/src/updater.rs
-    _ = smol::fs::remove_dir(parent.join("updates")).await;
-    _ = smol::fs::remove_dir(parent.join("install")).await;
-    _ = smol::fs::remove_dir(parent.join("old")).await;
-
-    Ok(())
-}
-
-async fn install_release_windows(downloaded_installer: &Path) -> Result<Option<PathBuf>> {
-    let mut cmd = new_command(downloaded_installer);
-    cmd.arg("/verysilent")
-        .arg("/update=true")
-        .arg("/MERGETASKS=!desktopicon");
-    let output = cmd.output().await?;
-    anyhow::ensure!(
-        output.status.success(),
-        "failed to start installer: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // We return the path to the update helper program, because it will
-    // perform the final steps of the update process, copying the new binary,
-    // deleting the old one, and launching the new binary.
-    let helper_path = std::env::current_exe()?
-        .parent()
-        .context("No parent dir for Zed.exe")?
-        .join("tools")
-        .join("auto_update_helper.exe");
-    Ok(Some(helper_path))
-}
-
-pub async fn finalize_auto_update_on_quit() {
-    let Some(installer_path) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.join("updates")))
-    else {
-        return;
-    };
-
-    // The installer will create a flag file after it finishes updating
-    let flag_file = installer_path.join("versions.txt");
-    if flag_file.exists()
-        && let Some(helper) = installer_path
-            .parent()
-            .map(|p| p.join("tools").join("auto_update_helper.exe"))
-    {
-        let mut command = util::command::new_command(helper);
-        command.arg("--launch");
-        command.arg("false");
-        if let Ok(mut cmd) = command.spawn() {
-            _ = cmd.status().await;
-        }
-    }
+fn newer_version(mut installed_version: Version, fetched_version: Version) -> Option<Version> {
+    // Ignore the pre-release and build fields of the running version: release
+    // tags carry neither.
+    installed_version.pre = semver::Prerelease::EMPTY;
+    installed_version.build = semver::BuildMetadata::EMPTY;
+    (fetched_version > installed_version).then_some(fetched_version)
 }
 
 #[cfg(test)]
 mod tests {
-    use client::Client;
+    use super::*;
     use clock::FakeSystemClock;
-    use futures::channel::oneshot;
-    use gpui::TestAppContext;
-    use http_client::{FakeHttpClient, Response};
-    use settings::default_settings;
-    use std::{
-        rc::Rc,
-        sync::{
-            Arc,
-            atomic::{self, AtomicBool},
-        },
-    };
-    use tempfile::tempdir;
+    use gpui::{BorrowAppContext as _, TestAppContext, VisualTestContext};
+    use http_client::{FakeHttpClient, HttpClientWithUrl, Response};
+    use parking_lot::Mutex;
 
     #[ctor::ctor(unsafe)]
     fn init_logger() {
         zlog::init_test();
     }
 
-    use super::*;
+    const REPOSITORY: &str = "example/ide";
+    const RELEASES_URL: &str = "https://api.github.com/repos/example/ide/releases";
 
-    pub(super) struct InstallOverride(pub Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>>);
-    impl Global for InstallOverride {}
-
-    #[gpui::test]
-    fn test_auto_update_defaults_to_true(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            let mut store = SettingsStore::new(cx, &settings::default_settings());
-            store
-                .set_default_settings(&default_settings(), cx)
-                .expect("Unable to set default settings");
-            store
-                .set_user_settings("{}", cx)
-                .expect("Unable to set user settings");
-            cx.set_global(store);
-            assert!(AutoUpdateSetting::get_global(cx).0);
-        });
+    /// A stand-in for GitHub. It answers the releases list of [`REPOSITORY`]
+    /// with the status and body it was last given, anything else with 404, and
+    /// records the address of every request: no test touches the network.
+    struct FakeGitHub {
+        requests: Arc<Mutex<Vec<String>>>,
+        response: Arc<Mutex<(u16, String)>>,
+        http_client: Arc<HttpClientWithUrl>,
     }
 
-    #[gpui::test]
-    async fn test_auto_update_downloads(cx: &mut TestAppContext) {
-        cx.background_executor.allow_parking();
-        zlog::init_test();
-        let release_available = Arc::new(AtomicBool::new(false));
-
-        let (dmg_tx, dmg_rx) = oneshot::channel::<String>();
-
-        cx.update(|cx| {
-            settings::init(cx);
-
-            let current_version = semver::Version::new(0, 100, 0);
-            release_channel::init_test(current_version, ReleaseChannel::Stable, cx);
-
-            let clock = Arc::new(FakeSystemClock::new());
-            let release_available = Arc::clone(&release_available);
-            let dmg_rx = Arc::new(parking_lot::Mutex::new(Some(dmg_rx)));
-            let fake_client_http = FakeHttpClient::create(move |req| {
-                let release_available = release_available.load(atomic::Ordering::Relaxed);
-                let dmg_rx = dmg_rx.clone();
-                async move {
-                if req.uri().path() == "/releases/stable/latest/asset" {
-                    if release_available {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.1","url":"https://test.example/new-download"}"#.into()
-                        ).unwrap());
+    impl FakeGitHub {
+        fn new(status: u16, body: impl Into<String>) -> Self {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let response = Arc::new(Mutex::new((status, body.into())));
+            let http_client = FakeHttpClient::create({
+                let requests = requests.clone();
+                let response = response.clone();
+                move |request| {
+                    let url = request.uri().to_string();
+                    let (status, body) = if url == RELEASES_URL {
+                        response.lock().clone()
                     } else {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.0","url":"https://test.example/old-download"}"#.into()
-                        ).unwrap());
-                    }
-                } else if req.uri().path() == "/new-download" {
-                    return Ok(Response::builder().status(200).body({
-                        let dmg_rx = dmg_rx.lock().take().unwrap();
-                        dmg_rx.await.unwrap().into()
-                    }).unwrap());
-                }
-                Ok(Response::builder().status(404).body("".into()).unwrap())
+                        (404, String::new())
+                    };
+                    requests.lock().push(url);
+                    async move { Ok(Response::builder().status(status).body(body.into())?) }
                 }
             });
-            let client = Client::new(clock, fake_client_http, cx);
-            crate::init(client, cx);
+            Self {
+                requests,
+                response,
+                http_client,
+            }
+        }
+
+        fn respond_with(&self, status: u16, body: impl Into<String>) {
+            *self.response.lock() = (status, body.into());
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().clone()
+        }
+    }
+
+    /// The body GitHub sends for a list of releases, newest first.
+    fn releases(tags: &[(&str, bool)]) -> String {
+        let releases = tags
+            .iter()
+            .map(|(tag, pre_release)| {
+                format!(
+                    r#"{{"tag_name":"{tag}","prerelease":{pre_release},"assets":[],"tarball_url":"","zipball_url":""}}"#
+                )
+            })
+            .collect::<Vec<_>>();
+        format!("[{}]", releases.join(","))
+    }
+
+    fn release(tag: &str) -> String {
+        releases(&[(tag, false)])
+    }
+
+    fn installed() -> Version {
+        Version::new(0, 100, 0)
+    }
+
+    fn available(version: Version, tag: &str) -> AvailableUpdate {
+        AvailableUpdate {
+            version,
+            url: format!("https://github.com/example/ide/releases/tag/{tag}"),
+        }
+    }
+
+    async fn check_against(github: &FakeGitHub) -> Result<UpdateCheck> {
+        check_latest_release(Some(REPOSITORY), installed(), github.http_client.clone()).await
+    }
+
+    fn init_test_updater(
+        github: &FakeGitHub,
+        channel: ReleaseChannel,
+        repository: Option<&str>,
+        auto_update: bool,
+        cx: &mut TestAppContext,
+    ) -> Entity<AutoUpdater> {
+        cx.update(|cx| {
+            settings::init(cx);
+            set_auto_update(auto_update, cx);
+            release_channel::init_test(installed(), channel, cx);
+            let client = Client::new(
+                Arc::new(FakeSystemClock::new()),
+                github.http_client.clone(),
+                cx,
+            );
+            init_updater(repository.map(str::to_string), None, client, cx);
+            AutoUpdater::get(cx).expect("the updater should exist")
+        })
+    }
+
+    fn set_auto_update(auto_update: bool, cx: &mut App) {
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            store
+                .set_user_settings(&format!(r#"{{"auto_update": {auto_update}}}"#), cx)
+                .expect("the user settings should parse");
         });
+    }
 
-        let auto_updater = cx.update(|cx| AutoUpdater::get(cx).expect("auto updater should exist"));
-
-        cx.background_executor.run_until_parked();
-
-        auto_updater.read_with(cx, |updater, _| {
-            assert_eq!(updater.status(), AutoUpdateStatus::Idle);
-            assert_eq!(updater.current_version(), semver::Version::new(0, 100, 0));
-        });
-
-        release_available.store(true, atomic::Ordering::SeqCst);
+    fn a_day_passes(cx: &mut TestAppContext) {
         cx.background_executor.advance_clock(POLL_INTERVAL);
         cx.background_executor.run_until_parked();
-
-        loop {
-            cx.background_executor.timer(Duration::from_millis(0)).await;
-            cx.run_until_parked();
-            let status = auto_updater.read_with(cx, |updater, _| updater.status());
-            if !matches!(status, AutoUpdateStatus::Idle) {
-                break;
-            }
-        }
-        let status = auto_updater.read_with(cx, |updater, _| updater.status());
-        assert_eq!(
-            status,
-            AutoUpdateStatus::Downloading {
-                version: semver::Version::new(0, 100, 1),
-                progress: None,
-            }
-        );
-
-        dmg_tx.send("<fake-zed-update>".to_owned()).unwrap();
-
-        let tmp_dir = Arc::new(tempdir().unwrap());
-
-        cx.update(|cx| {
-            let tmp_dir = tmp_dir.clone();
-            cx.set_global(InstallOverride(Rc::new(move |target_path, _cx| {
-                let tmp_dir = tmp_dir.clone();
-                let dest_path = tmp_dir.path().join("zed");
-                std::fs::copy(&target_path, &dest_path)?;
-                Ok(Some(dest_path))
-            })));
-        });
-
-        loop {
-            cx.background_executor.timer(Duration::from_millis(0)).await;
-            cx.run_until_parked();
-            let status = auto_updater.read_with(cx, |updater, _| updater.status());
-            if !matches!(status, AutoUpdateStatus::Downloading { .. }) {
-                break;
-            }
-        }
-        let status = auto_updater.read_with(cx, |updater, _| updater.status());
-        assert_eq!(
-            status,
-            AutoUpdateStatus::Updated {
-                version: semver::Version::new(0, 100, 1)
-            }
-        );
-        let will_restart = cx.expect_restart();
-        cx.update(|cx| cx.restart());
-        let (path, arguments) = will_restart.await.unwrap();
-        assert!(arguments.is_empty());
-        let path = path.unwrap();
-        assert_eq!(path, tmp_dir.path().join("zed"));
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
     }
 
     #[gpui::test]
-    async fn test_download_release_reports_progress(cx: &mut TestAppContext) {
-        cx.background_executor.allow_parking();
+    async fn test_a_newer_release_is_available() {
+        let github = FakeGitHub::new(200, release("v0.100.1"));
+        assert_eq!(
+            check_against(&github).await.unwrap(),
+            UpdateCheck::Available(available(Version::new(0, 100, 1), "v0.100.1"))
+        );
 
-        let body = vec![0u8; 20_000];
-        let content_length = body.len();
+        // The tag may also be the bare version.
+        github.respond_with(200, release("0.101.0"));
+        assert_eq!(
+            check_against(&github).await.unwrap(),
+            UpdateCheck::Available(available(Version::new(0, 101, 0), "0.101.0"))
+        );
 
-        let client = FakeHttpClient::create(move |_req| {
-            let body = body.clone();
-            async move {
-                Ok(Response::builder()
-                    .status(200)
-                    .header(
-                        http_client::http::header::CONTENT_LENGTH,
-                        body.len().to_string(),
-                    )
-                    .body(body.into())
-                    .unwrap())
-            }
-        });
+        assert_eq!(github.requests(), [RELEASES_URL, RELEASES_URL]);
+    }
 
-        let temp_dir = tempdir().unwrap();
-        let target_path = temp_dir.path().join("zed-download");
-        let release = ReleaseAsset {
-            version: "1.0.0".to_string(),
-            url: "https://test.example/download".to_string(),
-        };
+    #[gpui::test]
+    async fn test_the_same_or_an_older_release_is_up_to_date() {
+        let github = FakeGitHub::new(200, release("v0.100.0"));
+        assert_eq!(check_against(&github).await.unwrap(), UpdateCheck::UpToDate);
 
-        let reported = Rc::new(std::cell::RefCell::new(Vec::<f32>::new()));
-        download_release(&target_path, release, client, {
-            let reported = reported.clone();
-            move |fraction| {
-                if let Some(fraction) = fraction {
-                    reported.borrow_mut().push(fraction);
-                }
-            }
-        })
-        .await
-        .unwrap();
+        github.respond_with(200, release("v0.99.9"));
+        assert_eq!(check_against(&github).await.unwrap(), UpdateCheck::UpToDate);
+    }
 
-        let reported = reported.borrow();
+    #[gpui::test]
+    async fn test_the_running_versions_build_metadata_is_ignored() {
+        let github = FakeGitHub::new(200, release("v0.100.0"));
+        let installed = "0.100.0-pre+nightly.abc".parse::<Version>().unwrap();
+        let check =
+            check_latest_release(Some(REPOSITORY), installed, github.http_client.clone()).await;
+        assert_eq!(check.unwrap(), UpdateCheck::UpToDate);
+    }
+
+    #[gpui::test]
+    async fn test_pre_releases_are_skipped() {
+        let github = FakeGitHub::new(
+            200,
+            releases(&[("v0.102.0-rc1", true), ("v0.100.1", false)]),
+        );
+        assert_eq!(
+            check_against(&github).await.unwrap(),
+            UpdateCheck::Available(available(Version::new(0, 100, 1), "v0.100.1"))
+        );
+
+        github.respond_with(200, releases(&[("v0.102.0-rc1", true)]));
+        assert_eq!(check_against(&github).await.unwrap(), UpdateCheck::UpToDate);
+    }
+
+    #[gpui::test]
+    async fn test_a_repository_without_releases_is_up_to_date() {
+        let github = FakeGitHub::new(200, "[]");
+        assert_eq!(check_against(&github).await.unwrap(), UpdateCheck::UpToDate);
+    }
+
+    #[gpui::test]
+    async fn test_a_malformed_tag_is_an_error() {
+        let github = FakeGitHub::new(200, release("latest"));
+        let error = check_against(&github).await.unwrap_err();
         assert!(
-            reported.len() >= 2,
-            "expected progress to be reported across multiple reads, got {reported:?}"
+            error
+                .to_string()
+                .contains(r#"release tag "latest" is not a version"#),
+            "{error:#}"
         );
-        assert_eq!(
-            reported.last().copied(),
-            Some(1.0),
-            "download should finish at 100%"
-        );
-        for fraction in reported.iter() {
-            assert!(
-                (0.0..=1.0).contains(fraction),
-                "progress {fraction} out of range"
-            );
-        }
-        for pair in reported.windows(2) {
-            assert!(
-                pair[0] <= pair[1],
-                "progress must not decrease: {reported:?}"
-            );
-        }
-
-        let downloaded_len = std::fs::metadata(&target_path).unwrap().len();
-        assert_eq!(downloaded_len, content_length as u64);
     }
 
     #[gpui::test]
-    async fn test_download_release_without_content_length_reports_no_progress(
+    async fn test_a_rate_limit_is_recognized() {
+        for status in [403, 429] {
+            let github = FakeGitHub::new(status, r#"{"message":"API rate limit exceeded"}"#);
+            let error = check_against(&github).await.unwrap_err();
+            let rate_limited = error
+                .downcast_ref::<RateLimited>()
+                .unwrap_or_else(|| panic!("{status} should be a rate limit, got: {error:#}"));
+            assert_eq!(rate_limited.status, status);
+        }
+
+        // Any other refusal is an ordinary error that names the repository.
+        let github = FakeGitHub::new(404, r#"{"message":"Not Found"}"#);
+        let error = check_against(&github).await.unwrap_err();
+        assert!(error.downcast_ref::<RateLimited>().is_none());
+        assert!(error.to_string().contains(REPOSITORY), "{error:#}");
+    }
+
+    #[gpui::test]
+    async fn test_nothing_is_requested_without_a_repository() {
+        let github = FakeGitHub::new(200, release("v9.0.0"));
+        let check = check_latest_release(None, installed(), github.http_client.clone()).await;
+        assert_eq!(check.unwrap(), UpdateCheck::NotConfigured);
+        assert_eq!(github.requests(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_release_tags() {
+        assert_eq!(parse_release_tag("v1.2.3").unwrap(), Version::new(1, 2, 3));
+        assert_eq!(parse_release_tag("1.2.3").unwrap(), Version::new(1, 2, 3));
+        assert!(parse_release_tag("v1.2").is_err());
+        assert!(parse_release_tag("release-1.2.3").is_err());
+        assert!(parse_release_tag("").is_err());
+    }
+
+    #[test]
+    fn test_releases_repository_must_be_a_slug_and_not_upstreams() {
+        assert_eq!(
+            validated_releases_repository("example/ide").as_deref(),
+            Some("example/ide")
+        );
+        assert_eq!(
+            validated_releases_repository("Some-Org/some.repo_1").as_deref(),
+            Some("Some-Org/some.repo_1")
+        );
+        for slug in [
+            "",
+            "ide",
+            "example/",
+            "/ide",
+            "example/ide/extra",
+            "https://github.com/example/ide",
+            "example/ide?x=1",
+            "../ide",
+            "zed-industries/zed",
+            "Zed-Industries/zed",
+        ] {
+            assert_eq!(validated_releases_repository(slug), None, "{slug:?}");
+        }
+    }
+
+    #[test]
+    fn test_the_brand_names_no_upstream_repository() {
+        // Whatever the brand file says, the app never asks upstream's releases.
+        if let Some(repository) = configured_releases_repository() {
+            assert!(
+                !repository
+                    .to_ascii_lowercase()
+                    .starts_with(UPSTREAM_REPOSITORY_OWNER)
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn test_auto_update_setting_is_read_from_the_settings(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            settings::init(cx);
+            set_auto_update(true, cx);
+            assert!(AutoUpdateSetting::get_global(cx).0);
+            set_auto_update(false, cx);
+            assert!(!AutoUpdateSetting::get_global(cx).0);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_polling_announces_a_newer_release_and_downloads_nothing(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.0"));
+        let updater =
+            init_test_updater(&github, ReleaseChannel::Stable, Some(REPOSITORY), true, cx);
+        cx.background_executor.run_until_parked();
+
+        updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.status(), AutoUpdateStatus::Idle);
+            assert_eq!(updater.available_update(), None);
+            assert_eq!(updater.current_version(), installed());
+        });
+        assert_eq!(github.requests(), [RELEASES_URL]);
+
+        github.respond_with(200, release("v0.100.1"));
+        a_day_passes(cx);
+
+        let update = available(Version::new(0, 100, 1), "v0.100.1");
+        updater.read_with(cx, |updater, _| {
+            // Finding a release is the end of it: nothing is downloaded or
+            // installed, so the status is back to idle.
+            assert_eq!(updater.status(), AutoUpdateStatus::Idle);
+            assert_eq!(updater.available_update(), Some(update.clone()));
+        });
+
+        // GitHub refuses the next check: nothing changes, nothing is shown.
+        github.respond_with(403, r#"{"message":"API rate limit exceeded"}"#);
+        a_day_passes(cx);
+        updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.status(), AutoUpdateStatus::Idle);
+            assert_eq!(updater.available_update(), Some(update.clone()));
+        });
+
+        // A dismissed release stays quiet until a newer one appears.
+        updater.update(cx, |updater, cx| updater.dismiss_available_update(cx));
+        github.respond_with(200, release("v0.100.1"));
+        a_day_passes(cx);
+        updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.available_update(), None)
+        });
+
+        github.respond_with(200, release("v0.100.2"));
+        a_day_passes(cx);
+        updater.read_with(cx, |updater, _| {
+            assert_eq!(
+                updater.available_update(),
+                Some(available(Version::new(0, 100, 2), "v0.100.2"))
+            );
+        });
+
+        // Five checks, five requests, all to the releases list: the release
+        // itself was never fetched.
+        assert_eq!(github.requests(), [RELEASES_URL; 5]);
+    }
+
+    #[gpui::test]
+    async fn test_no_polling_while_the_setting_is_off(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.1"));
+        let updater =
+            init_test_updater(&github, ReleaseChannel::Stable, Some(REPOSITORY), false, cx);
+        a_day_passes(cx);
+        a_day_passes(cx);
+        assert_eq!(github.requests(), Vec::<String>::new());
+        updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.available_update(), None)
+        });
+
+        // Turning the setting on starts the checks, turning it off stops them.
+        cx.update(|cx| set_auto_update(true, cx));
+        cx.background_executor.run_until_parked();
+        assert_eq!(github.requests(), [RELEASES_URL]);
+
+        cx.update(|cx| set_auto_update(false, cx));
+        a_day_passes(cx);
+        a_day_passes(cx);
+        assert_eq!(github.requests(), [RELEASES_URL]);
+    }
+
+    #[gpui::test]
+    async fn test_no_polling_in_the_dev_channel(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.1"));
+        init_test_updater(&github, ReleaseChannel::Dev, Some(REPOSITORY), true, cx);
+        a_day_passes(cx);
+        a_day_passes(cx);
+        assert_eq!(github.requests(), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn test_no_polling_without_a_repository(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.1"));
+        let updater = init_test_updater(&github, ReleaseChannel::Stable, None, true, cx);
+        a_day_passes(cx);
+
+        // Even a direct request to check does nothing.
+        updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
+        cx.background_executor.run_until_parked();
+        updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.status(), AutoUpdateStatus::Idle);
+            assert_eq!(updater.available_update(), None);
+        });
+        assert_eq!(github.requests(), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn test_no_polling_with_a_packagers_explanation(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.1"));
+        cx.update(|cx| {
+            settings::init(cx);
+            set_auto_update(true, cx);
+            release_channel::init_test(installed(), ReleaseChannel::Stable, cx);
+            let client = Client::new(
+                Arc::new(FakeSystemClock::new()),
+                github.http_client.clone(),
+                cx,
+            );
+            init_updater(
+                Some(REPOSITORY.to_string()),
+                Some("Use the package manager.".to_string()),
+                client,
+                cx,
+            );
+        });
+        a_day_passes(cx);
+        assert_eq!(github.requests(), Vec::<String>::new());
+
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            check_with_explanation(Some("Use the package manager.".to_string()), window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.pending_prompt(),
+            Some((
+                format!(
+                    "{} was installed via a package manager.",
+                    branding::PRODUCT_NAME
+                ),
+                "Use the package manager.".to_string()
+            ))
+        );
+        assert_eq!(github.requests(), Vec::<String>::new());
+    }
+
+    fn check_manually(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| check_with_explanation(None, window, cx));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn test_manual_check_without_a_repository_says_so_and_requests_nothing(
         cx: &mut TestAppContext,
     ) {
-        cx.background_executor.allow_parking();
+        for channel in [ReleaseChannel::Stable, ReleaseChannel::Dev] {
+            let github = FakeGitHub::new(200, release("v9.0.0"));
+            let updater = init_test_updater(&github, channel, None, true, cx);
+            let cx = cx.add_empty_window();
+            check_manually(cx);
 
-        let body = vec![0u8; 20_000];
-        let content_length = body.len();
+            let (message, detail) = cx.pending_prompt().expect("a prompt should be open");
+            assert_eq!(message, NOT_SET_UP_MESSAGE);
+            assert_eq!(
+                detail,
+                format!("New versions will be announced on {}.", website_name())
+            );
+            assert!(!website_name().contains('/'), "{}", website_name());
+            cx.simulate_prompt_answer("OK");
+            cx.run_until_parked();
 
-        let client = FakeHttpClient::create(move |_req| {
-            let body = body.clone();
-            async move { Ok(Response::builder().status(200).body(body.into()).unwrap()) }
+            updater.read_with(cx, |updater, _| {
+                assert_eq!(updater.status(), AutoUpdateStatus::Idle);
+                assert_eq!(updater.available_update(), None);
+            });
+            assert_eq!(github.requests(), Vec::<String>::new());
+            assert_eq!(cx.opened_url(), None);
+        }
+    }
+
+    #[gpui::test]
+    async fn test_manual_check_offers_the_release_page(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.1"));
+        // The manual check does not depend on the `auto_update` setting.
+        let updater =
+            init_test_updater(&github, ReleaseChannel::Stable, Some(REPOSITORY), false, cx);
+        let cx = cx.add_empty_window();
+        check_manually(cx);
+
+        let update = available(Version::new(0, 100, 1), "v0.100.1");
+        updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.status(), AutoUpdateStatus::Idle);
+            assert_eq!(updater.available_update(), Some(update.clone()));
         });
+        let (message, _) = cx.pending_prompt().expect("a prompt should be open");
+        assert_eq!(
+            message,
+            format!("{} 0.100.1 is available", branding::PRODUCT_NAME)
+        );
+        assert_eq!(cx.opened_url(), None);
 
-        let temp_dir = tempdir().unwrap();
-        let target_path = temp_dir.path().join("zed-download");
-        let release = ReleaseAsset {
-            version: "1.0.0".to_string(),
-            url: "https://test.example/download".to_string(),
-        };
+        cx.simulate_prompt_answer("Open Release Page");
+        cx.run_until_parked();
+        assert_eq!(cx.opened_url(), Some(update.url));
+        assert_eq!(github.requests(), [RELEASES_URL]);
+    }
 
-        let reported = Rc::new(std::cell::RefCell::new(Vec::<Option<f32>>::new()));
-        download_release(&target_path, release, client, {
-            let reported = reported.clone();
-            move |fraction| {
-                reported.borrow_mut().push(fraction);
-            }
-        })
+    #[gpui::test]
+    async fn test_manual_check_declined_opens_nothing(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.1"));
+        init_test_updater(&github, ReleaseChannel::Stable, Some(REPOSITORY), false, cx);
+        let cx = cx.add_empty_window();
+        check_manually(cx);
+
+        cx.simulate_prompt_answer("Later");
+        cx.run_until_parked();
+        assert_eq!(cx.opened_url(), None);
+        assert_eq!(github.requests(), [RELEASES_URL]);
+    }
+
+    #[gpui::test]
+    async fn test_manual_check_reports_up_to_date(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.0"));
+        let updater =
+            init_test_updater(&github, ReleaseChannel::Stable, Some(REPOSITORY), false, cx);
+        let up_to_date_events = Arc::new(Mutex::new(0));
+        let _subscription = cx.update(|cx| {
+            let up_to_date_events = up_to_date_events.clone();
+            cx.subscribe(&updater, move |_, event, _| match event {
+                AutoUpdateEvent::UpToDate => *up_to_date_events.lock() += 1,
+            })
+        });
+        let cx = cx.add_empty_window();
+        check_manually(cx);
+
+        assert_eq!(*up_to_date_events.lock(), 1);
+        assert!(!cx.has_pending_prompt());
+        updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.status(), AutoUpdateStatus::Idle);
+            assert_eq!(updater.available_update(), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_manual_check_shows_a_refusal(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(403, r#"{"message":"API rate limit exceeded"}"#);
+        let updater =
+            init_test_updater(&github, ReleaseChannel::Stable, Some(REPOSITORY), false, cx);
+        let cx = cx.add_empty_window();
+        check_manually(cx);
+
+        assert!(!cx.has_pending_prompt());
+        updater.read_with(cx, |updater, _| {
+            let AutoUpdateStatus::Errored { error } = updater.status() else {
+                panic!("expected an error, got {:?}", updater.status());
+            };
+            assert!(error.downcast_ref::<RateLimited>().is_some(), "{error:#}");
+            assert_eq!(updater.available_update(), None);
+        });
+        assert_eq!(github.requests(), [RELEASES_URL]);
+    }
+
+    #[gpui::test]
+    async fn test_manual_check_in_the_dev_channel_requests_nothing(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.1"));
+        init_test_updater(&github, ReleaseChannel::Dev, Some(REPOSITORY), true, cx);
+        let cx = cx.add_empty_window();
+        check_manually(cx);
+
+        let (message, _) = cx.pending_prompt().expect("a prompt should be open");
+        assert_eq!(message, "Development builds do not check for updates.");
+        assert_eq!(github.requests(), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn test_release_notes_are_the_products_own_release_page(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.0"));
+        init_test_updater(&github, ReleaseChannel::Stable, Some(REPOSITORY), false, cx);
+        cx.update(|cx| {
+            assert_eq!(
+                release_notes_url(cx).as_deref(),
+                Some("https://github.com/example/ide/releases/tag/v0.100.0")
+            );
+            view_release_notes(&ViewReleaseNotes, cx);
+        });
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://github.com/example/ide/releases/tag/v0.100.0")
+        );
+        assert_eq!(github.requests(), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn test_release_notes_of_a_dev_build_are_the_list_of_releases(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.0"));
+        init_test_updater(&github, ReleaseChannel::Dev, Some(REPOSITORY), false, cx);
+        cx.update(|cx| {
+            assert_eq!(
+                release_notes_url(cx).as_deref(),
+                Some("https://github.com/example/ide/releases")
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_no_release_notes_without_a_repository(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.0"));
+        init_test_updater(&github, ReleaseChannel::Stable, None, false, cx);
+        cx.update(|cx| {
+            assert_eq!(release_notes_url(cx), None);
+            view_release_notes(&ViewReleaseNotes, cx);
+        });
+        assert_eq!(cx.opened_url(), None);
+        assert_eq!(github.requests(), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn test_no_remote_server_is_ever_downloaded(cx: &mut TestAppContext) {
+        let github = FakeGitHub::new(200, release("v0.100.1"));
+        init_test_updater(&github, ReleaseChannel::Stable, Some(REPOSITORY), false, cx);
+        let mut cx = cx.to_async();
+
+        let url = AutoUpdater::get_remote_server_release_url(
+            ReleaseChannel::Stable,
+            Some(installed()),
+            "linux",
+            "x86_64",
+            &mut cx,
+        )
         .await
         .unwrap();
+        assert_eq!(url, None);
 
-        assert!(
-            reported.borrow().is_empty(),
-            "progress should not be reported when the total size is unknown, got {:?}",
-            reported.borrow()
-        );
-
-        let downloaded_len = std::fs::metadata(&target_path).unwrap().len();
-        assert_eq!(downloaded_len, content_length as u64);
-    }
-
-    #[test]
-    fn test_stable_does_not_update_when_fetched_version_is_not_higher() {
-        let release_channel = ReleaseChannel::Stable;
-        let app_commit_sha = Ok(Some("a".to_string()));
-        let installed_version = semver::Version::new(1, 0, 0);
-        let status = AutoUpdateStatus::Idle;
-        let fetched_version = semver::Version::new(1, 0, 0);
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version.to_string(),
-            status,
-        );
-
-        assert_eq!(newer_version.unwrap(), None);
-    }
-
-    #[test]
-    fn test_stable_does_update_when_fetched_version_is_higher() {
-        let release_channel = ReleaseChannel::Stable;
-        let app_commit_sha = Ok(Some("a".to_string()));
-        let installed_version = semver::Version::new(1, 0, 0);
-        let status = AutoUpdateStatus::Idle;
-        let fetched_version = semver::Version::new(1, 0, 1);
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version.to_string(),
-            status,
-        );
-
-        assert_eq!(newer_version.unwrap(), Some(fetched_version));
-    }
-
-    #[test]
-    fn test_stable_does_not_update_when_fetched_version_is_not_higher_than_cached() {
-        let release_channel = ReleaseChannel::Stable;
-        let app_commit_sha = Ok(Some("a".to_string()));
-        let installed_version = semver::Version::new(1, 0, 0);
-        let status = AutoUpdateStatus::Updated {
-            version: semver::Version::new(1, 0, 1),
-        };
-        let fetched_version = semver::Version::new(1, 0, 1);
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version.to_string(),
-            status,
-        );
-
-        assert_eq!(newer_version.unwrap(), None);
-    }
-
-    #[test]
-    fn test_stable_does_update_when_fetched_version_is_higher_than_cached() {
-        let release_channel = ReleaseChannel::Stable;
-        let app_commit_sha = Ok(Some("a".to_string()));
-        let installed_version = semver::Version::new(1, 0, 0);
-        let status = AutoUpdateStatus::Updated {
-            version: semver::Version::new(1, 0, 1),
-        };
-        let fetched_version = semver::Version::new(1, 0, 2);
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version.to_string(),
-            status,
-        );
-
-        assert_eq!(newer_version.unwrap(), Some(fetched_version));
-    }
-
-    #[test]
-    fn test_nightly_does_not_update_when_fetched_sha_is_same() {
-        let release_channel = ReleaseChannel::Nightly;
-        let app_commit_sha = Ok(Some("a".to_string()));
-        let mut installed_version = semver::Version::new(1, 0, 0);
-        installed_version.build = semver::BuildMetadata::new("a").unwrap();
-        let status = AutoUpdateStatus::Idle;
-        let fetched_version = "1.0.0+a".to_string();
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version,
-            status,
-        );
-
-        assert_eq!(newer_version.unwrap(), None);
-    }
-
-    #[test]
-    fn test_nightly_does_update_when_fetched_sha_is_not_same() {
-        let release_channel = ReleaseChannel::Nightly;
-        let app_commit_sha = Ok(Some("a".to_string()));
-        let installed_version = semver::Version::new(1, 0, 0);
-        let status = AutoUpdateStatus::Idle;
-        let fetched_version = "1.0.0+b".to_string();
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version.clone(),
-            status,
-        );
-
-        assert_eq!(
-            newer_version.unwrap(),
-            Some(fetched_version.parse().unwrap())
-        );
-    }
-
-    #[test]
-    fn test_nightly_does_not_update_when_fetched_version_is_same_as_cached() {
-        let release_channel = ReleaseChannel::Nightly;
-        let app_commit_sha = Ok(Some("a".to_string()));
-        let mut installed_version = semver::Version::new(1, 0, 0);
-        installed_version.build = semver::BuildMetadata::new("a").unwrap();
-        let status = AutoUpdateStatus::Updated {
-            version: "1.0.0+b".parse().unwrap(),
-        };
-        let fetched_version = "1.0.0+b".to_string();
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version,
-            status,
-        );
-
-        assert_eq!(newer_version.unwrap(), None);
-    }
-
-    #[test]
-    fn test_nightly_does_update_when_fetched_sha_is_not_same_as_cached() {
-        let release_channel = ReleaseChannel::Nightly;
-        let app_commit_sha = Ok(Some("a".to_string()));
-        let mut installed_version = semver::Version::new(1, 0, 0);
-        installed_version.build = semver::BuildMetadata::new("a").unwrap();
-        let status = AutoUpdateStatus::Updated {
-            version: "1.0.0+b".parse().unwrap(),
-        };
-        let fetched_version = "1.0.0+c".to_string();
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version.clone(),
-            status,
-        );
-
-        assert_eq!(
-            newer_version.unwrap(),
-            Some(fetched_version.parse().unwrap())
-        );
-    }
-
-    #[test]
-    fn test_nightly_does_not_redownload_after_updating_to_fetched_version() {
-        let release_channel = ReleaseChannel::Nightly;
-        let installed_version = semver::Version::new(1, 0, 0);
-        let fetched_version = "1.0.0+nightly.b".to_string();
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            Ok(Some("a".to_string())),
-            installed_version.clone(),
-            fetched_version.clone(),
-            AutoUpdateStatus::Idle,
+        let error = AutoUpdater::download_remote_server_release(
+            ReleaseChannel::Stable,
+            Some(installed()),
+            "linux",
+            "x86_64",
+            |_, _| {},
+            &mut cx,
         )
-        .unwrap()
-        .expect("a newer nightly version should be available");
-
-        let next_check = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            Ok(Some("a".to_string())),
-            installed_version,
-            fetched_version,
-            AutoUpdateStatus::Updated {
-                version: newer_version,
-            },
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not publish remote server builds"),
+            "{error:#}"
         );
-
-        assert_eq!(next_check.unwrap(), None);
-    }
-
-    #[test]
-    fn test_nightly_does_update_when_installed_versions_sha_cannot_be_retrieved() {
-        let release_channel = ReleaseChannel::Nightly;
-        let app_commit_sha = Ok(None);
-        let installed_version = semver::Version::new(1, 0, 0);
-        let status = AutoUpdateStatus::Idle;
-        let fetched_version = "1.0.0+a".to_string();
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version.clone(),
-            status,
-        );
-
-        assert_eq!(
-            newer_version.unwrap(),
-            Some(fetched_version.parse().unwrap())
-        );
-    }
-
-    #[test]
-    fn test_nightly_does_not_update_when_cached_update_is_same_as_fetched_and_installed_versions_sha_cannot_be_retrieved()
-     {
-        let release_channel = ReleaseChannel::Nightly;
-        let app_commit_sha = Ok(None);
-        let installed_version = semver::Version::new(1, 0, 0);
-        let status = AutoUpdateStatus::Updated {
-            version: "1.0.0+b".parse().unwrap(),
-        };
-        let fetched_version = "1.0.0+b".to_string();
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version,
-            status,
-        );
-
-        assert_eq!(newer_version.unwrap(), None);
-    }
-
-    #[test]
-    fn test_nightly_does_update_when_cached_update_is_not_same_as_fetched_and_installed_versions_sha_cannot_be_retrieved()
-     {
-        let release_channel = ReleaseChannel::Nightly;
-        let app_commit_sha = Ok(None);
-        let installed_version = semver::Version::new(1, 0, 0);
-        let status = AutoUpdateStatus::Updated {
-            version: "1.0.0+b".parse().unwrap(),
-        };
-        let fetched_version = "1.0.0+c".to_string();
-
-        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version.clone(),
-            status,
-        );
-
-        assert_eq!(
-            newer_version.unwrap(),
-            Some(fetched_version.parse().unwrap())
-        );
+        assert_eq!(github.requests(), Vec::<String>::new());
     }
 }

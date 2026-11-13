@@ -28,7 +28,7 @@ description: Add, modify, or test a custom dylint lint in `tooling/lints`. Cover
 - Every lint needs `ui/<lint_name>.rs` and `ui/<lint_name>.stderr`.
 - The `.rs` file must include **negative cases**: code that resembles the bad pattern but must produce no diagnostic. Their absence from the `.stderr` file is the assertion.
 - UI tests that need gpui types use the fake `gpui` crate in `test_fixture/` (wired up by `gpui_fixture_rustc_flags` in `lib.rs`). Extend the fixture if a type or method is missing — never add real gpui as a dependency.
-- The crate is deliberately **not** part of the zed workspace and pins its own nightly (`rust-toolchain.toml`). Run tests from inside the crate:
+- The crate is deliberately **not** part of the main cargo workspace and pins its own nightly (`rust-toolchain.toml`). Run tests from inside the crate:
 
   ```
   cd tooling/lints && cargo test

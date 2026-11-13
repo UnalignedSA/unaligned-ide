@@ -1,6 +1,5 @@
 use anyhow::Result;
-use client::{Client, UserStore, zed_urls};
-use cloud_llm_client::UsageLimit;
+use client::UserStore;
 use copilot::Status;
 use edit_prediction::EditPredictionStore;
 use edit_prediction_types::EditPredictionDelegateHandle;
@@ -12,7 +11,7 @@ use fs::Fs;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, App, AsyncWindowContext, Entity, FocusHandle,
     Focusable, IntoElement, ParentElement, Render, Subscription, TaskExt, WeakEntity, actions, div,
-    ease_in_out, pulsating_between,
+    pulsating_between,
 };
 use indoc::indoc;
 use language::{
@@ -28,16 +27,16 @@ use settings::{
 };
 use std::{ops::Range, rc::Rc, sync::Arc, time::Duration};
 use ui::{
-    Clickable, ContextMenu, ContextMenuEntry, DocumentationSide, IconButton, IconButtonShape,
-    Indicator, PopoverMenu, PopoverMenuHandle, ProgressBar, Tooltip, prelude::*,
+    Clickable, ContextMenu, ContextMenuEntry, DocumentationSide, Indicator, PopoverMenu,
+    PopoverMenuHandle, Tooltip, prelude::*,
 };
 use util::ResultExt as _;
 
+use app_actions::{OpenBrowser, OpenSettingsAt};
 use workspace::{
-    HideStatusItem, StatusItemView, Toast, Workspace, create_and_open_local_file, item::ItemHandle,
-    notifications::NotificationId,
+    HideStatusItem, StatusItemView, Toast, Workspace, active_file_name::status_bar_icon_button,
+    create_and_open_local_file, item::ItemHandle, notifications::NotificationId,
 };
-use zed_actions::{OpenBrowser, OpenSettingsAt};
 
 use crate::{RatePredictions, rate_prediction_modal::PredictEditsRatePredictionsFeatureFlag};
 
@@ -51,7 +50,6 @@ actions!(
 
 const COPILOT_SETTINGS_PATH: &str = "/settings/copilot";
 const COPILOT_SETTINGS_URL: &str = concat!("https://github.com", "/settings/copilot");
-const PRIVACY_DOCS: &str = "https://zed.dev/docs/ai/privacy-and-security";
 
 struct CopilotErrorToast;
 
@@ -107,8 +105,7 @@ impl Render for EditPredictionButton {
 
                 if let Status::Error(e) = status {
                     return div().child(
-                        IconButton::new("copilot-error", icon)
-                            .icon_size(IconSize::Small)
+                        status_bar_icon_button("copilot-error", icon)
                             .tab_index(0isize)
                             .aria_label("GitHub Copilot")
                             .on_click(cx.listener(move |_, _, window, cx| {
@@ -119,12 +116,12 @@ impl Render for EditPredictionButton {
                                             Toast::new(
                                                 NotificationId::unique::<CopilotErrorToast>(),
                                                 format!(
-                                                    "Copilot Edit Predictions can't be started: {}",
+                                                    "Copilot tab completion can't be started: {}",
                                                     e
                                                 ),
                                             )
                                             .on_click(
-                                                "Reinstall Copilot Edit Predictions",
+                                                "Reinstall Copilot",
                                                 move |window, cx| {
                                                     copilot_ui::reinstall_and_sign_in(
                                                         copilot.clone(),
@@ -140,7 +137,7 @@ impl Render for EditPredictionButton {
                             }))
                             .tooltip(|_window, cx| {
                                 Tooltip::for_action(
-                                    "GitHub Copilot Edit Predictions",
+                                    "GitHub Copilot Tab Completion",
                                     &ToggleMenu,
                                     cx,
                                 )
@@ -182,12 +179,12 @@ impl Render for EditPredictionButton {
                         })
                         .anchor(Anchor::BottomRight)
                         .trigger_with_tooltip(
-                            IconButton::new("copilot-icon", icon)
+                            status_bar_icon_button("copilot-icon", icon)
                                 .tab_index(0isize)
                                 .aria_label("GitHub Copilot"),
                             |_window, cx| {
                                 Tooltip::for_action(
-                                    "GitHub Copilot Edit Predictions",
+                                    "GitHub Copilot Tab Completion",
                                     &ToggleMenu,
                                     cx,
                                 )
@@ -234,10 +231,9 @@ impl Render for EditPredictionButton {
                         })
                         .anchor(Anchor::BottomRight)
                         .trigger_with_tooltip(
-                            IconButton::new("codestral-icon", IconName::AiMistral)
-                                .shape(IconButtonShape::Square)
+                            status_bar_icon_button("codestral-icon", IconName::AiMistral)
                                 .tab_index(0isize)
-                                .aria_label("Edit Prediction")
+                                .aria_label("Tab Completion")
                                 .when(!has_api_key, |this| {
                                     this.indicator(Indicator::dot().color(Color::Error))
                                         .indicator_border_color(Some(
@@ -252,7 +248,7 @@ impl Render for EditPredictionButton {
                                 }),
                             move |_window, cx| {
                                 Tooltip::with_meta(
-                                    "Edit Prediction",
+                                    "Tab Completion",
                                     Some(&ToggleMenu),
                                     tooltip_meta,
                                     cx,
@@ -280,16 +276,18 @@ impl Render for EditPredictionButton {
                         })
                         .anchor(Anchor::BottomRight)
                         .trigger(
-                            IconButton::new("openai-compatible-api-icon", IconName::AiOpenAiCompat)
-                                .shape(IconButtonShape::Square)
-                                .tab_index(0isize)
-                                .aria_label("Edit Prediction")
-                                .when(!enabled, |this| {
-                                    this.indicator(Indicator::dot().color(Color::Ignored))
-                                        .indicator_border_color(Some(
-                                            cx.theme().colors().status_bar_background,
-                                        ))
-                                }),
+                            status_bar_icon_button(
+                                "openai-compatible-api-icon",
+                                IconName::AiOpenAiCompat,
+                            )
+                            .tab_index(0isize)
+                            .aria_label("Tab Completion")
+                            .when(!enabled, |this| {
+                                this.indicator(Indicator::dot().color(Color::Ignored))
+                                    .indicator_border_color(Some(
+                                        cx.theme().colors().status_bar_background,
+                                    ))
+                            }),
                         )
                         .with_handle(self.popover_menu_handle.clone()),
                 )
@@ -312,10 +310,9 @@ impl Render for EditPredictionButton {
                         })
                         .anchor(Anchor::BottomRight)
                         .trigger_with_tooltip(
-                            IconButton::new("ollama-icon", IconName::AiOllama)
-                                .shape(IconButtonShape::Square)
+                            status_bar_icon_button("ollama-icon", IconName::AiOllama)
                                 .tab_index(0isize)
-                                .aria_label("Edit Prediction")
+                                .aria_label("Tab Completion")
                                 .when(!enabled, |this| {
                                     this.indicator(Indicator::dot().color(Color::Ignored))
                                         .indicator_border_color(Some(
@@ -335,7 +332,7 @@ impl Render for EditPredictionButton {
                                 };
 
                                 Tooltip::with_meta(
-                                    "Edit Prediction",
+                                    "Tab Completion",
                                     Some(&ToggleMenu),
                                     tooltip_meta,
                                     cx,
@@ -364,7 +361,7 @@ impl Render for EditPredictionButton {
                     .as_ref()
                     .map(|p| p.icons(cx))
                     .unwrap_or_else(|| {
-                        edit_prediction_types::EditPredictionIconSet::new(IconName::ZedPredict)
+                        edit_prediction_types::EditPredictionIconSet::new(IconName::AppPredict)
                     });
 
                 let ep_icon;
@@ -390,39 +387,9 @@ impl Render for EditPredictionButton {
                     }
                     _ => {
                         ep_icon = if enabled { icons.base } else { icons.disabled };
-                        tooltip_meta = "Powered by Zeta"
+                        tooltip_meta = "Unavailable in this product"
                     }
                 };
-
-                if edit_prediction::should_show_upsell_modal(cx) {
-                    let tooltip_meta = if self.user_store.read(cx).current_user().is_some() {
-                        "Choose a Plan"
-                    } else {
-                        "Configure a Provider"
-                    };
-
-                    return div().child(
-                        IconButton::new("zed-predict-pending-button", ep_icon)
-                            .shape(IconButtonShape::Square)
-                            .tab_index(0isize)
-                            .aria_label("Edit Predictions")
-                            .indicator(Indicator::dot().color(Color::Muted))
-                            .indicator_border_color(Some(cx.theme().colors().status_bar_background))
-                            .tooltip(move |_window, cx| {
-                                Tooltip::with_meta("Edit Predictions", None, tooltip_meta, cx)
-                            })
-                            .on_click(cx.listener(move |_, _, window, cx| {
-                                telemetry::event!(
-                                    "Pending ToS Clicked",
-                                    source = "Edit Prediction Status Button"
-                                );
-                                window.dispatch_action(
-                                    zed_actions::OpenZedPredictOnboarding.boxed_clone(),
-                                    cx,
-                                );
-                            })),
-                    );
-                }
 
                 let mut over_limit = false;
 
@@ -467,6 +434,9 @@ impl Render for EditPredictionButton {
                         None
                     };
 
+                // The stored provider can still be Zed's hosted one, which this
+                // product does not offer: the button says so and its menu
+                // offers the providers that work.
                 let zed_cloud_needs_sign_in =
                     matches!(provider, EditPredictionProvider::Zed) && user.is_none();
                 let provider_unavailable = missing_token
@@ -474,10 +444,9 @@ impl Render for EditPredictionButton {
                     || zed_cloud_needs_sign_in
                     || zed_cloud_has_no_active_subscription;
 
-                let icon_button = IconButton::new("zed-predict-pending-button", ep_icon)
-                    .shape(IconButtonShape::Square)
+                let icon_button = status_bar_icon_button("predict-pending-button", ep_icon)
                     .tab_index(0isize)
-                    .aria_label("Edit Prediction")
+                    .aria_label("Tab Completion")
                     .when_some(indicator_color, |this, color| {
                         this.indicator(Indicator::dot().color(color))
                             .indicator_border_color(Some(cx.theme().colors().status_bar_background))
@@ -487,7 +456,7 @@ impl Render for EditPredictionButton {
                             let description = if !enabled {
                                 "Disabled For This File"
                             } else if zed_cloud_needs_sign_in {
-                                "Sign In Or Configure a Provider"
+                                "Unavailable in This Product: Choose a Provider"
                             } else if zed_cloud_has_no_active_subscription {
                                 "This organization has no active subscription"
                             } else if excluded_from_plan {
@@ -498,12 +467,7 @@ impl Render for EditPredictionButton {
                                 "Enable to Use"
                             };
 
-                            Tooltip::with_meta(
-                                "Edit Prediction",
-                                Some(&ToggleMenu),
-                                description,
-                                cx,
-                            )
+                            Tooltip::with_meta("Tab Completion", Some(&ToggleMenu), description, cx)
                         })
                     });
 
@@ -619,20 +583,7 @@ impl EditPredictionButton {
         current_provider: EditPredictionProvider,
         cx: &mut App,
     ) -> ContextMenu {
-        let organization_configuration = self
-            .user_store
-            .read(cx)
-            .current_organization_configuration();
-
-        let is_zed_provider_disabled = organization_configuration
-            .is_some_and(|configuration| !configuration.edit_prediction.is_enabled);
-        let user_store = self.user_store.read(cx);
-        let is_zed_provider_unavailable = user_store.current_user().is_none()
-            || edit_prediction::zed_edit_predictions_excluded_from_plan(user_store, cx);
-
-        let available_providers = get_available_providers(cx);
-
-        let providers: Vec<_> = available_providers
+        let providers: Vec<_> = get_available_providers(cx)
             .into_iter()
             .filter(|p| *p != EditPredictionProvider::None)
             .collect();
@@ -645,27 +596,11 @@ impl EditPredictionButton {
                     continue;
                 };
                 let is_current = provider == current_provider;
-                let is_disabled_zed_provider =
-                    provider == EditPredictionProvider::Zed && is_zed_provider_disabled;
-                // Zed stays selected in settings, but checking it would imply predictions are
-                // working when the user still needs to sign in or upgrade.
-                let is_unavailable_zed_provider =
-                    provider == EditPredictionProvider::Zed && is_zed_provider_unavailable;
                 let fs = self.fs.clone();
 
                 menu = menu.item(
                     ContextMenuEntry::new(name)
-                        .toggleable(
-                            IconPosition::Start,
-                            is_current && !is_disabled_zed_provider && !is_unavailable_zed_provider,
-                        )
-                        .disabled(is_disabled_zed_provider)
-                        .when(is_disabled_zed_provider, |item| {
-                            item.documentation_aside(DocumentationSide::Left, move |_cx| {
-                                Label::new("Edit predictions are disabled for this organization.")
-                                    .into_any_element()
-                            })
-                        })
+                        .toggleable(IconPosition::Start, is_current)
                         .handler(move |_, cx| {
                             set_completion_provider(fs.clone(), cx, provider);
                         }),
@@ -708,27 +643,21 @@ impl EditPredictionButton {
         let project = self.project.clone();
         ContextMenu::build(window, cx, |menu, _, cx| {
             let menu = menu
-                .entry(
-                    "Sign In to Copilot Edit Predictions",
-                    None,
-                    move |window, cx| {
-                        telemetry::event!(
-                            "Edit Prediction Menu Action",
-                            action = "sign_in",
-                            provider = "copilot",
-                        );
-                        if let Some(copilot) =
-                            EditPredictionStore::try_global(cx).and_then(|store| {
-                                store.update(cx, |this, cx| {
-                                    this.start_copilot_for_project(&project.upgrade()?, cx)
-                                })
-                            })
-                        {
-                            copilot_ui::initiate_sign_in(copilot, window, cx);
-                        }
-                    },
-                )
-                .entry("Disable Copilot Edit Predictions", None, {
+                .entry("Sign In to Copilot", None, move |window, cx| {
+                    telemetry::event!(
+                        "Edit Prediction Menu Action",
+                        action = "sign_in",
+                        provider = "copilot",
+                    );
+                    if let Some(copilot) = EditPredictionStore::try_global(cx).and_then(|store| {
+                        store.update(cx, |this, cx| {
+                            this.start_copilot_for_project(&project.upgrade()?, cx)
+                        })
+                    }) {
+                        copilot_ui::initiate_sign_in(copilot, window, cx);
+                    }
+                })
+                .entry("Disable Copilot Tab Completion", None, {
                     let fs = fs.clone();
                     move |_window, cx| {
                         telemetry::event!(
@@ -756,7 +685,7 @@ impl EditPredictionButton {
         let fs = self.fs.clone();
         let line_height = window.line_height();
 
-        menu = menu.header("Show Edit Predictions For");
+        menu = menu.header("Tab Completion");
 
         let language_state = self.language.as_ref().map(|language| {
             (
@@ -931,7 +860,7 @@ impl EditPredictionButton {
                                     .child(
                                         Label::new(indoc!{
                                             "Help us improve our open dataset model by sharing data from open source repositories. \
-                                            Zed must detect a license file in your repo for this setting to take effect. \
+                                            A license file must be detected in your repo for this setting to take effect. \
                                             Files with sensitive data and secrets are excluded by default."
                                         })
                                     )
@@ -984,8 +913,9 @@ impl EditPredictionButton {
                 .icon(IconName::Lock)
                 .icon_color(Color::Muted)
                 .documentation_aside(DocumentationSide::Left, |_| {
-                    Label::new(indoc!{"
-                        Open your settings to add sensitive paths for which Zed will never predict edits."}).into_any_element()
+                    Label::new(indoc! {"
+                    Open your settings to add sensitive paths where tab completion never runs."})
+                    .into_any_element()
                 })
                 .handler(move |window, cx| {
                     telemetry::event!(
@@ -996,25 +926,11 @@ impl EditPredictionButton {
                         let workspace = workspace.downgrade();
                         window
                             .spawn(cx, async |cx| {
-                                open_disabled_globs_setting_in_editor(
-                                    workspace,
-                                    cx,
-                                ).await
+                                open_disabled_globs_setting_in_editor(workspace, cx).await
                             })
                             .detach_and_log_err(cx);
                     }
                 }),
-        ).item(
-            ContextMenuEntry::new("View Docs")
-                .icon(IconName::FileGeneric)
-                .icon_color(Color::Muted)
-                .handler(move |_, cx| {
-                    telemetry::event!(
-                        "Edit Prediction Menu Action",
-                        action = "view_docs",
-                    );
-                    cx.open_url(PRIVACY_DOCS);
-                })
         );
 
         if !self.editor_enabled.unwrap_or(true) {
@@ -1023,7 +939,7 @@ impl EditPredictionButton {
                 .as_ref()
                 .map(|p| p.icons(cx))
                 .unwrap_or_else(|| {
-                    edit_prediction_types::EditPredictionIconSet::new(IconName::ZedPredict)
+                    edit_prediction_types::EditPredictionIconSet::new(IconName::AppPredict)
                 });
             menu = menu.item(
                 ContextMenuEntry::new("This file is excluded.")
@@ -1154,66 +1070,19 @@ impl EditPredictionButton {
         cx: &mut Context<Self>,
     ) -> Entity<ContextMenu> {
         ContextMenu::build(window, cx, |mut menu, window, cx| {
-            let user = self.user_store.read(cx).current_user();
-
-            let needs_sign_in = user.is_none()
-                && matches!(
-                    provider,
-                    EditPredictionProvider::None | EditPredictionProvider::Zed
-                );
-
-            if needs_sign_in {
+            if provider == EditPredictionProvider::Zed {
+                // A value left in the settings by another editor: nothing
+                // answers behind it here.
+                let fs = self.fs.clone();
                 menu = menu
-                    .custom_row(move |_window, cx| {
-                        let description = indoc! {
-                            "Suggestions at every keystroke, powered by Zeta, our open-source, \
-                            open-data model. Included with Zed Pro and the Pro trial."
-                        };
-
-                        v_flex()
-                            .max_w_64()
-                            .h(rems_from_px(148_f32))
-                            .child(render_zeta_tab_animation(cx))
-                            .child(Label::new("Edit Prediction"))
-                            .child(
-                                Label::new(description)
-                                    .color(Color::Muted)
-                                    .size(LabelSize::Small),
-                            )
-                            .into_any_element()
-                    })
-                    .separator()
-                    .entry("Sign In", None, |window, cx| {
-                        telemetry::event!(
-                            "Edit Prediction Menu Action",
-                            action = "sign_in",
-                            provider = "zed",
-                        );
-                        let client = Client::global(cx);
-                        window
-                            .spawn(cx, async move |cx| {
-                                client
-                                    .sign_in_with_optional_connect(true, &cx)
-                                    .await
-                                    .log_err();
-                            })
-                            .detach();
-                    })
-                    .link_with_handler(
-                        "Learn More",
-                        OpenBrowser {
-                            url: zed_urls::edit_prediction_docs(cx).into(),
-                        }
-                        .boxed_clone(),
-                        |_window, _cx| {
-                            telemetry::event!(
-                                "Edit Prediction Menu Action",
-                                action = "view_docs",
-                                source = "upsell",
-                            );
-                        },
+                    .header("Tab Completion")
+                    .item(
+                        ContextMenuEntry::new("This provider is unavailable in this product")
+                            .disabled(true),
                     )
-                    .separator();
+                    .entry("Turn Off", None, move |_window, cx| {
+                        set_completion_provider(fs.clone(), cx, EditPredictionProvider::None);
+                    });
             } else {
                 let mercury_payment_required = matches!(provider, EditPredictionProvider::Mercury)
                     && edit_prediction::EditPredictionStore::try_global(cx).is_some_and(
@@ -1233,146 +1102,6 @@ impl EditPredictionButton {
                         .separator();
                 }
 
-                let zed_cloud_has_no_active_subscription =
-                    matches!(provider, EditPredictionProvider::Zed)
-                        && self
-                            .user_store
-                            .read(cx)
-                            .current_organization_has_no_active_subscription();
-
-                if zed_cloud_has_no_active_subscription {
-                    menu = menu
-                        .header("Zed AI")
-                        .item(
-                            ContextMenuEntry::new(
-                                "This organization has no active subscription",
-                            )
-                            .disabled(true),
-                        )
-                        .item(
-                            ContextMenuEntry::new(
-                                "Switch organizations or configure another provider to use edit predictions",
-                            )
-                            .disabled(true),
-                        )
-                        .separator();
-                } else if edit_prediction::zed_edit_predictions_excluded_from_plan(
-                    self.user_store.read(cx),
-                    cx,
-                ) {
-                    menu = menu
-                        .custom_entry(
-                            |_window, _cx| {
-                                Label::new("Zed's edit predictions not included in the Free plan.")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted)
-                                    .into_any_element()
-                            },
-                            |_window, cx| cx.open_url(&zed_urls::upgrade_to_zed_pro_url(cx)),
-                        )
-                        .entry("Upgrade to Pro", None, |_window, cx| {
-                            telemetry::event!(
-                                "Edit Prediction Menu Action",
-                                action = "upsell_clicked",
-                                reason = "excluded_from_plan",
-                            );
-                            cx.open_url(&zed_urls::upgrade_to_zed_pro_url(cx))
-                        })
-                        .separator();
-                } else if let Some(usage) = self
-                    .edit_prediction_provider
-                    .as_ref()
-                    .and_then(|provider| provider.usage(cx))
-                {
-                    menu = menu.header("Usage");
-                    menu = menu
-                        .custom_entry(
-                            move |_window, cx| {
-                                let used_percentage = match usage.limit {
-                                    UsageLimit::Limited(limit) => {
-                                        Some((usage.amount as f32 / limit as f32) * 100.)
-                                    }
-                                    UsageLimit::Unlimited => None,
-                                };
-
-                                h_flex()
-                                    .flex_1()
-                                    .gap_1p5()
-                                    .children(used_percentage.map(|percent| {
-                                        ProgressBar::new("usage", percent, 100., cx)
-                                    }))
-                                    .child(
-                                        Label::new(match usage.limit {
-                                            UsageLimit::Limited(limit) => {
-                                                format!("{} / {limit}", usage.amount)
-                                            }
-                                            UsageLimit::Unlimited => {
-                                                format!("{} / ∞", usage.amount)
-                                            }
-                                        })
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted),
-                                    )
-                                    .into_any_element()
-                            },
-                            move |_, cx| cx.open_url(&zed_urls::account_url(cx)),
-                        )
-                        .when(usage.over_limit(), |menu| -> ContextMenu {
-                            menu.entry("Subscribe to increase your limit", None, |_window, cx| {
-                                telemetry::event!(
-                                    "Edit Prediction Menu Action",
-                                    action = "upsell_clicked",
-                                    reason = "usage_limit",
-                                );
-                                cx.open_url(&zed_urls::account_url(cx))
-                            })
-                        })
-                        .separator();
-                } else if self.user_store.read(cx).account_too_young() {
-                    menu = menu
-                        .custom_entry(
-                            |_window, _cx| {
-                                Label::new("Your GitHub account is less than 30 days old.")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Warning)
-                                    .into_any_element()
-                            },
-                            |_window, cx| cx.open_url(&zed_urls::account_url(cx)),
-                        )
-                        .entry("Upgrade to Zed Pro or contact us.", None, |_window, cx| {
-                            telemetry::event!(
-                                "Edit Prediction Menu Action",
-                                action = "upsell_clicked",
-                                reason = "account_age",
-                            );
-                            cx.open_url(&zed_urls::account_url(cx))
-                        })
-                        .separator();
-                } else if self.user_store.read(cx).has_overdue_invoices() {
-                    menu = menu
-                        .custom_entry(
-                            |_window, _cx| {
-                                Label::new("You have an outstanding invoice")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Warning)
-                                    .into_any_element()
-                            },
-                            |_window, cx| {
-                                cx.open_url(&zed_urls::account_url(cx))
-                            },
-                        )
-                        .entry(
-                            "Check your payment status or contact us at billing-support@zed.dev to continue using this feature.",
-                            None,
-                            |_window, cx| {
-                                cx.open_url(&zed_urls::account_url(cx))
-                            },
-                        )
-                        .separator();
-                }
-            }
-
-            if !needs_sign_in {
                 menu = self.build_language_settings_menu(menu, window, cx);
             }
             menu = self.add_provider_switching_section(menu, provider, cx);
@@ -1569,21 +1298,25 @@ async fn open_disabled_globs_setting_in_editor(
     anyhow::Ok(())
 }
 
+/// Chooses the tab completion provider. The status bar button is off by
+/// default in this product, like tab completion itself: choosing a provider
+/// shows it, choosing none hides it again.
 pub fn set_completion_provider(fs: Arc<dyn Fs>, cx: &mut App, provider: EditPredictionProvider) {
     update_settings_file(fs, cx, move |settings, _| {
-        settings
+        let edit_predictions = settings
             .project
             .all_languages
             .edit_predictions
-            .get_or_insert_default()
-            .provider = Some(provider);
+            .get_or_insert_default();
+        edit_predictions.provider = Some(provider);
+        edit_predictions.button = Some(provider != EditPredictionProvider::None);
     });
 }
 
 pub fn get_available_providers(cx: &mut App) -> Vec<EditPredictionProvider> {
+    // Zed's hosted provider needs a Zed account, which this product does not
+    // have: it is never offered.
     let mut providers = Vec::new();
-
-    providers.push(EditPredictionProvider::Zed);
 
     let app_state = workspace::AppState::global(cx);
     if copilot::GlobalCopilotAuth::try_get_or_init(app_state, cx)
@@ -1672,73 +1405,6 @@ fn toggle_edit_prediction_mode(fs: Arc<dyn Fs>, mode: EditPredictionsMode, cx: &
     }
 }
 
-fn render_zeta_tab_animation(cx: &App) -> impl IntoElement {
-    let tab = |n: u64, inverted: bool| {
-        let text_color = cx.theme().colors().text;
-
-        h_flex().child(
-            h_flex()
-                .text_size(TextSize::XSmall.rems(cx))
-                .text_color(text_color)
-                .child("tab")
-                .with_animation(
-                    ElementId::Integer(n),
-                    Animation::new(Duration::from_secs(3)).repeat(),
-                    move |tab, delta| {
-                        let n_f32 = n as f32;
-
-                        let offset = if inverted {
-                            0.2 * (4.0 - n_f32)
-                        } else {
-                            0.2 * n_f32
-                        };
-
-                        let phase = (delta - offset + 1.0) % 1.0;
-                        let pulse = if phase < 0.6 {
-                            let t = phase / 0.6;
-                            1.0 - (0.5 - t).abs() * 2.0
-                        } else {
-                            0.0
-                        };
-
-                        let eased = ease_in_out(pulse);
-                        let opacity = 0.1 + 0.5 * eased;
-
-                        tab.text_color(text_color.opacity(opacity))
-                    },
-                ),
-        )
-    };
-
-    let tab_sequence = |inverted: bool| {
-        h_flex()
-            .gap_1()
-            .child(tab(0, inverted))
-            .child(tab(1, inverted))
-            .child(tab(2, inverted))
-            .child(tab(3, inverted))
-            .child(tab(4, inverted))
-    };
-
-    h_flex()
-        .my_1p5()
-        .p_4()
-        .justify_center()
-        .gap_2()
-        .rounded_xs()
-        .border_1()
-        .border_dashed()
-        .border_color(cx.theme().colors().border)
-        .bg(gpui::pattern_slash(
-            cx.theme().colors().border.opacity(0.5),
-            1.,
-            8.,
-        ))
-        .child(tab_sequence(true))
-        .child(Icon::new(IconName::ZedPredict))
-        .child(tab_sequence(false))
-}
-
 fn emit_edit_prediction_menu_opened(
     provider: &str,
     file: &Option<Arc<dyn File>>,
@@ -1789,12 +1455,12 @@ fn copilot_settings_url(enterprise_uri: Option<&str>) -> Arc<str> {
 mod tests {
     use super::*;
     use anyhow::Context as _;
+    use app_credentials_provider::AppCredentialsProvider;
     use credentials_provider::test_support::FakeCredentialsProvider;
     use gpui::TestAppContext;
     use language_model::{ApiKeyState, EnvVar};
     use settings::RootUserSettings;
     use workspace::AppState;
-    use zed_credentials_provider::ZedCredentialsProvider;
 
     #[gpui::test]
     async fn test_credentials_survive_button_recreation(cx: &mut TestAppContext) {
@@ -1803,7 +1469,7 @@ mod tests {
         let credentials = Arc::new(FakeCredentialsProvider::default());
 
         cx.update(|cx| {
-            cx.set_global(ZedCredentialsProvider(credentials.clone()));
+            cx.set_global(AppCredentialsProvider(credentials.clone()));
             language_model::set_credentials_read_gate::<SettingsStore>(
                 |cx| DisableAiSettings::get_global(cx).disable_ai,
                 cx,

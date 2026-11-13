@@ -393,8 +393,7 @@ impl Render for AddToolchainState {
             // They get duplicated in the middle state of adding a virtual env, but then are needed for this last state
             .bg(cx.theme().colors().elevated_surface_background)
             .border_1()
-            .border_color(cx.theme().colors().border_variant)
-            .rounded_lg()
+            .border_color(cx.theme().colors().border)
             .when_some(weak, |this, weak| {
                 this.on_action(window.listener_for(
                     &weak,
@@ -427,7 +426,9 @@ impl Render for AddToolchainState {
                             .child(
                                 h_flex()
                                     .w_full()
-                                    .p_2()
+                                    .h(rems_from_px(34_f32))
+                                    .px_2()
+                                    .bg(theme.colors().background)
                                     .border_b_1()
                                     .border_color(theme.colors().border)
                                     .child(editor.clone()),
@@ -471,7 +472,7 @@ impl Render for AddToolchainState {
                                                                 .contains_focused(window, cx),
                                                     )
                                                     .inset(true)
-                                                    .spacing(ListItemSpacing::Sparse)
+                                                    .spacing(ListItemSpacing::Dense)
                                                     .child(
                                                         h_flex()
                                                             .gap_2()
@@ -491,12 +492,15 @@ impl Render for AddToolchainState {
                                                 )
                                         }),
                                     ))
-                                    .child(Divider::horizontal())
-                                    .child(h_flex().p_1p5().justify_end().map(|this| {
+                                    .child(Divider::horizontal().color(ui::DividerColor::Border))
+                                    .child(h_flex().px_1p5().py_1().justify_end().map(|this| {
                                         let is_disabled = editor.read(cx).is_empty(cx);
                                         let handle = self.focus_handle(cx);
                                         this.child(
                                             Button::new("add-toolchain", label)
+                                                // The form's one primary action.
+                                                .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                                                .label_size(LabelSize::Small)
                                                 .disabled(is_disabled)
                                                 .key_binding(KeyBinding::for_action_in(
                                                     &menu::Confirm,
@@ -1070,7 +1074,7 @@ impl PickerDelegate for ToolchainSelectorDelegate {
         Some(
             ListItem::new(id)
                 .inset(true)
-                .spacing(ListItemSpacing::Sparse)
+                .spacing(ListItemSpacing::Dense)
                 .toggle_state(selected)
                 .child(HighlightedLabel::new(label, name_highlights))
                 .child(
@@ -1127,36 +1131,28 @@ impl PickerDelegate for ToolchainSelectorDelegate {
         cx: &mut Context<Picker<Self>>,
     ) -> Option<AnyElement> {
         Some(
-            v_flex()
-                .rounded_b_md()
-                .child(Divider::horizontal())
+            picker::footer(cx)
                 .child(
-                    h_flex()
-                        .p_1p5()
-                        .gap_0p5()
-                        .justify_end()
-                        .child(
-                            Button::new("xd", self.add_toolchain_text.clone())
-                                .key_binding(KeyBinding::for_action_in(
-                                    &AddToolchain,
-                                    &self.focus_handle,
-                                    cx,
-                                ))
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(AddToolchain), cx)
-                                }),
-                        )
-                        .child(
-                            Button::new("select", "Select")
-                                .key_binding(KeyBinding::for_action_in(
-                                    &menu::Confirm,
-                                    &self.focus_handle,
-                                    cx,
-                                ))
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(menu::Confirm.boxed_clone(), cx)
-                                }),
-                        ),
+                    picker::footer_button("add-toolchain", self.add_toolchain_text.clone())
+                        .key_binding(picker::footer_key_cap(
+                            &AddToolchain,
+                            &self.focus_handle,
+                            cx,
+                        ))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(AddToolchain), cx)
+                        }),
+                )
+                .child(
+                    picker::footer_button("select", "Select")
+                        .key_binding(picker::footer_key_cap(
+                            &menu::Confirm,
+                            &self.focus_handle,
+                            cx,
+                        ))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(menu::Confirm.boxed_clone(), cx)
+                        }),
                 )
                 .into_any_element(),
         )

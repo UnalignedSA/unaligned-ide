@@ -38,6 +38,7 @@ aho-corasick.workspace = true
 anyhow.workspace = true
 assets = { workspace = true, optional = true }
 base64.workspace = true
+branding.workspace = true
 breadcrumbs.workspace = true
 client.workspace = true
 clock.workspace = true
@@ -105,7 +106,7 @@ util.workspace = true
 uuid.workspace = true
 vim_mode_setting.workspace = true
 workspace.workspace = true
-zed_actions.workspace = true
+app_actions.workspace = true
 
 [dev-dependencies]
 assets.workspace = true

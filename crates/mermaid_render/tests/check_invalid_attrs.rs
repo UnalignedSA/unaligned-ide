@@ -300,7 +300,7 @@ fn class_diagram_label_text_uses_accent_classes() {
                         .unwrap_or_default()
                         .to_string();
                     for token in class.split_whitespace() {
-                        if token.starts_with("zed-accent-") {
+                        if token.starts_with("ide-accent-") {
                             accent_classes.push(token.to_string());
                         }
                     }
@@ -312,7 +312,7 @@ fn class_diagram_label_text_uses_accent_classes() {
 
     assert!(
         !accent_classes.is_empty(),
-        "expected zed-accent-N classes on label text elements",
+        "expected ide-accent-N classes on label text elements",
     );
 }
 
@@ -336,7 +336,7 @@ fn sequence_diagram_tspan_uses_accent_classes() {
                         .unwrap_or_default()
                         .to_string();
                     for token in class.split_whitespace() {
-                        if token.starts_with("zed-accent-") {
+                        if token.starts_with("ide-accent-") {
                             accent_classes.push(token.to_string());
                         }
                     }
@@ -348,7 +348,7 @@ fn sequence_diagram_tspan_uses_accent_classes() {
 
     assert!(
         !accent_classes.is_empty(),
-        "expected zed-accent-N classes on tspan elements in sequence diagram",
+        "expected ide-accent-N classes on tspan elements in sequence diagram",
     );
 }
 

@@ -635,6 +635,10 @@ impl ChatCompletionEventMapper {
                     StopReason::MaxTokens,
                 )));
             }
+            // The provider's filter cut the answer: a refusal, not a normal end.
+            Some("content_filter") => {
+                events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::Refusal)));
+            }
             Some(stop_reason) => {
                 log::error!("Unexpected chat completion stop_reason: {stop_reason:?}",);
                 events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::EndTurn)));
@@ -973,6 +977,23 @@ mod tests {
         assert_eq!(
             events,
             vec![LanguageModelCompletionEvent::Stop(StopReason::MaxTokens)]
+        );
+    }
+
+    #[test]
+    fn stream_maps_content_filter_finish_reason_to_refusal_stop() {
+        let events = map_completion_events(vec![ResponseStreamEvent {
+            choices: vec![ChoiceDelta {
+                index: 0,
+                delta: None,
+                finish_reason: Some("content_filter".into()),
+            }],
+            usage: None,
+        }]);
+
+        assert_eq!(
+            events,
+            vec![LanguageModelCompletionEvent::Stop(StopReason::Refusal)]
         );
     }
 

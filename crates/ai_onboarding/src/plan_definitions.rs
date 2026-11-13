@@ -1,7 +1,7 @@
 use gpui::{IntoElement, ParentElement};
 use ui::{List, ListBulletItem, prelude::*};
 
-/// Centralized definitions for Zed AI plans
+/// Centralized definitions for the upstream hosted AI plans (not offered in this product)
 pub struct PlanDefinitions;
 
 impl PlanDefinitions {
@@ -33,7 +33,7 @@ impl PlanDefinitions {
 
     pub fn pro_plan(&self) -> impl IntoElement {
         List::new()
-            .child(ListBulletItem::new("$5 of tokens in Zed agent"))
+            .child(ListBulletItem::new("$5 of tokens in the agent"))
             .child(ListBulletItem::new("Usage-based billing beyond $5"))
             .child(ListBulletItem::new("Unlimited edit predictions"))
     }
@@ -47,13 +47,13 @@ impl PlanDefinitions {
     pub fn vip_plan(&self) -> impl IntoElement {
         List::new()
             .child(ListBulletItem::new("Unlimited edit predictions"))
-            .child(ListBulletItem::new("Tokens in the Zed agent"))
+            .child(ListBulletItem::new("Tokens in the agent"))
     }
 
     pub fn student_plan(&self) -> impl IntoElement {
         List::new()
             .child(ListBulletItem::new("Unlimited edit predictions"))
-            .child(ListBulletItem::new("$10 of tokens in Zed agent"))
+            .child(ListBulletItem::new("$10 of tokens in the agent"))
             .child(ListBulletItem::new(
                 "Optional credit packs for additional usage",
             ))

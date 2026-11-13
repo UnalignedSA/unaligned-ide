@@ -14,6 +14,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+branding.workspace = true
 buffer_diff.workspace = true
 client.workspace = true
 cloud_llm_client.workspace = true
@@ -42,7 +43,7 @@ theme_settings.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
-zed_actions.workspace = true
+app_actions.workspace = true
 zeta_prompt.workspace = true
 
 [dev-dependencies]
@@ -54,6 +55,6 @@ indoc.workspace = true
 language_model.workspace = true
 project = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
-zed_credentials_provider.workspace = true
+app_credentials_provider.workspace = true
 
 

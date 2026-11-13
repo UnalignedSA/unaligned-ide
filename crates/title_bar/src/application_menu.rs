@@ -25,12 +25,18 @@ actions!(
     ]
 );
 
-/// Opens the named menu in the client-side application menu.
+/// Opens the named menu in the client-side application menu. The first menu,
+/// which carries the application's name, is called "App" here.
 ///
 /// Does not apply to platform menu bars (e.g. on macOS).
 #[derive(Clone, Deserialize, JsonSchema, PartialEq, Default, Action)]
 #[action(namespace = app_menu)]
 pub struct OpenApplicationMenu(String);
+
+/// The name key bindings give to the first menu: its real name is the
+/// product's, which a keymap file cannot spell (see `app_menus.rs`).
+#[cfg(not(target_os = "macos"))]
+const APP_MENU_ALIAS: &str = "App";
 
 #[cfg(not(target_os = "macos"))]
 pub enum ActivateDirection {
@@ -196,8 +202,8 @@ impl ApplicationMenu {
                         .style(ButtonStyle::Subtle)
                         .icon_size(IconSize::Small)
                         .tab_index(0isize)
-                        .aria_label("Application menu"),
-                        Tooltip::text("Open Application Menu"),
+                        .aria_label(format!("{} Menu", branding::PRODUCT_NAME)),
+                        Tooltip::text(format!("{} Menu", branding::PRODUCT_NAME)),
                     )
                     .with_handle(handle),
             )
@@ -256,7 +262,12 @@ impl ApplicationMenu {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
-        self.pending_menu_open = Some(action.0.clone());
+        let name = if action.0 == APP_MENU_ALIAS {
+            branding::PRODUCT_NAME.to_string()
+        } else {
+            action.0.clone()
+        };
+        self.pending_menu_open = Some(name);
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -316,7 +327,7 @@ impl ApplicationMenu {
 
 pub(crate) fn show_menus(cx: &mut App) -> bool {
     TitleBarSettings::get_global(cx).show_menus
-        && (cfg!(not(target_os = "macos")) || option_env!("ZED_USE_CROSS_PLATFORM_MENU").is_some())
+        && (cfg!(not(target_os = "macos")) || option_env!("IDE_USE_CROSS_PLATFORM_MENU").is_some())
 }
 
 pub(crate) fn open_menus_on_hover(cx: &mut App) -> bool {
@@ -525,7 +536,7 @@ mod tests {
 
         cx.update(|cx| {
             cx.set_menus(vec![
-                Menu::new("Zed").items([MenuItem::action(
+                Menu::new(branding::PRODUCT_NAME).items([MenuItem::action(
                     "Settings",
                     OpenApplicationMenu(String::new()),
                 )]),
@@ -535,25 +546,27 @@ mod tests {
 
         let (app_menu, cx) = cx.add_window_view(|window, cx| ApplicationMenu::new(window, cx));
 
-        let zed_handle = cx.update(|window, cx| {
-            let zed_handle = app_menu.read_with(cx, |app_menu, _| {
-                menu_entry(&app_menu.entries, "Zed").handle.clone()
+        let product_handle = cx.update(|window, cx| {
+            let product_handle = app_menu.read_with(cx, |app_menu, _| {
+                menu_entry(&app_menu.entries, branding::PRODUCT_NAME)
+                    .handle
+                    .clone()
             });
-            zed_handle.show(window, cx);
-            zed_handle
+            product_handle.show(window, cx);
+            product_handle
         });
         cx.run_until_parked();
-        assert!(zed_handle.is_deployed());
+        assert!(product_handle.is_deployed());
 
         cx.update(|window, cx| {
             let view_handle = app_menu.read_with(cx, |app_menu, _| {
                 menu_entry(&app_menu.entries, "View").handle.clone()
             });
-            zed_handle.hide(cx);
+            product_handle.hide(cx);
             view_handle.show(window, cx);
         });
         cx.run_until_parked();
-        assert!(!zed_handle.is_deployed());
+        assert!(!product_handle.is_deployed());
 
         assert!(app_menu.read_with(cx, |app_menu, _| {
             menu_entry(&app_menu.entries, "View").handle.is_deployed()

@@ -1,22 +1,17 @@
 use component::{example_group, single_example};
 
-use gpui::{App, FocusHandle, Focusable, Hsla, Length};
+use gpui::{App, FocusHandle, Focusable, Length};
 use std::sync::Arc;
 
-use ui::Tooltip;
 use ui::prelude::*;
+use ui::{InputShell, InputShellSize, SectionLabel, Tooltip};
 
 use crate::ErasedEditor;
 
-pub struct InputFieldStyle {
-    text_color: Hsla,
-    background_color: Hsla,
-    border_color: Hsla,
-}
-
 /// An Input Field component that can be used to create text fields like search inputs, form fields, etc.
 ///
-/// It wraps a single line [`Editor`] and allows for common field properties like labels, placeholders, icons, etc.
+/// It wraps a single line [`Editor`] in an [`InputShell`] and allows for common field properties
+/// like labels, placeholders, icons, etc.
 #[derive(RegisterComponent)]
 pub struct InputField {
     /// An optional label for the text field.
@@ -151,18 +146,8 @@ impl Render for InputField {
             self.editor.set_masked(masked, window, cx);
         }
 
-        let theme_color = cx.theme().colors();
-
-        let style = InputFieldStyle {
-            text_color: theme_color.text,
-            background_color: theme_color.editor_background,
-            border_color: theme_color.border_variant,
-        };
-
         let focus_handle = self.editor.focus_handle(cx);
-
-        let has_error = self.error.is_some();
-        let error_border = cx.theme().status().error_border;
+        let is_focused = focus_handle.contains_focused(window, cx);
 
         let configured_handle = if let Some(tab_index) = self.tab_index {
             focus_handle.tab_index(tab_index).tab_stop(self.tab_stop)
@@ -175,36 +160,34 @@ impl Render for InputField {
         v_flex()
             .id(self.placeholder.clone())
             .w_full()
-            .gap_1()
-            .when_some(self.label.clone(), |this, label| {
-                this.child(Label::new(label).size(self.label_size))
+            .gap_1p5()
+            .when_some(self.label.clone(), |this, label| match self.label_size {
+                LabelSize::Small | LabelSize::XSmall => this.child(SectionLabel::new(label)),
+                // A caller that asks for a larger label gets it, in the same voice.
+                size => this.child(
+                    Label::new(label.to_uppercase())
+                        .size(size)
+                        .color(Color::Custom(cx.theme().colors().text_faint))
+                        .buffer_font(cx),
+                ),
             })
             .child(
-                h_flex()
+                InputShell::new()
+                    .size(InputShellSize::Large)
+                    .focused(is_focused)
+                    .invalid(self.error.is_some())
                     .track_focus(&configured_handle)
                     .min_w(self.min_width)
-                    .min_h_8()
                     .w_full()
-                    .px_2()
-                    .py_1p5()
                     .flex_grow_1()
-                    .text_color(style.text_color)
-                    .rounded_md()
-                    .bg(style.background_color)
-                    .border_1()
-                    .border_color(style.border_color)
-                    .when(
-                        editor.focus_handle(cx).contains_focused(window, cx),
-                        |this| this.border_color(theme_color.border_focused),
-                    )
-                    .when(has_error, |this| this.border_color(error_border))
+                    // Room above and below the text when the editor is multi-line.
+                    .py_1()
                     .when_some(self.start_icon, |this, icon| {
-                        this.gap_1()
-                            .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+                        this.start_slot(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
                     })
-                    .child(self.editor.render(window, cx))
+                    .child(editor.render(window, cx))
                     .when_some(self.masked, |this, is_masked| {
-                        this.child(
+                        this.end_slot(
                             IconButton::new(
                                 "toggle-masked",
                                 if is_masked {

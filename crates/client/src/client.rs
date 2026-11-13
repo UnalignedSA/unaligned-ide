@@ -26,7 +26,7 @@ use futures::{
     future::BoxFuture,
     stream::BoxStream,
 };
-use gpui::{App, AsyncApp, Entity, Global, Task, TaskExt, WeakEntity, actions};
+use gpui::{App, AsyncApp, Entity, Global, PromptLevel, Task, TaskExt, WeakEntity, actions};
 use http_client::{HttpClient, HttpClientWithUrl, http, read_proxy_from_env};
 use parking_lot::{Mutex, RwLock};
 use postage::watch;
@@ -60,29 +60,35 @@ pub use rpc::*;
 pub use telemetry_events::Event;
 pub use user::*;
 
-static ZED_SERVER_URL: LazyLock<Option<String>> =
-    LazyLock::new(|| std::env::var("ZED_SERVER_URL").ok());
-static ZED_RPC_URL: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("ZED_RPC_URL").ok());
+/// The developer override for the server URL. It is also the only thing that
+/// enables accounts and Zed's hosted services in this build (see
+/// [`Client::accounts_available`]). An empty value counts as unset.
+static IDE_SERVER_URL: LazyLock<Option<String>> = LazyLock::new(|| {
+    std::env::var("IDE_SERVER_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+});
+static IDE_RPC_URL: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("IDE_RPC_URL").ok());
 
 pub static IMPERSONATE_LOGIN: LazyLock<Option<String>> = LazyLock::new(|| {
-    std::env::var("ZED_IMPERSONATE")
+    std::env::var("IDE_IMPERSONATE")
         .ok()
         .filter(|s| !s.is_empty())
 });
 
-pub static USE_WEB_LOGIN: LazyLock<bool> = LazyLock::new(|| std::env::var("ZED_WEB_LOGIN").is_ok());
+pub static USE_WEB_LOGIN: LazyLock<bool> = LazyLock::new(|| std::env::var("IDE_WEB_LOGIN").is_ok());
 
 pub static ADMIN_API_TOKEN: LazyLock<Option<String>> = LazyLock::new(|| {
-    std::env::var("ZED_ADMIN_API_TOKEN")
+    std::env::var("IDE_ADMIN_API_TOKEN")
         .ok()
         .filter(|s| !s.is_empty())
 });
 
-pub static ZED_APP_PATH: LazyLock<Option<PathBuf>> =
-    LazyLock::new(|| std::env::var("ZED_APP_PATH").ok().map(PathBuf::from));
+pub static IDE_APP_PATH: LazyLock<Option<PathBuf>> =
+    LazyLock::new(|| std::env::var("IDE_APP_PATH").ok().map(PathBuf::from));
 
-pub static ZED_ALWAYS_ACTIVE: LazyLock<bool> =
-    LazyLock::new(|| std::env::var("ZED_ALWAYS_ACTIVE").is_ok_and(|e| !e.is_empty()));
+pub static IDE_ALWAYS_ACTIVE: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("IDE_ALWAYS_ACTIVE").is_ok_and(|e| !e.is_empty()));
 
 pub const INITIAL_RECONNECTION_DELAY: Duration = Duration::from_millis(500);
 pub const MAX_RECONNECTION_DELAY: Duration = Duration::from_secs(30);
@@ -91,14 +97,49 @@ pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
 actions!(
     client,
     [
-        /// Signs in to Zed account.
+        /// Does nothing but say that the product has no accounts.
         SignIn,
-        /// Signs out of Zed account.
+        /// Forgets the account of this session, if there is one.
         SignOut,
-        /// Reconnects to the collaboration server.
+        /// Does nothing but say that the product has no accounts.
         Reconnect
     ]
 );
+
+/// What the sign-in and reconnect actions answer, and the error every
+/// sign-in path returns: accounts are not part of the product.
+pub fn accounts_unavailable_message() -> String {
+    format!("Accounts are not part of {}", branding::PRODUCT_NAME)
+}
+
+fn accounts_unavailable() -> anyhow::Error {
+    anyhow!(accounts_unavailable_message())
+}
+
+/// Logs that accounts are not part of the product and says so in the active
+/// window (or in the first one when the app is in the background). Nothing
+/// else happens: no browser, no credentials, no request.
+fn report_accounts_unavailable(cx: &mut App) {
+    let message = accounts_unavailable_message();
+    log::info!("{message}");
+    let Some(window) = cx
+        .active_window()
+        .or_else(|| cx.windows().into_iter().next())
+    else {
+        return;
+    };
+    // The action is dispatched while its window is being updated: ask for the
+    // prompt once that update is over.
+    cx.spawn(async move |cx| {
+        let answer = window.update(cx, |_, window, cx| {
+            window.prompt(PromptLevel::Info, &message, None, &["OK"], cx)
+        });
+        if let Ok(answer) = answer {
+            answer.await.ok();
+        }
+    })
+    .detach();
+}
 
 #[derive(Deserialize, RegisterSetting)]
 pub struct ClientSettings {
@@ -116,14 +157,19 @@ pub struct ClientSettings {
 
 impl Settings for ClientSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
-        if let Some(server_url) = &*ZED_SERVER_URL {
+        if let Some(server_url) = &*IDE_SERVER_URL {
             return Self {
                 server_url: server_url.clone(),
                 credentials_url: content.credentials_url.clone(),
             };
         }
+        // No default in `assets/settings/default.json`: the product has no
+        // account or collaboration server, and upstream's default named its
+        // own. Empty means "none". A value in a user's settings file is still
+        // read, and still reaches nothing unless `IDE_SERVER_URL` is set (see
+        // `HttpClientWithUrl::zed_hosted_services_enabled`).
         Self {
-            server_url: content.server_url.clone().unwrap(),
+            server_url: content.server_url.clone().unwrap_or_default(),
             credentials_url: content.credentials_url.clone(),
         }
     }
@@ -169,6 +215,10 @@ pub fn init(client: &Arc<Client>, cx: &mut App) {
         let client = client.clone();
         move |_: &SignIn, cx| {
             if let Some(client) = client.upgrade() {
+                if !client.accounts_available() {
+                    report_accounts_unavailable(cx);
+                    return;
+                }
                 cx.spawn(async move |cx| client.sign_in_with_optional_connect(true, cx).await)
                     .detach_and_log_err(cx);
             }
@@ -189,6 +239,10 @@ pub fn init(client: &Arc<Client>, cx: &mut App) {
         let client = client;
         move |_: &Reconnect, cx| {
             if let Some(client) = client.upgrade() {
+                if !client.accounts_available() {
+                    report_accounts_unavailable(cx);
+                    return;
+                }
                 cx.spawn(async move |cx| {
                     client.reconnect(cx);
                 })
@@ -359,7 +413,7 @@ pub struct ClientCredentialsProvider {
 impl ClientCredentialsProvider {
     pub fn new(cx: &App) -> Self {
         Self {
-            provider: zed_credentials_provider::global(cx),
+            provider: app_credentials_provider::global(cx),
         }
     }
 
@@ -870,7 +924,24 @@ impl Client {
         }
     }
 
+    /// Whether accounts exist for this process.
+    ///
+    /// The product has none: this is `false` unless the developer override
+    /// `IDE_SERVER_URL` is set (tests with a fake HTTP client are allowed
+    /// too, see [`HttpClientWithUrl::zed_hosted_services_enabled`]). While it
+    /// is `false` no stored credentials are read, no sign-in page is opened
+    /// and no connection to an account or collaboration server is attempted:
+    /// every such function returns at once.
+    pub fn accounts_available(&self) -> bool {
+        self.http.zed_hosted_services_enabled()
+    }
+
+    /// Whether credentials are stored for the server. Always `false`, without
+    /// looking at the keychain, while accounts are not available.
     pub async fn has_credentials(&self, cx: &AsyncApp) -> bool {
+        if !self.accounts_available() {
+            return false;
+        }
         self.credentials_provider
             .read_credentials(cx)
             .await
@@ -882,6 +953,12 @@ impl Client {
         try_provider: bool,
         cx: &AsyncApp,
     ) -> Result<Credentials> {
+        // Before anything else: neither the status nor the keychain is
+        // touched when accounts are not available.
+        if !self.accounts_available() {
+            return Err(accounts_unavailable());
+        }
+
         let is_reauthenticating = if self.status().borrow().is_signed_out() {
             self.set_status(Status::Authenticating, cx);
             false
@@ -1044,6 +1121,10 @@ impl Client {
         try_provider: bool,
         cx: &AsyncApp,
     ) -> Result<()> {
+        if !self.accounts_available() {
+            return Err(accounts_unavailable());
+        }
+
         // Don't try to sign in again if we're already connected to Collab, as it will temporarily disconnect us.
         if self.status().borrow().is_connected() {
             return Ok(());
@@ -1093,6 +1174,10 @@ impl Client {
         try_provider: bool,
         cx: &AsyncApp,
     ) -> ConnectionResult<()> {
+        if !self.accounts_available() {
+            return ConnectionResult::Result(Err(accounts_unavailable()));
+        }
+
         let was_disconnected = match *self.status().borrow() {
             Status::SignedOut | Status::Authenticated => true,
             Status::ConnectionError
@@ -1294,7 +1379,12 @@ impl Client {
                 return Ok(url);
             }
 
-            if let Some(url) = &*ZED_RPC_URL {
+            anyhow::ensure!(
+                http.zed_hosted_services_enabled(),
+                accounts_unavailable_message()
+            );
+
+            if let Some(url) = &*IDE_RPC_URL {
                 return Url::parse(url).context("invalid rpc url");
             }
 
@@ -1428,6 +1518,11 @@ impl Client {
     }
 
     pub fn authenticate_with_browser(self: &Arc<Self>, cx: &AsyncApp) -> Task<Result<Credentials>> {
+        // No sign-in page is opened and no callback server is started.
+        if !self.accounts_available() {
+            return Task::ready(Err(accounts_unavailable()));
+        }
+
         let http = self.http.clone();
         let this = self.clone();
         cx.spawn(async move |cx| {
@@ -1704,6 +1799,13 @@ impl Client {
     }
 
     pub fn reconnect(self: &Arc<Self>, cx: &AsyncApp) {
+        // There is nothing to reconnect to, and the status must not start the
+        // reconnection loop.
+        if !self.accounts_available() {
+            log::info!("{}", accounts_unavailable_message());
+            return;
+        }
+
         self.peer.teardown();
         self.set_status(Status::ConnectionLost, cx);
     }
@@ -1926,13 +2028,15 @@ impl ProtoClient for Client {
     }
 }
 
-/// prefix for the zed:// url scheme
-pub const ZED_URL_SCHEME: &str = "zed";
+/// The scheme of the app's internal links (`ide://…`). It is the same
+/// neutral identifier as `cli::INTERNAL_URL_SCHEME`; the scheme the product
+/// registers with the system is `branding::URL_SCHEME`.
+pub const IDE_URL_SCHEME: &str = "ide";
 
 /// A parsed Zed link that can be handled internally by the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ZedLink {
-    /// Join a channel: `zed.dev/channel/channel-name-123` or `zed://channel/channel-name-123`
+    /// Join a channel: `zed.dev/channel/channel-name-123` or `ide://channel/channel-name-123`
     Channel { channel_id: u64 },
     /// Open channel notes: `zed.dev/channel/channel-name-123/notes` or with heading `notes#heading`
     ChannelNotes {
@@ -1948,13 +2052,19 @@ pub enum ZedLink {
 /// Returns [`None`] for links that should be opened in the browser.
 pub fn parse_zed_link(link: &str, cx: &App) -> Option<ZedLink> {
     let server_url = &ClientSettings::get_global(cx).server_url;
-    let path = link
-        .strip_prefix(server_url)
-        .and_then(|result| result.strip_prefix('/'))
-        .or_else(|| {
-            link.strip_prefix(ZED_URL_SCHEME)
-                .and_then(|result| result.strip_prefix("://"))
-        })?;
+    // No server is configured by default (`server_url` is empty): then only
+    // the app's own scheme makes a link internal. Without this check every
+    // link that starts with `/` would count as a link to the server.
+    let server_path = if server_url.is_empty() {
+        None
+    } else {
+        link.strip_prefix(server_url)
+            .and_then(|result| result.strip_prefix('/'))
+    };
+    let path = server_path.or_else(|| {
+        link.strip_prefix(IDE_URL_SCHEME)
+            .and_then(|result| result.strip_prefix("://"))
+    })?;
 
     let mut parts = path.split('/');
 
@@ -1999,6 +2109,7 @@ mod tests {
     use proto::TypedEnvelope;
     use settings::SettingsStore;
     use std::future;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn test_proxy_settings_trims_and_ignores_empty_proxy() {
@@ -2456,6 +2567,164 @@ mod tests {
     struct TestEntity {
         id: usize,
         subscription: Option<Subscription>,
+    }
+
+    /// `IDE_SERVER_URL` is the developer override that turns Zed's hosted
+    /// services back on: the tests of the default behaviour do not apply to
+    /// a process that has it.
+    fn server_url_override_is_set() -> bool {
+        std::env::var_os("IDE_SERVER_URL").is_some_and(|value| !value.is_empty())
+    }
+
+    /// What the app has when nothing overrides the server: a real (here:
+    /// refusing) HTTP client whose base URL is the default `server_url`.
+    fn production_like_http_client() -> Arc<HttpClientWithUrl> {
+        Arc::new(HttpClientWithUrl::new_url(
+            Arc::new(http_client::BlockedHttpClient::new()),
+            "https://zed.dev",
+            None,
+        ))
+    }
+
+    #[test]
+    fn test_cloud_url_builders_refuse_by_default() {
+        let http = production_like_http_client();
+        let enabled = server_url_override_is_set();
+        assert_eq!(http.zed_hosted_services_enabled(), enabled);
+
+        let cloud = http.build_zed_cloud_url("/client/users/me");
+        let cloud_with_query = http.build_zed_cloud_url_with_query("/releases", [("os", "linux")]);
+        let llm = http.build_zed_llm_url("/models", &[]);
+        if enabled {
+            assert!(cloud.is_ok() && cloud_with_query.is_ok() && llm.is_ok());
+        } else {
+            for error in [
+                cloud.unwrap_err(),
+                cloud_with_query.unwrap_err(),
+                llm.unwrap_err(),
+            ] {
+                assert_eq!(
+                    error.to_string(),
+                    "Zed cloud services are not available in this build"
+                );
+            }
+        }
+
+        // A fake client cannot reach the network: tests may build the URLs.
+        let fake = FakeHttpClient::with_404_response();
+        assert!(fake.zed_hosted_services_enabled());
+        assert_eq!(
+            fake.build_zed_cloud_url("/client/users/me")
+                .unwrap()
+                .as_str(),
+            "http://test.example/client/users/me"
+        );
+        assert!(fake.build_zed_llm_url("/models", &[]).is_ok());
+    }
+
+    /// A credentials store that holds an account for every URL and counts how
+    /// often it is asked.
+    struct CountingCredentialsProvider {
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl CredentialsProvider for CountingCredentialsProvider {
+        fn read_credentials<'a>(
+            &'a self,
+            _url: &'a str,
+            _cx: &'a AsyncApp,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<(String, Vec<u8>)>>> + 'a>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(Some(("1".to_string(), b"stored-token".to_vec()))) }.boxed_local()
+        }
+
+        fn write_credentials<'a>(
+            &'a self,
+            _url: &'a str,
+            _username: &'a str,
+            _password: &'a [u8],
+            _cx: &'a AsyncApp,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+            async move { Ok(()) }.boxed_local()
+        }
+
+        fn delete_credentials<'a>(
+            &'a self,
+            _url: &'a str,
+            _cx: &'a AsyncApp,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+            async move { Ok(()) }.boxed_local()
+        }
+    }
+
+    #[gpui::test]
+    async fn test_accounts_are_not_available_by_default(cx: &mut TestAppContext) {
+        if server_url_override_is_set() {
+            return;
+        }
+
+        init_test(cx);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let client = cx.update(|cx| {
+            cx.set_global(app_credentials_provider::AppCredentialsProvider(Arc::new(
+                CountingCredentialsProvider {
+                    reads: reads.clone(),
+                },
+            )));
+            let client = Client::new(
+                Arc::new(FakeSystemClock::new()),
+                production_like_http_client(),
+                cx,
+            );
+            init(&client, cx);
+            client
+        });
+        let message = format!("Accounts are not part of {}", branding::PRODUCT_NAME);
+        assert_eq!(accounts_unavailable_message(), message);
+        assert!(!client.accounts_available());
+
+        // Stored credentials exist, and nobody looks at them.
+        assert!(!client.has_credentials(&cx.to_async()).await);
+
+        let error = client.sign_in(true, &cx.to_async()).await.unwrap_err();
+        assert_eq!(error.to_string(), message);
+
+        let error = client
+            .sign_in_with_optional_connect(true, &cx.to_async())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), message);
+
+        let error = client
+            .connect(true, &cx.to_async())
+            .await
+            .into_response()
+            .unwrap_err();
+        assert_eq!(error.to_string(), message);
+
+        let error = client
+            .authenticate_with_browser(&cx.to_async())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), message);
+
+        client.reconnect(&cx.to_async());
+        client.sign_out(&cx.to_async()).await;
+
+        // The actions of the command palette end the same way.
+        cx.update(|cx| {
+            cx.dispatch_action(&SignIn);
+            cx.dispatch_action(&Reconnect);
+            cx.dispatch_action(&SignOut);
+        });
+        cx.executor().run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.executor().run_until_parked();
+
+        assert_eq!(*client.status().borrow(), Status::SignedOut);
+        assert_eq!(client.user_id(), None);
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(cx.opened_url(), None);
     }
 
     fn init_test(cx: &mut TestAppContext) {

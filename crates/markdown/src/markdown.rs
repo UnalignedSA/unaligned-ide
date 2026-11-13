@@ -72,6 +72,8 @@ type CheckboxToggleCallback = Rc<dyn Fn(Range<usize>, bool, &mut Window, &mut Ap
 /// Invoked when a mermaid diagram's zoom level changes (via scroll gesture or
 /// the reset button), so a scroll container can keep the diagram anchored.
 pub type MermaidZoomCallback = Rc<dyn Fn(&mut Window, &mut App)>;
+/// Receives the code of the block whose "Insert at Cursor" button was pressed.
+pub type InsertCodeBlockCallback = Rc<dyn Fn(String, &mut Window, &mut App)>;
 
 #[derive(Clone, Copy, Default)]
 pub struct BlockQuoteKindColors {
@@ -225,6 +227,16 @@ impl MarkdownStyle {
         let mut text_style = window.text_style();
         let line_height = buffer_font_size * 1.75;
 
+        // In the chat, code sits in a frame on the chrome ground (the prose
+        // around it is on the sheet); elsewhere it keeps the editor's ground.
+        let code_block_background = if matches!(font, MarkdownFont::Agent) {
+            colors.background
+        } else {
+            colors.editor_background
+        };
+        // A hand-computed radius has to follow the theme's corner style.
+        let code_block_corner_radius = AbsoluteLength::Pixels(px(6. * gpui::corner_radius_scale()));
+
         text_style.refine(&TextStyleRefinement {
             font_family: Some(body_font_family),
             font_fallbacks: theme_settings.ui_font.fallbacks.clone(),
@@ -276,8 +288,14 @@ impl MarkdownStyle {
                     right: Some(AbsoluteLength::Pixels(px(1.))),
                     bottom: Some(AbsoluteLength::Pixels(px(1.))),
                 },
-                border_color: Some(colors.border_variant),
-                background: Some(colors.editor_background.into()),
+                border_color: Some(colors.border),
+                background: Some(code_block_background.into()),
+                corner_radii: gpui::CornersRefinement {
+                    top_left: Some(code_block_corner_radius),
+                    top_right: Some(code_block_corner_radius),
+                    bottom_left: Some(code_block_corner_radius),
+                    bottom_right: Some(code_block_corner_radius),
+                },
                 text: TextStyleRefinement {
                     font_family: Some(code_font_family.clone()),
                     font_fallbacks: theme_settings.buffer_font.fallbacks.clone(),
@@ -295,14 +313,15 @@ impl MarkdownStyle {
                 font_features: Some(theme_settings.buffer_font.features.clone()),
                 font_size: Some(buffer_font_size.into()),
                 font_weight: Some(buffer_font_weight),
-                background_color: Some(colors.editor_foreground.opacity(0.08)),
+                background_color: Some(colors.element_hover),
                 ..Default::default()
             },
+            // The accent is reserved for actions: links read as text with a
+            // quiet underline, like the site's `.link`.
             link: TextStyleRefinement {
-                background_color: Some(colors.editor_foreground.opacity(0.025)),
-                color: Some(colors.text_accent),
+                color: Some(colors.text),
                 underline: Some(UnderlineStyle {
-                    color: Some(colors.text_accent.opacity(0.5)),
+                    color: Some(colors.text_muted),
                     thickness: px(1.),
                     ..Default::default()
                 }),
@@ -381,7 +400,7 @@ impl MarkdownStyle {
         };
         self.code_block.margin.top = Some(Length::Definite(px(16.).into()));
         self.code_block.margin.bottom = Some(Length::Definite(px(16.).into()));
-        let code_block_corner_radius = AbsoluteLength::Pixels(px(6.));
+        let code_block_corner_radius = AbsoluteLength::Pixels(px(6. * gpui::corner_radius_scale()));
         self.code_block.corner_radii.top_left = Some(code_block_corner_radius);
         self.code_block.corner_radii.top_right = Some(code_block_corner_radius);
         self.code_block.corner_radii.bottom_left = Some(code_block_corner_radius);
@@ -1811,6 +1830,7 @@ pub struct MarkdownElement {
     markdown: Entity<Markdown>,
     style: MarkdownStyle,
     code_block_renderer: CodeBlockRenderer,
+    code_block_header: bool,
     input_focus_handle: Option<FocusHandle>,
     on_url_click: Option<Rc<dyn Fn(SharedString, &mut Window, &mut App)>>,
     on_url_hover: Option<UrlHoverCallback>,
@@ -1818,6 +1838,7 @@ pub struct MarkdownElement {
     on_source_click: Option<SourceClickCallback>,
     on_checkbox_toggle: Option<CheckboxToggleCallback>,
     on_mermaid_zoom: Option<MermaidZoomCallback>,
+    on_insert_code_block: Option<InsertCodeBlockCallback>,
     image_resolver: Option<Box<dyn Fn(&str, &App) -> Option<ImageSource>>>,
     show_root_block_markers: bool,
     autoscroll: AutoscrollBehavior,
@@ -1838,6 +1859,7 @@ impl MarkdownElement {
                 wrap_button_visibility: WrapButtonVisibility::Hidden,
                 border: false,
             },
+            code_block_header: false,
             input_focus_handle: None,
             on_url_click: None,
             on_url_hover: None,
@@ -1845,6 +1867,7 @@ impl MarkdownElement {
             on_source_click: None,
             on_checkbox_toggle: None,
             on_mermaid_zoom: None,
+            on_insert_code_block: None,
             image_resolver: None,
             show_root_block_markers: false,
             autoscroll: AutoscrollBehavior::Propagate,
@@ -1876,6 +1899,13 @@ impl MarkdownElement {
 
     pub fn code_block_renderer(mut self, variant: CodeBlockRenderer) -> Self {
         self.code_block_renderer = variant;
+        self
+    }
+
+    /// Gives default-rendered code blocks a header row holding the language
+    /// label, with the copy/wrap buttons aligned to it.
+    pub fn code_block_header(mut self, show: bool) -> Self {
+        self.code_block_header = show;
         self
     }
 
@@ -1937,6 +1967,17 @@ impl MarkdownElement {
     /// position anchored while it grows or shrinks.
     pub fn on_mermaid_zoom(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_mermaid_zoom = Some(Rc::new(handler));
+        self
+    }
+
+    /// Adds an "Insert at Cursor" button next to Copy on every code block
+    /// that shows its buttons. The handler receives the block's code; where
+    /// it goes (the active editor, for a chat) is the caller's business.
+    pub fn on_insert_code_block(
+        mut self,
+        handler: impl Fn(String, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_insert_code_block = Some(Rc::new(handler));
         self
     }
 
@@ -2929,6 +2970,15 @@ impl Element for MarkdownElement {
                                     // corner radii and borders to round the scrollbar track.
                                     parent_container.style().refine(&self.style.code_block);
 
+                                    if self.code_block_header {
+                                        parent_container =
+                                            parent_container.child(render_code_block_header(
+                                                code_block_header_label(kind, language.as_ref()),
+                                                &self.style.code_block,
+                                                cx,
+                                            ));
+                                    }
+
                                     let parent_container: AnyDiv = if let Some(scroll_handle) =
                                         scroll_handle.as_ref()
                                     {
@@ -2937,7 +2987,15 @@ impl Element for MarkdownElement {
                                             .tracked_scroll_handle(scroll_handle)
                                             .with_track_along(
                                                 ScrollAxes::Horizontal,
-                                                cx.theme().colors().editor_background,
+                                                self.style
+                                                    .code_block
+                                                    .background
+                                                    .as_ref()
+                                                    .and_then(|fill| fill.color())
+                                                    .and_then(|ground| ground.as_solid())
+                                                    .unwrap_or(
+                                                        cx.theme().colors().editor_background,
+                                                    ),
                                             )
                                             .notify_content();
 
@@ -3255,7 +3313,10 @@ impl Element for MarkdownElement {
                                     == CopyButtonVisibility::AlwaysVisible
                                     || wrap_button_visibility
                                         == WrapButtonVisibility::AlwaysVisible;
-                                let use_hover = any_hover && !any_always;
+                                // With a header row the buttons have a place
+                                // of their own and cover no code: always in
+                                // sight, so Copy can be found without hovering.
+                                let use_hover = any_hover && !any_always && !self.code_block_header;
 
                                 let button_row = h_flex()
                                     .debug_selector(|| {
@@ -3263,7 +3324,14 @@ impl Element for MarkdownElement {
                                     })
                                     .gap_0p5()
                                     .absolute()
-                                    .bg(cx.theme().colors().editor_background)
+                                    .bg(self
+                                        .style
+                                        .code_block
+                                        .background
+                                        .as_ref()
+                                        .and_then(|fill| fill.color())
+                                        .and_then(|ground| ground.as_solid())
+                                        .unwrap_or(cx.theme().colors().editor_background))
                                     .when_else(
                                         use_hover,
                                         |this| {
@@ -3271,6 +3339,13 @@ impl Element for MarkdownElement {
                                         },
                                         |this| this.top_1p5().right_1p5(),
                                     )
+                                    // Sit inside the header row instead of over the code.
+                                    .when(self.code_block_header, |this| {
+                                        this.top_0()
+                                            .right_1()
+                                            .h(CODE_BLOCK_HEADER_HEIGHT)
+                                            .bg(gpui::transparent_black())
+                                    })
                                     .when(
                                         wrap_button_visibility != WrapButtonVisibility::Hidden,
                                         |this| {
@@ -3283,6 +3358,19 @@ impl Element for MarkdownElement {
                                                 range.start,
                                                 is_wrapped,
                                                 self.markdown.clone(),
+                                            ))
+                                        },
+                                    )
+                                    .when_some(
+                                        self.on_insert_code_block.clone().filter(|_| {
+                                            copy_button_visibility != CopyButtonVisibility::Hidden
+                                        }),
+                                        |this, on_insert| {
+                                            this.child(render_insert_code_block_button(
+                                                range.end,
+                                                code.clone(),
+                                                self.markdown.clone(),
+                                                on_insert,
                                             ))
                                         },
                                     )
@@ -3573,7 +3661,7 @@ fn image_fallback_element(
         .min_w_0()
         .child(Label::new(label).color(Color::Warning).underline())
         .tooltip(Tooltip::text(
-            "Image failed to load. Open `zed: log` for more details.",
+            "Image failed to load. Run \"App: Open Log\" for more details.",
         ))
         .when(open_image_url_on_click, |this| {
             this.cursor_pointer()
@@ -3636,6 +3724,65 @@ fn heading_level_style(
     }
 }
 
+const CODE_BLOCK_HEADER_HEIGHT: Pixels = px(26.);
+
+fn code_block_header_label(kind: &CodeBlockKind, language: Option<&Arc<Language>>) -> SharedString {
+    match kind {
+        CodeBlockKind::FencedLang(name) => name
+            .split_whitespace()
+            .next()
+            .map(|name| SharedString::from(name.to_uppercase())),
+        CodeBlockKind::FencedSrc(path_range) => path_range
+            .path
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| !name.is_empty())
+            .map(|name| SharedString::from(name.to_string())),
+        CodeBlockKind::Fenced | CodeBlockKind::Indented => None,
+    }
+    .or_else(|| {
+        language.map(|language| SharedString::from(language.name().as_ref().to_uppercase()))
+    })
+    .unwrap_or_else(|| "CODE".into())
+}
+
+/// The header spans the block edge to edge, so it undoes the block's own
+/// padding with negative margins.
+fn render_code_block_header(
+    label: SharedString,
+    code_block_style: &StyleRefinement,
+    cx: &App,
+) -> Div {
+    let padding = |length: Option<DefiniteLength>| match length {
+        Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(pixels))) => pixels,
+        _ => px(0.),
+    };
+    let padding_x = padding(code_block_style.padding.left);
+    let padding_top = padding(code_block_style.padding.top);
+    let colors = cx.theme().colors();
+
+    h_flex()
+        .h(CODE_BLOCK_HEADER_HEIGHT)
+        .flex_none()
+        .ml(-padding_x)
+        .mr(-padding(code_block_style.padding.right))
+        .mt(-padding_top)
+        .mb(padding_top)
+        .px(padding_x)
+        .border_b_1()
+        .border_color(colors.border)
+        // The label is already upper-cased for a language and left as written
+        // for a file name: same type as `ui::SectionLabel`, without its
+        // upper-casing.
+        .child(
+            Label::new(label)
+                .size(LabelSize::Custom(ui::micro_label_size()))
+                .color(Color::Custom(colors.text_faint))
+                .buffer_font(cx)
+                .truncate(),
+        )
+}
+
 fn render_wrap_code_block_button(
     id: usize,
     is_wrapped: bool,
@@ -3661,6 +3808,28 @@ fn render_wrap_code_block_button(
                 cx.notify();
             });
         })
+}
+
+fn render_insert_code_block_button(
+    id: usize,
+    code: String,
+    markdown: Entity<Markdown>,
+    on_insert: InsertCodeBlockCallback,
+) -> impl IntoElement {
+    let id = ElementId::NamedChild(
+        Arc::new(ElementId::from((
+            "insert-markdown-code",
+            markdown.entity_id(),
+        ))),
+        id.to_string().into(),
+    );
+
+    IconButton::new(id, IconName::CursorIBeam)
+        .icon_size(IconSize::Small)
+        .icon_color(Color::Muted)
+        .aria_label("Insert at Cursor")
+        .tooltip(Tooltip::text("Insert at Cursor"))
+        .on_click(move |_event, window, cx| on_insert(code.clone(), window, cx))
 }
 
 fn render_copy_code_block_button(
@@ -4511,11 +4680,12 @@ struct RenderedLine {
 impl RenderedLine {
     /// Painted before the glyphs so the text renders on top of the chips
     fn paint_code_chips(&self, window: &mut Window) {
-        const CHIP_CORNER_RADIUS: Pixels = px(4.);
-
         if self.code_chips.is_empty() {
             return;
         }
+        // Square in a square theme, like every other corner.
+        #[allow(non_snake_case)]
+        let CHIP_CORNER_RADIUS: Pixels = px(4. * gpui::corner_radius_scale());
         let wrapped_line_segments = self.wrapped_line_segments();
         if wrapped_line_segments.is_empty() {
             return;

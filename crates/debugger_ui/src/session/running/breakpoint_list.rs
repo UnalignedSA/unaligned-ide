@@ -1,5 +1,6 @@
 use std::{ops::Range, path::Path, sync::Arc, time::Duration};
 
+use app_actions::{ToggleEnableBreakpoint, UnsetBreakpoint};
 use dap::{Capabilities, ExceptionBreakpointsFilter, adapters::DebugAdapterName};
 use db::kvp::KeyValueStore;
 use editor::Editor;
@@ -24,7 +25,6 @@ use ui::{
 };
 use util::paths::PathExt;
 use workspace::Workspace;
-use zed_actions::{ToggleEnableBreakpoint, UnsetBreakpoint};
 
 actions!(
     debugger,

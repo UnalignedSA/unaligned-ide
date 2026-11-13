@@ -1,6 +1,7 @@
 use anyhow::{Context as _, Result};
 use fs::Fs;
 
+use app_actions::agents_sidebar::ToggleThreadSwitcher;
 use gpui::{
     AnyView, App, Context, Corners, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, WeakEntity,
@@ -17,7 +18,6 @@ use std::rc::Rc;
 use ui::prelude::*;
 use util::ResultExt;
 use util::path_list::PathList;
-use zed_actions::agents_sidebar::ToggleThreadSwitcher;
 
 use agent_settings::AgentSettings;
 use settings::SidebarDockPosition;

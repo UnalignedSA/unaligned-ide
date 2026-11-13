@@ -82,6 +82,62 @@ pub(crate) const MAX_REMOTE_SYNC_RETRY_DELAY: Duration = Duration::from_secs(60)
 pub(crate) const MAX_REMOTE_SYNC_ATTEMPTS: usize = 10;
 pub(crate) const REMOTE_SYNC_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
+/// Names the environment variable that replaces the address of the extension
+/// registry (for a mirror, or for a closed port in tests of the offline state).
+pub const REGISTRY_URL_ENV_VAR: &str = "UNALIGNED_IDE_EXTENSIONS_URL";
+
+/// The base address of the extension registry: [`REGISTRY_URL_ENV_VAR`] when
+/// it is set, else [`branding::EXTENSIONS_API_URL`].
+///
+/// Every request this crate sends to the registry is built from this one
+/// address by [`registry_url`]. Nothing is sent at startup: the registry is
+/// contacted when the Extensions page is opened, when an installed extension
+/// is due for its update check, or when an extension is installed.
+pub fn registry_base_url() -> String {
+    registry_base_url_from(std::env::var(REGISTRY_URL_ENV_VAR).ok())
+}
+
+fn registry_base_url_from(override_url: Option<String>) -> String {
+    override_url
+        .map(|url| url.trim().trim_end_matches('/').to_string())
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| {
+            branding::EXTENSIONS_API_URL
+                .trim_end_matches('/')
+                .to_string()
+        })
+}
+
+/// Whether the registry is the product's own default, not an override.
+pub fn registry_is_default() -> bool {
+    registry_base_url() == registry_base_url_from(None)
+}
+
+/// The host of the registry, for text that tells the user where the list of
+/// extensions comes from.
+pub fn registry_host() -> String {
+    let base_url = registry_base_url();
+    Url::parse(&base_url)
+        .ok()
+        .and_then(|url| {
+            let host = url.host_str()?.to_string();
+            Some(match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host,
+            })
+        })
+        .unwrap_or(base_url)
+}
+
+fn registry_url(path: &str, query: &[(&str, &str)]) -> Result<Url> {
+    registry_url_from(&registry_base_url(), path, query)
+}
+
+fn registry_url_from(base_url: &str, path: &str, query: &[(&str, &str)]) -> Result<Url> {
+    Url::parse_with_params(&format!("{base_url}{path}"), query)
+        .with_context(|| format!("building the extension registry address for {path}"))
+}
+
 pub(crate) fn remote_sync_retry_delay(attempts: usize) -> Duration {
     let exponential = REMOTE_SYNC_RETRY_DELAY * 2u32.saturating_pow(attempts.min(30) as u32);
     exponential.min(MAX_REMOTE_SYNC_RETRY_DELAY)
@@ -126,7 +182,7 @@ static SUPPRESSED_EXTENSIONS: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
     ])
 });
 
-/// Returns the [`SchemaVersion`] range that is compatible with this version of Zed.
+/// Returns the [`SchemaVersion`] range that is compatible with this version of the editor.
 pub fn schema_version_range() -> RangeInclusive<SchemaVersion> {
     SchemaVersion::ZERO..=SchemaVersion::CURRENT
 }
@@ -310,7 +366,7 @@ pub struct ExtensionIndexLanguageEntry {
 }
 
 actions!(
-    zed,
+    app,
     [
         /// Reloads all installed extensions.
         ReloadExtensions
@@ -459,15 +515,12 @@ impl ExtensionStore {
                 }
             })
             .shared();
-        this.initial_index_load = initial_index_load.clone();
+        this.initial_index_load = initial_index_load;
 
-        cx.spawn(async move |this, cx| {
-            initial_index_load.await;
-            this.update(cx, |this, cx| this.auto_install_extensions(cx))
-                .ok();
-            this.update(cx, |this, cx| this.check_for_updates(cx)).ok();
-        })
-        .detach();
+        // Nothing is sent to the registry here. Upstream installed the
+        // `auto_install_extensions` entries and checked for updates at every
+        // startup; both now wait for a reason the user can see, see
+        // `sync_with_registry` and `auto_install_extension`.
 
         // Perform all extension loading in a single task to ensure that we
         // never attempt to simultaneously load/unload extensions from multiple
@@ -739,46 +792,101 @@ impl ExtensionStore {
         self.fetch_extensions_from_api(&format!("/extensions/{extension_id}"), &[], cx)
     }
 
-    /// Installs any extensions that should be included with Zed by default.
+    /// The `auto_install_extensions` entries that are switched on and not
+    /// installed yet.
+    pub fn pending_auto_install_extensions(&self, cx: &App) -> Vec<Arc<str>> {
+        let extension_settings = ExtensionSettings::get_global(cx);
+        let mut extension_ids = extension_settings
+            .auto_install_extensions
+            .keys()
+            .filter(|extension_id| self.should_auto_install(extension_id, extension_settings))
+            .cloned()
+            .collect::<Vec<_>>();
+        extension_ids.sort();
+        extension_ids
+    }
+
+    fn should_auto_install(&self, extension_id: &str, settings: &ExtensionSettings) -> bool {
+        settings.auto_install_extensions.get(extension_id) == Some(&true)
+            && !self.extension_index.extensions.contains_key(extension_id)
+            && !self.outstanding_operations.contains_key(extension_id)
+            && !SUPPRESSED_EXTENSIONS.contains(extension_id)
+    }
+
+    /// Installs every pending `auto_install_extensions` entry.
     ///
-    /// This can be used to make certain functionality provided by extensions
-    /// available out-of-the-box.
+    /// This contacts the registry, so it is never called at startup: callers
+    /// are [`Self::sync_with_registry`] (the Extensions page, the daily
+    /// update check).
     pub fn auto_install_extensions(&mut self, cx: &mut Context<Self>) {
         if cfg!(test) {
             return;
         }
 
-        let extension_settings = ExtensionSettings::get_global(cx);
-
-        let extensions_to_install = extension_settings
-            .auto_install_extensions
-            .keys()
-            .filter(|extension_id| extension_settings.should_auto_install(extension_id))
-            .filter(|extension_id| {
-                let is_already_installed = self
-                    .extension_index
-                    .extensions
-                    .contains_key(extension_id.as_ref());
-                !is_already_installed && !SUPPRESSED_EXTENSIONS.contains(extension_id.as_ref())
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-
-        cx.spawn(async move |this, cx| {
-            for extension_id in extensions_to_install {
-                this.update(cx, |this, cx| {
-                    this.install_latest_extension(extension_id.clone(), cx);
-                })
-                .ok();
-            }
-        })
-        .detach();
+        for extension_id in self.pending_auto_install_extensions(cx) {
+            self.install_latest_extension(extension_id, cx);
+        }
     }
 
+    /// Installs one `auto_install_extensions` entry on demand, when something
+    /// the user opened needs it (a file of a language the extension provides).
+    ///
+    /// Returns whether an installation was started. Nothing happens, and the
+    /// registry is not contacted, when the entry is switched off or missing,
+    /// already installed, or being installed.
+    pub fn auto_install_extension(&mut self, extension_id: &str, cx: &mut Context<Self>) -> bool {
+        if !self.should_auto_install(extension_id, ExtensionSettings::get_global(cx)) {
+            return false;
+        }
+        log::info!("installing extension {extension_id}: a file that needs it was opened");
+        self.install_latest_extension(Arc::from(extension_id), cx);
+        true
+    }
+
+    /// Whether an extension from the registry is installed, which is what an
+    /// update check needs to have something to ask about.
+    pub fn has_registry_extensions(&self) -> bool {
+        self.extension_index
+            .extensions
+            .values()
+            .any(|extension| !extension.dev)
+    }
+
+    /// Asks the registry for newer versions of the installed extensions and
+    /// upgrades them. Sends nothing when no extension from the registry is
+    /// installed with updates switched on.
     pub fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        let extension_settings = ExtensionSettings::get_global(cx);
+        let has_extensions_to_update = self
+            .extension_index
+            .extensions
+            .iter()
+            .any(|(id, entry)| !entry.dev && extension_settings.should_auto_update(id));
+        if !has_extensions_to_update {
+            return;
+        }
+
         let task = self.fetch_extensions_with_update_available(cx);
         cx.spawn(async move |this, cx| Self::upgrade_extensions(this, task.await?, cx).await)
-            .detach();
+            .detach_and_log_err(cx);
+    }
+
+    /// The two background jobs that need the registry: installing the pending
+    /// `auto_install_extensions` entries and upgrading installed extensions.
+    ///
+    /// Called when the Extensions page is opened and by the daily update
+    /// check, never at startup.
+    pub fn sync_with_registry(&mut self, cx: &mut Context<Self>) {
+        let initial_index_load = self.initial_index_load.clone();
+        cx.spawn(async move |this, cx| {
+            initial_index_load.await;
+            this.update(cx, |this, cx| {
+                this.auto_install_extensions(cx);
+                this.check_for_updates(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     async fn upgrade_extensions(
@@ -816,7 +924,7 @@ impl ExtensionStore {
         query: &[(&str, &str)],
         cx: &mut Context<ExtensionStore>,
     ) -> Task<Result<Vec<ExtensionMetadata>>> {
-        let url = self.http_client.build_zed_api_url(path, query);
+        let url = registry_url(path, query);
         let http_client = self.http_client.clone();
         cx.spawn(async move |_, _| {
             let mut response = http_client
@@ -978,22 +1086,19 @@ impl ExtensionStore {
         let schema_versions = schema_version_range();
         let wasm_api_versions = wasm_api_version_range(ReleaseChannel::global(cx));
 
-        let Some(url) = self
-            .http_client
-            .build_zed_api_url(
-                &format!("/extensions/{extension_id}/download"),
-                &[
-                    ("min_schema_version", &schema_versions.start().to_string()),
-                    ("max_schema_version", &schema_versions.end().to_string()),
-                    (
-                        "min_wasm_api_version",
-                        &wasm_api_versions.start().to_string(),
-                    ),
-                    ("max_wasm_api_version", &wasm_api_versions.end().to_string()),
-                ],
-            )
-            .log_err()
-        else {
+        let Some(url) = registry_url(
+            &format!("/extensions/{extension_id}/download"),
+            &[
+                ("min_schema_version", &schema_versions.start().to_string()),
+                ("max_schema_version", &schema_versions.end().to_string()),
+                (
+                    "min_wasm_api_version",
+                    &wasm_api_versions.start().to_string(),
+                ),
+                ("max_wasm_api_version", &wasm_api_versions.end().to_string()),
+            ],
+        )
+        .log_err() else {
             return;
         };
 
@@ -1023,14 +1128,11 @@ impl ExtensionStore {
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         log::info!("installing extension {extension_id} {version}");
-        let Some(url) = self
-            .http_client
-            .build_zed_api_url(
-                &format!("/extensions/{extension_id}/{version}/download"),
-                &[],
-            )
-            .log_err()
-        else {
+        let Some(url) = registry_url(
+            &format!("/extensions/{extension_id}/{version}/download"),
+            &[],
+        )
+        .log_err() else {
             return Task::ready(Ok(()));
         };
 

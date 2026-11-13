@@ -8,7 +8,7 @@ use editor::{
 };
 use gpui::{
     App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString, Styled,
-    Subscription, div, prelude::*,
+    Subscription, prelude::*,
 };
 use language::Buffer;
 use text::{Bias, Point};
@@ -324,26 +324,44 @@ impl Render for GoToLine {
             }
         };
 
+        // The surface and metrics of the pickers (`picker::query_row`,
+        // `picker::footer`), which this crate cannot name: the same width and
+        // raised ground, a 36px query row with its line, and the hint where a
+        // picker has its footer.
+        let colors = cx.theme().colors();
         v_flex()
-            .w(rems(24.))
-            .elevation_2(cx)
+            .w(rems(34.))
+            .elevation_3(cx)
             .key_context("GoToLine")
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::confirm))
             .child(
-                div()
+                h_flex()
+                    .h(rems_from_px(36_f32))
+                    .flex_none()
+                    .px_3()
+                    .gap_2()
                     .border_b_1()
-                    .border_color(cx.theme().colors().border_variant)
-                    .px_2()
-                    .py_1()
-                    .child(self.line_editor.clone()),
+                    .border_color(colors.border)
+                    .child(
+                        Icon::new(IconName::MagnifyingGlass)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(div().flex_1().min_w_0().child(self.line_editor.clone())),
             )
             .child(
                 h_flex()
-                    .px_2()
-                    .py_1()
-                    .gap_1()
-                    .child(Label::new(help_text).color(Color::Muted)),
+                    .h(rems_from_px(32_f32))
+                    .flex_none()
+                    .px_3()
+                    .bg(colors.background)
+                    .rounded_b_lg()
+                    .child(
+                        Label::new(help_text)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
             )
     }
 }

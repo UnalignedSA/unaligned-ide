@@ -27,7 +27,8 @@ const SCROLLBAR_HIDE_DURATION: Duration = Duration::from_millis(400);
 const SCROLLBAR_SHOW_DURATION: Duration = Duration::from_millis(50);
 
 pub const EDITOR_SCROLLBAR_WIDTH: Pixels = ScrollbarStyle::Editor.to_pixels();
-const SCROLLBAR_PADDING: Pixels = px(4.);
+// A thin thumb close to the edge, with no visible track.
+const SCROLLBAR_PADDING: Pixels = px(2.);
 const BORDER_WIDTH: Pixels = px(1.);
 
 pub mod scrollbars {
@@ -1584,9 +1585,12 @@ impl<T: ScrollableHandle> Element for ScrollbarElement<T> {
                     window.paint_quad(quad(
                         *thumb_bounds,
                         match style {
-                            ScrollbarStyle::Regular => Corners::all(Pixels::MAX)
-                                .clamp_radii_for_quad_size(thumb_bounds.size),
-                            ScrollbarStyle::Editor => Corners::default(),
+                            // A pill, unless the theme's corners are square.
+                            ScrollbarStyle::Regular if gpui::corner_radius_scale() != 0.0 => {
+                                Corners::all(Pixels::MAX)
+                                    .clamp_radii_for_quad_size(thumb_bounds.size)
+                            }
+                            ScrollbarStyle::Regular | ScrollbarStyle::Editor => Corners::default(),
                         },
                         thumb_color,
                         Edges::default(),

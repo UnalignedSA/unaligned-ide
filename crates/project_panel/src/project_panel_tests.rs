@@ -12784,6 +12784,9 @@ async fn test_focus_follows_mouse_into_blank_area(cx: &mut gpui::TestAppContext)
                     enabled: Some(true),
                     debounce_ms: Some(100),
                 });
+                // The point hovered below is in the right dock, while the
+                // panel's default dock is the left one in this product.
+                settings.project_panel.get_or_insert_default().dock = Some(DockSide::Right);
             });
         });
     });

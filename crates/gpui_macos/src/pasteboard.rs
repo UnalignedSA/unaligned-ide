@@ -51,8 +51,8 @@ impl Pasteboard {
         // outlive the autorelease pool in which it was created.
         Self {
             inner,
-            text_hash_type: NSString::from_str("zed-text-hash"),
-            metadata_type: NSString::from_str("zed-metadata"),
+            text_hash_type: NSString::from_str("gpui-text-hash"),
+            metadata_type: NSString::from_str("gpui-metadata"),
         }
     }
 
@@ -350,8 +350,8 @@ mod tests {
     fn test_custom_types_survive_creation_autorelease_pool() {
         let pasteboard = autoreleasepool(|_| Pasteboard::unique());
 
-        assert_eq!(pasteboard.text_hash_type.to_string(), "zed-text-hash");
-        assert_eq!(pasteboard.metadata_type.to_string(), "zed-metadata");
+        assert_eq!(pasteboard.text_hash_type.to_string(), "gpui-text-hash");
+        assert_eq!(pasteboard.metadata_type.to_string(), "gpui-metadata");
 
         let item = ClipboardItem {
             entries: vec![ClipboardEntry::String(

@@ -1344,7 +1344,7 @@ pub async fn get_git_committer(cx: &AsyncApp) -> GitCommitter {
     }
 
     let git_binary_path =
-        if cfg!(target_os = "macos") && option_env!("ZED_BUNDLE").as_deref() == Some("true") {
+        if cfg!(target_os = "macos") && option_env!("IDE_BUNDLE").as_deref() == Some("true") {
             cx.update(|cx| {
                 cx.path_for_auxiliary_executable("git")
                     .context("could not find git binary path")
@@ -3951,7 +3951,7 @@ impl GitBinary {
         }
 
         #[cfg(target_os = "windows")]
-        command.env("ZED_ASKPASS_SOCKET", ask_pass.socket_path());
+        command.env("IDE_ASKPASS_SOCKET", ask_pass.socket_path());
         let git_process = command.spawn()?;
 
         run_askpass_command(ask_pass, git_process).await
@@ -4206,12 +4206,16 @@ fn parse_upstream_track(upstream_track: &str) -> Result<UpstreamTracking> {
     }))
 }
 
+/// The author and committer of the hidden checkpoint commits (a private ref,
+/// never pushed): the product's name and an address that belongs to nobody.
 fn checkpoint_author_envs() -> HashMap<String, String> {
+    let name = branding::PRODUCT_NAME.to_string();
+    let email = format!("{}@localhost", branding::APP_ID);
     HashMap::from_iter([
-        ("GIT_AUTHOR_NAME".to_string(), "Zed".to_string()),
-        ("GIT_AUTHOR_EMAIL".to_string(), "hi@zed.dev".to_string()),
-        ("GIT_COMMITTER_NAME".to_string(), "Zed".to_string()),
-        ("GIT_COMMITTER_EMAIL".to_string(), "hi@zed.dev".to_string()),
+        ("GIT_AUTHOR_NAME".to_string(), name.clone()),
+        ("GIT_AUTHOR_EMAIL".to_string(), email.clone()),
+        ("GIT_COMMITTER_NAME".to_string(), name),
+        ("GIT_COMMITTER_EMAIL".to_string(), email),
     ])
 }
 

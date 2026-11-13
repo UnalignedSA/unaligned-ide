@@ -327,6 +327,14 @@ async fn test_open_directory_in_existing_window_opens_sidebar(cx: &mut TestAppCo
     fs.insert_tree(path!("/project_b"), json!({ "file.txt": "" }))
         .await;
 
+    // Unaligned default: `agent.threads_sidebar.auto_open` is false (upstream: true), so
+    // the test turns on the option whose behaviour it covers.
+    cx.update(|cx| {
+        let mut settings = AgentSettings::get_global(cx).clone();
+        settings.threads_sidebar.auto_open = true;
+        AgentSettings::override_global(settings, cx);
+    });
+
     let project = Project::test(app_state.fs.clone(), [path!("/project_a").as_ref()], cx).await;
     let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
     cx.run_until_parked();
@@ -346,7 +354,7 @@ async fn test_open_directory_in_existing_window_opens_sidebar(cx: &mut TestAppCo
         .read_with(cx, |mw, _cx| {
             assert!(
                 mw.sidebar_open(),
-                "adding a directory to an existing window opens the sidebar by default",
+                "adding a directory to an existing window opens the sidebar when auto_open is on",
             );
             assert_eq!(mw.workspaces().count(), 2);
         })

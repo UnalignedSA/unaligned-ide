@@ -4,8 +4,8 @@ use cloud_api_client::ClientApiError;
 use cloud_llm_client::{
     CLIENT_SUPPORTS_STATUS_MESSAGES_HEADER_NAME, CLIENT_SUPPORTS_STATUS_STREAM_ENDED_HEADER_NAME,
     CLIENT_SUPPORTS_X_AI_HEADER_NAME, CompletionBody, CompletionEvent, CompletionRequestStatus,
-    EXPIRED_LLM_TOKEN_HEADER_NAME, ListModelsResponse, OUTDATED_LLM_TOKEN_HEADER_NAME,
-    SERVER_SUPPORTS_STATUS_MESSAGES_HEADER_NAME, ZED_VERSION_HEADER_NAME,
+    EXPIRED_LLM_TOKEN_HEADER_NAME, IDE_VERSION_HEADER_NAME, ListModelsResponse,
+    OUTDATED_LLM_TOKEN_HEADER_NAME, SERVER_SUPPORTS_STATUS_MESSAGES_HEADER_NAME,
 };
 use futures::{
     AsyncBufReadExt, AsyncReadExt as _, FutureExt, Stream, StreamExt, future::BoxFuture,
@@ -19,13 +19,13 @@ use http_client::{
 };
 use language_model::{
     ANTHROPIC_PROVIDER_ID, ANTHROPIC_PROVIDER_NAME, CompactionResult, DisabledReason,
-    GOOGLE_PROVIDER_ID, GOOGLE_PROVIDER_NAME, LanguageModel, LanguageModelCompletionError,
-    LanguageModelCompletionEvent, LanguageModelCompletionStream, LanguageModelEffortLevel,
-    LanguageModelId, LanguageModelName, LanguageModelProviderId, LanguageModelProviderName,
-    LanguageModelRequest, LanguageModelToolChoiceSupport, ModelRateLimiters, OPEN_AI_PROVIDER_ID,
-    OPEN_AI_PROVIDER_NAME, PromptCompactionStrategy, ProviderErrorCategory, RateLimiter,
-    X_AI_PROVIDER_ID, X_AI_PROVIDER_NAME, ZED_CLOUD_PROVIDER_ID, ZED_CLOUD_PROVIDER_NAME,
-    unavailable_error,
+    GOOGLE_PROVIDER_ID, GOOGLE_PROVIDER_NAME, IDE_CLOUD_PROVIDER_ID, IDE_CLOUD_PROVIDER_NAME,
+    LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent,
+    LanguageModelCompletionStream, LanguageModelEffortLevel, LanguageModelId, LanguageModelName,
+    LanguageModelProviderId, LanguageModelProviderName, LanguageModelRequest,
+    LanguageModelToolChoiceSupport, ModelRateLimiters, OPEN_AI_PROVIDER_ID, OPEN_AI_PROVIDER_NAME,
+    PromptCompactionStrategy, ProviderErrorCategory, RateLimiter, X_AI_PROVIDER_ID,
+    X_AI_PROVIDER_NAME, unavailable_error,
 };
 
 use schemars::JsonSchema;
@@ -49,8 +49,8 @@ use open_ai::completion::{
     into_open_ai_response, token_usage_from_response_usage,
 };
 
-const PROVIDER_ID: LanguageModelProviderId = ZED_CLOUD_PROVIDER_ID;
-const PROVIDER_NAME: LanguageModelProviderName = ZED_CLOUD_PROVIDER_NAME;
+const PROVIDER_ID: LanguageModelProviderId = IDE_CLOUD_PROVIDER_ID;
+const PROVIDER_NAME: LanguageModelProviderName = IDE_CLOUD_PROVIDER_NAME;
 
 /// Trait for acquiring and refreshing LLM authentication tokens.
 pub trait CloudLlmTokenProvider: Send + Sync {
@@ -278,7 +278,7 @@ impl<TP: CloudLlmTokenProvider> CloudModelProvider<TP> {
                     .method(Method::POST)
                     .uri(url.as_ref())
                     .when_some(app_version.as_ref(), |builder, app_version| {
-                        builder.header(ZED_VERSION_HEADER_NAME, app_version.to_string())
+                        builder.header(IDE_VERSION_HEADER_NAME, app_version.to_string())
                     })
                     .header("Content-Type", "application/json")
                     .header("Authorization", format!("Bearer {token}"));

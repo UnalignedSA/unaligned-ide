@@ -225,7 +225,8 @@ impl WslRemoteConnection {
         };
 
         let binary_name = format!(
-            "zed-remote-server-{}-{}",
+            "{}-remote-server-{}-{}",
+            branding::APP_ID,
             release_channel.dev_name(),
             version_str
         );
@@ -375,7 +376,7 @@ impl WslRemoteConnection {
         let mut command = wsl_command_impl(
             &self.connection_options,
             "sh",
-            &["-c", "cat > \"$1\"", "zed-upload", dst_posix.as_ref()],
+            &["-c", "cat > \"$1\"", "ide-upload", dst_posix.as_ref()],
             true,
         );
         command.kill_on_drop(true);
@@ -466,7 +467,7 @@ impl RemoteConnection for WslRemoteConnection {
         };
 
         let mut proxy_args = vec![];
-        for env_var in ["RUST_LOG", "RUST_BACKTRACE", "ZED_GENERATE_MINIDUMPS"] {
+        for env_var in ["RUST_LOG", "RUST_BACKTRACE", "IDE_GENERATE_MINIDUMPS"] {
             if let Some(value) = std::env::var(env_var).ok() {
                 // We don't quote the value here as it seems excessive and may result in invalid envs for the
                 // proxy server. For example, `RUST_LOG='debug'` will result in a warning "invalid logging spec 'debug'', ignoring it"

@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Rename the names the fork inherited from upstream to the fork's own.
+
+    script/unaligned/rename-upstream-names            apply (paths, then file contents)
+    script/unaligned/rename-upstream-names --dry-run  say what would change, change nothing
+
+Run from anywhere inside the repository. It only touches files git tracks, uses `git mv` for
+paths, and is safe to run twice: the second run changes nothing.
+
+Why it is a script and not a one-off: the renames cut across hundreds of files, and the next
+merge of upstream brings the old names back. To merge upstream, check its commit out on a
+temporary branch, run this script there, commit, and merge that branch: the two sides then use
+the same names and only real conflicts remain. Afterwards `cargo check` regenerates Cargo.lock.
+
+What is renamed
+
+  paths     crates/zed -> crates/ide (its `zed` module -> `app`), crates/zed_actions ->
+            crates/app_actions, crates/zed_env_vars -> crates/app_env_vars,
+            crates/zed_credentials_provider -> crates/app_credentials_provider,
+            .zed -> .unaligned (the repository's own project settings),
+            script/licenses/zed-licenses.toml -> script/licenses/licenses.toml
+  package   the cargo package `zed` -> `ide`; its binary `zed` -> `unaligned-ide`
+  actions   the namespace `zed::` -> `app::` (what the command palette shows as "App:"), and
+            the few action names that carried upstream's name
+  links     the internal schemes `zed://`, `zed-cli://`, `zed-dock-action://` -> `ide…://`
+  icons     assets/icons/zed_*.svg, assets/images/zed_*.svg and their enum variants -> app_*
+  folder    the project settings folder `.zed` -> `.unaligned`
+  env       every `ZED_…` variable and constant -> `IDE_…` (task variables included: the task
+            code still accepts the old prefix, because extensions from the registry use it)
+
+What is left alone, on purpose
+
+  - licence texts, NOTICE and copyright lines: the GPL and the Apache licence require them;
+  - the extension API (`zed_extension_api`, `zed::` inside extensions, the `zed:extension`
+    interface): extensions from the registry are compiled against these names;
+  - the fork's own documents (README.md, CONTRIBUTING.md, docs/unaligned, the guard and its
+    allowlist): they name the old names on purpose, and say what was run at the time;
+  - Rust identifiers, module and file names inside the crates (`ZedPredict`, `zed_urls`, …):
+    nothing a user or a visitor of the repository's front page reads, and each one renamed is
+    one more conflict at every merge.
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+ROOT = subprocess.run(
+    ["git", "rev-parse", "--show-toplevel"],
+    cwd=os.path.dirname(os.path.abspath(__file__)),
+    capture_output=True,
+    text=True,
+    check=True,
+).stdout.strip()
+
+# (old path, new path), in order. A directory moves with everything in it.
+PATHS = [
+    ("crates/zed", "crates/ide"),
+    ("crates/ide/src/zed.rs", "crates/ide/src/app.rs"),
+    ("crates/ide/src/zed", "crates/ide/src/app"),
+    ("crates/zed_actions", "crates/app_actions"),
+    ("crates/zed_env_vars", "crates/app_env_vars"),
+    ("crates/app_env_vars/src/zed_env_vars.rs", "crates/app_env_vars/src/app_env_vars.rs"),
+    ("crates/zed_credentials_provider", "crates/app_credentials_provider"),
+    (
+        "crates/app_credentials_provider/src/zed_credentials_provider.rs",
+        "crates/app_credentials_provider/src/app_credentials_provider.rs",
+    ),
+    (".zed", ".unaligned"),
+    ("crates/ide/resources/zed.entitlements", "crates/ide/resources/app.entitlements"),
+    ("assets/icons/ai_zed.svg", "assets/icons/ai_app.svg"),
+    ("assets/icons/zed_agent.svg", "assets/icons/app_agent.svg"),
+    ("assets/icons/zed_agent_two.svg", "assets/icons/app_agent_two.svg"),
+    ("assets/icons/zed_assistant.svg", "assets/icons/app_assistant.svg"),
+    ("assets/icons/zed_predict.svg", "assets/icons/app_predict.svg"),
+    ("assets/icons/zed_predict_disabled.svg", "assets/icons/app_predict_disabled.svg"),
+    ("assets/icons/zed_predict_down.svg", "assets/icons/app_predict_down.svg"),
+    ("assets/icons/zed_predict_error.svg", "assets/icons/app_predict_error.svg"),
+    ("assets/icons/zed_predict_up.svg", "assets/icons/app_predict_up.svg"),
+    ("assets/icons/zed_src_custom.svg", "assets/icons/app_src_custom.svg"),
+    ("assets/icons/zed_src_extension.svg", "assets/icons/app_src_extension.svg"),
+    ("assets/images/zed_logo.svg", "assets/images/app_logo.svg"),
+    ("assets/images/zed_x_copilot.svg", "assets/images/app_x_copilot.svg"),
+    ("script/licenses/zed-licenses.toml", "script/licenses/licenses.toml"),
+]
+
+# Never rewritten: legal texts, generated files, upstream's manual, the fork's history, the
+# extension API and the extensions built against it, and this script.
+SKIP = [
+    r"^LICENSE",
+    r"(^|/)LICENSE-[A-Z]+$",
+    r"^NOTICE$",
+    r"^legal/",
+    r"^Cargo\.lock$",
+    r"^\.mailmap$",
+    r"^docs/src/",
+    r"^docs/\.",
+    r"^docs/README\.md$",
+    # The fork's own documents name the old names on purpose ("`.zed/` is no longer read").
+    r"^docs/unaligned/",
+    r"^README\.md$",
+    r"^CONTRIBUTING\.md$",
+    r"^script/unaligned/branding-allowlist\.txt$",
+    r"^script/unaligned/check-branding$",
+    r"^extensions/",
+    r"^crates/extension_api/",
+    r"^crates/extension_host/src/wasm_host/",
+    r"^script/unaligned/rename-upstream-names$",
+]
+SKIP_RE = re.compile("|".join(SKIP))
+
+W = r"(?<![A-Za-z0-9_])"  # not preceded by an identifier character
+E = r"(?![A-Za-z0-9_])"  # not followed by one
+
+# (pattern, replacement, path filter or None). Applied in order to every file that is not
+# skipped; a path filter restricts a rule to the paths it matches.
+RULES = [
+    # Crates.
+    (W + r"zed_actions" + E, "app_actions", None),
+    (W + r"zed_env_vars" + E, "app_env_vars", None),
+    (W + r"zed_credentials_provider" + E, "app_credentials_provider", None),
+    (W + r"ZedCredentialsProvider" + E, "AppCredentialsProvider", None),
+    (r"zed-visual-test-runner", "visual-test-runner", None),
+    (r"zed-licenses\.toml", "licenses.toml", None),
+    # The action namespace, wherever an action id is written: `zed::OpenSettings`.
+    (W + r"zed::(?=[A-Z])", "app::", None),
+    (r"namespace = zed" + E, "namespace = app", None),
+    (r"(actions!\(\s*)zed,", r"\1app,", None),
+    (W + r"RegisterZedScheme" + E, "RegisterUrlScheme", None),
+    (W + r"OpenZedUrl" + E, "OpenAppUrl", None),
+    (W + r"EmailZed" + E, "ContactSupport", None),
+    (W + r"OpenZedRepo" + E, "OpenSourceRepository", None),
+    (W + r"OpenZedPredictOnboarding" + E, "OpenEditPredictionOnboarding", None),
+    (W + r"zed_predict_onboarding" + E, "edit_prediction_onboarding", None),
+    # Icons and pictures: the enum variants name the files.
+    (r"((?:IconName|VectorName)::)Zed(?=[A-Z])", r"\1App", None),
+    (r"(IconName::)AiZed" + E, r"\1AiApp", None),
+    (r"\bICON-Zed(?=[A-Z])", "ICON-App", None),
+    (r"\bICON-AiZed" + E, "ICON-AiApp", None),
+    (r"(?m)^(\s+)Zed((?:Agent|AgentTwo|Assistant|Predict|PredictDisabled|PredictDown|PredictError|PredictUp|SrcCustom|SrcExtension|Logo|XCopilot),)$", r"\1App\2", r"^crates/(icons/src/icons|ui/src/components/image)\.rs$"),
+    (r"(?m)^(\s+)AiZed,$", r"\1AiApp,", r"^crates/icons/src/icons\.rs$"),
+    (r"((?:icons|images)/)zed_", r"\1app_", None),
+    (r"icons/ai_zed" + E, "icons/ai_app", None),
+    # The internal link schemes.
+    (W + r"zed(-cli|-dock-action)?://", r"ide\1://", r"^(crates|assets)/"),
+    (r"zed%3A%2F%2F", "ide%3A%2F%2F", r"^(crates|assets)/"),
+    # The main crate's `zed` module.
+    (W + r"zed::(?=[a-z_{])", "app::", r"^crates/ide/src/"),
+    (r"\bmod zed;", "mod app;", r"^crates/ide/src/"),
+    (r"\bcrate::zed" + E, "crate::app", r"^crates/ide/src/"),
+    # Environment variables and the constants named after them. `MAXIMIZED_`, `SERIALIZED_`
+    # and `PARAMETERIZED_` are English; `OUTPUT_ZED_DEV` is a marker of upstream's hosted model.
+    (r"(?<!MAXIMI)(?<!SERIALI)(?<!PARAMETERI)(?<!MDBOOK_OUTPUT__)(?<!PREPROCESSOR__)ZED_(?!DEV\b)", "IDE_", None),
+    # The project settings folder: `.zed/settings.json`, `".zed"`, `^\.zed/`. Not `api.zed.dev`,
+    # not `self.zed`, not `.zed-accent`, not a host name
+    # escaped for a regular expression (`dev\\.zed\\.`).
+    (r"(?<![A-Za-z0-9_*])\.zed(?![A-Za-z0-9_.\-]|\\+\.)", ".unaligned", None),
+    (r"(?<=\\x00)\.zed(?=/)", ".unaligned", None),
+    # The package and its binary, in commands and paths.
+    (r"(-p|--package)(\s+|=)zed" + E + r"(?![.\-])", r"\1\2ide", None),
+    (r"--bin(\s+|=)zed" + E + r"(?![.\-])", r"--bin\1unaligned-ide", None),
+    # (Not in the Rust language tests: their fixture is a made-up package at that path.)
+    (r"crates/zed" + E, "crates/ide", r"^(?!crates/languages/src/rust\.rs$)"),
+    (r"crates\\zed" + E, r"crates\\ide", None),
+    (r"(\.\.[/\\])zed(?=[/\\\"])", r"\1ide", None),
+    (r"(?m)^zed = \{ codegen-units", "ide = { codegen-units", r"(^|/)(Cargo|bundle-config)\.toml$"),
+    (r"(target[/\\](?:[A-Za-z0-9_\-<>$\{\}]+[/\\])?(?:debug|release)[/\\])zed(\.exe)?" + E + r"(?![\-])", r"\1unaligned-ide\2", None),
+]
+COMPILED = [(re.compile(p), r, re.compile(f) if f else None) for p, r, f in RULES]
+
+
+def tracked_files():
+    out = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True).stdout
+    return [p for p in out.decode("utf-8", "surrogateescape").split("\0") if p]
+
+
+def main():
+    dry_run = "--dry-run" in sys.argv[1:]
+    unknown = [a for a in sys.argv[1:] if a != "--dry-run"]
+    if unknown:
+        print(__doc__)
+        return 2
+
+    moved = 0
+    for old, new in PATHS:
+        old_abs, new_abs = os.path.join(ROOT, old), os.path.join(ROOT, new)
+        if not os.path.exists(old_abs):
+            continue
+        if os.path.exists(new_abs):
+            print(f"rename-upstream-names: both {old} and {new} exist: merge them by hand")
+            return 1
+        print(f"move  {old} -> {new}")
+        moved += 1
+        if not dry_run:
+            subprocess.run(["git", "mv", old, new], cwd=ROOT, check=True)
+
+    changed = 0
+    for path in tracked_files():
+        if SKIP_RE.search(path):
+            continue
+        absolute = os.path.join(ROOT, path)
+        if os.path.islink(absolute) or not os.path.isfile(absolute):
+            continue
+        with open(absolute, "rb") as file:
+            raw = file.read()
+        if b"\0" in raw or (b"zed" not in raw and b"ZED_" not in raw and b"Zed" not in raw):
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        new_text = text
+        for pattern, replacement, only in COMPILED:
+            if only and not only.search(path):
+                continue
+            new_text = pattern.sub(replacement, new_text)
+        if new_text != text:
+            changed += 1
+            if dry_run:
+                print(f"edit  {path}")
+            else:
+                with open(absolute, "w", encoding="utf-8", newline="") as file:
+                    file.write(new_text)
+
+    verb = "would be" if dry_run else "were"
+    print(f"{moved} paths {verb} moved, {changed} files {verb} rewritten")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

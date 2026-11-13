@@ -218,12 +218,8 @@ impl PromptLocalCommand {
 
     pub fn description(&self) -> &'static str {
         match self {
-            Self::ThumbsUp => {
-                "Rate this response as helpful. Sends the current conversation to the Zed team."
-            }
-            Self::ThumbsDown => {
-                "Rate this response as not helpful. Sends the current conversation to the Zed team."
-            }
+            Self::ThumbsUp => "Rate this response as helpful.",
+            Self::ThumbsDown => "Rate this response as not helpful.",
         }
     }
 
@@ -2433,7 +2429,7 @@ fn collect_session_matches(cx: &App) -> Vec<SessionMatch> {
     let mut entries: Vec<&ThreadMetadata> = store
         .read(cx)
         .entries()
-        .filter(|t| !t.archived && t.agent_id == *agent::ZED_AGENT_ID)
+        .filter(|t| !t.archived && t.agent_id == *agent::IDE_AGENT_ID)
         .collect();
     entries.sort_by_key(|t| Reverse(t.updated_at));
     entries

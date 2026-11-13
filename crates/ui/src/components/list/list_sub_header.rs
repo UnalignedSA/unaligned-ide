@@ -46,43 +46,38 @@ impl Toggleable for ListSubHeader {
 
 impl RenderOnce for ListSubHeader {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        h_flex()
-            .flex_1()
-            .w_full()
-            .relative()
-            .pb(DynamicSpacing::Base04.rems(cx))
-            .px(DynamicSpacing::Base02.rems(cx))
-            .child(
-                div()
-                    .h_5()
-                    .when(self.inset, |this| this.px_2())
-                    .when(self.selected, |this| {
-                        this.bg(cx.theme().colors().ghost_element_selected)
-                    })
-                    .flex()
-                    .flex_1()
-                    .w_full()
-                    .gap_1()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .items_center()
-                            .children(
-                                self.start_slot.map(|i| {
-                                    Icon::new(i).color(Color::Muted).size(IconSize::Small)
-                                }),
-                            )
-                            .child(
-                                Label::new(self.label.clone())
-                                    .color(Color::Muted)
-                                    .size(LabelSize::Small),
-                            ),
-                    )
-                    .children(self.end_slot),
-            )
+        h_flex().flex_1().w_full().relative().child(
+            div()
+                .h(rems_from_px(22_f32))
+                .when(self.inset, |this| this.px_2())
+                .when(self.selected, |this| {
+                    this.bg(cx.theme().colors().ghost_element_selected)
+                })
+                .flex()
+                .flex_1()
+                .w_full()
+                .gap_1()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .items_center()
+                        .children(
+                            self.start_slot
+                                .map(|i| Icon::new(i).color(Color::Muted).size(IconSize::XSmall)),
+                        )
+                        // Section label: mono, uppercase, faint.
+                        .child(
+                            Label::new(self.label.to_uppercase())
+                                .color(Color::Placeholder)
+                                .size(LabelSize::XSmall)
+                                .buffer_font(cx),
+                        ),
+                )
+                .children(self.end_slot),
+        )
     }
 }
 

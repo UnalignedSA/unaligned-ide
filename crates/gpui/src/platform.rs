@@ -208,7 +208,7 @@ impl ActivityGuard {
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub fn guess_compositor() -> &'static str {
-    if std::env::var_os("ZED_HEADLESS").is_some() {
+    if std::env::var_os("IDE_HEADLESS").is_some() {
         return "headless";
     }
     GraphicalEnvironment::detect().guess_compositor()

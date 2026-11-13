@@ -105,7 +105,7 @@ impl WriteToolTest {
         fs.insert_tree("/root", serde_json::json!({})).await;
         let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
         let agent_model = SelectedModel::from_str(
-            &std::env::var("ZED_AGENT_MODEL")
+            &std::env::var("IDE_AGENT_MODEL")
                 .unwrap_or("anthropic/claude-sonnet-4-6-latest".into()),
         )
         .unwrap();
@@ -203,6 +203,8 @@ impl WriteToolTest {
                 sandboxing: false,
                 is_linux: cfg!(target_os = "linux"),
                 is_windows: cfg!(target_os = "windows"),
+                product_name: branding::PRODUCT_NAME,
+                no_folder: false,
             };
             let templates = Templates::new();
             template.render(&templates)?

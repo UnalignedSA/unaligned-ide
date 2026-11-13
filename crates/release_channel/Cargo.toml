@@ -12,5 +12,7 @@ workspace = true
 doctest = false
 
 [dependencies]
+branding.workspace = true
+const_format.workspace = true
 gpui.workspace = true
 semver.workspace = true

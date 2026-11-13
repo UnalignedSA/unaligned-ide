@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use gpui::{AnyElement, ClickEvent, CursorStyle, Window};
-use ui::{CommonAnimationExt, Disclosure, Divider, DividerColor, Tooltip, prelude::*};
+use ui::{Disclosure, Divider, DividerColor, Tooltip, prelude::*};
 use util::time::duration_alt_display;
 
 const ELAPSED_DISPLAY_THRESHOLD: Duration = Duration::from_secs(10);
@@ -11,7 +11,6 @@ type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub struct TerminalSandboxWarning {
     pub title: SharedString,
     pub detail: SharedString,
-    pub docs_url: SharedString,
 }
 
 #[derive(IntoElement, RegisterComponent)]
@@ -192,12 +191,11 @@ impl RenderOnce for TerminalToolHeader {
             .when(running, |header| {
                 header
                     .gap_1p5()
-                    .child(
-                        Icon::new(IconName::LoadCircle)
-                            .size(IconSize::Small)
-                            .color(Color::Muted)
-                            .with_rotate_animation(2),
-                    )
+                    // A command can run for minutes: three dots on a timer,
+                    // not an icon that repaints the window on every frame.
+                    .child(crate::ui::WorkingIndicator::new(SharedString::from(
+                        child_id("working"),
+                    )))
                     .when_some(on_stop, |header, handler| {
                         header
                             .child(Divider::vertical().color(DividerColor::Border).ml_1())
@@ -242,23 +240,17 @@ impl RenderOnce for TerminalToolHeader {
                     )
             })
             .when_some(sandbox_warning, |header, warning| {
-                let TerminalSandboxWarning {
-                    title,
-                    detail,
-                    docs_url,
-                } = warning;
+                let TerminalSandboxWarning { title, detail } = warning;
+                // An indicator, not a link: the product has no page about
+                // sandboxing to open.
                 header.child(
                     IconButton::new(child_id("sandbox-not-applied"), IconName::LockOff)
+                        .cursor_style(CursorStyle::Arrow)
+                        .style(ButtonStyle::Transparent)
                         .icon_size(IconSize::Small)
                         .tooltip(move |_window, cx| {
-                            Tooltip::with_meta(
-                                title.clone(),
-                                None,
-                                format!("{detail} Click to learn more about sandboxing."),
-                                cx,
-                            )
-                        })
-                        .on_click(move |_, _, cx| cx.open_url(&docs_url)),
+                            Tooltip::with_meta(title.clone(), None, detail.clone(), cx)
+                        }),
                 )
             });
 
@@ -329,7 +321,7 @@ impl Component for TerminalToolHeader {
     }
 
     fn preview(_window: &mut Window, cx: &mut App) -> AnyElement {
-        let working_dir = "/Users/you/projects/zed";
+        let working_dir = "/Users/you/projects/app";
 
         let card = |_id: &'static str, header: TerminalToolHeader| {
             v_flex()
@@ -352,8 +344,7 @@ impl Component for TerminalToolHeader {
 
         let sandbox_warning = || TerminalSandboxWarning {
             title: "Ran without sandbox".into(),
-            detail: "Unsandboxed execution is allowed for the rest of this thread.".into(),
-            docs_url: "https://zed.dev/docs/ai/sandboxing".into(),
+            detail: "Unsandboxed execution is allowed for the rest of this chat.".into(),
         };
 
         v_flex()

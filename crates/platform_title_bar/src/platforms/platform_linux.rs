@@ -3,6 +3,40 @@ use gpui::{
 };
 use ui::prelude::*;
 
+/// Side of one window button, in rems (`w_5`).
+const BUTTON_SIZE: f32 = 1.25;
+/// Space between two window buttons, in rems (`gap_3`).
+const BUTTON_GAP: f32 = 0.75;
+/// Space before the first and after the last window button, in rems (`px_3`).
+const GROUP_PADDING: f32 = 0.75;
+
+/// The buttons of one side that are drawn: the desktop's layout, less what
+/// the window cannot do.
+pub(crate) fn drawn_buttons(
+    buttons: &[Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
+    can_minimize: bool,
+    can_maximize: bool,
+) -> impl Iterator<Item = WindowButton> + '_ {
+    buttons
+        .iter()
+        .filter_map(|button| *button)
+        .filter(move |button| match button {
+            WindowButton::Minimize => can_minimize,
+            WindowButton::Maximize => can_maximize,
+            WindowButton::Close => true,
+        })
+}
+
+/// Width of a group of `button_count` window buttons, padding included.
+/// A group without buttons takes no room at all.
+pub(crate) fn controls_width(button_count: usize, rem_size: Pixels) -> Pixels {
+    if button_count == 0 {
+        return px(0.);
+    }
+    let count = button_count as f32;
+    rem_size * (count * BUTTON_SIZE + (count - 1.) * BUTTON_GAP + 2. * GROUP_PADDING)
+}
+
 #[derive(IntoElement)]
 pub struct LinuxWindowControls {
     id: &'static str,
@@ -28,25 +62,24 @@ impl RenderOnce for LinuxWindowControls {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let is_maximized = window.is_maximized();
         let supported_controls = window.window_controls();
-        let button_elements: Vec<AnyElement> = self
-            .buttons
-            .iter()
-            .filter_map(|b| *b)
-            .filter(|button| match button {
-                WindowButton::Minimize => supported_controls.minimize,
-                WindowButton::Maximize => supported_controls.maximize,
-                WindowButton::Close => true,
-            })
-            .map(|button| {
-                create_window_button(button, button.id(), is_maximized, &*self.close_action, cx)
-            })
-            .collect();
+        let button_elements: Vec<AnyElement> = drawn_buttons(
+            &self.buttons,
+            supported_controls.minimize,
+            supported_controls.maximize,
+        )
+        .map(|button| {
+            create_window_button(button, button.id(), is_maximized, &*self.close_action, cx)
+        })
+        .collect();
 
+        // Sizes come from the constants `controls_width` adds up, so the room
+        // the title bar reserves for this group is the room it takes.
         h_flex()
             .id(self.id)
+            .flex_none()
             .when(!button_elements.is_empty(), |el| {
-                el.gap_3()
-                    .px_3()
+                el.gap(rems(BUTTON_GAP))
+                    .px(rems(GROUP_PADDING))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .children(button_elements)
             })
@@ -229,9 +262,11 @@ impl RenderOnce for WindowControl {
             .group("")
             .justify_center()
             .content_center()
-            .rounded_2xl()
-            .w_5()
-            .h_5()
+            .flex_none()
+            // A circle in every theme, like the desktop's own controls: named
+            // radii follow the theme's corners, `rounded_full` does not.
+            .rounded_full()
+            .size(rems(BUTTON_SIZE))
             .when(enabled, |this| {
                 this.cursor_pointer()
                     .hover(|this| this.bg(self.style.background_hover))

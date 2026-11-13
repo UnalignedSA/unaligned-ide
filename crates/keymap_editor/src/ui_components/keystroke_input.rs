@@ -545,21 +545,21 @@ impl Render for KeystrokeInput {
             .w_full()
             .flex_1()
             .justify_between()
-            .rounded_md()
             .overflow_hidden()
             .map(|this| {
                 if is_recording {
                     this.bg(recording_bg_color)
                 } else {
-                    this.bg(colors.editor_background)
+                    // Sunken input, like the other fields.
+                    this.bg(colors.background)
                 }
             })
             .border_1()
             .map(|this| {
                 if is_focused {
-                    this.border_color(colors.border_focused)
+                    this.border_color(colors.text)
                 } else {
-                    this.border_color(colors.border_variant)
+                    this.border_color(colors.text_disabled.opacity(0.5))
                 }
             })
             .child(

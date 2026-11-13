@@ -7,8 +7,9 @@ use crate::{
     buffer_search::registrar::WithResultsOrExternalQuery,
     search_bar::{
         ActionButtonState, HistoryNavigationDirection, alignment_element,
-        filter_search_results_input, input_base_styles, render_local_action_button,
-        render_text_input, should_navigate_history,
+        filter_search_results_input, input_base_styles, match_count_label, match_count_text,
+        render_local_action_button, render_replace_action_button, render_text_input,
+        should_navigate_history,
     },
 };
 use any_vec::AnyVec;
@@ -30,11 +31,14 @@ use project::{
     search_history::{SearchHistory, SearchHistoryCursor},
 };
 
+use app_actions::{outline::ToggleOutline, workspace::CopyPath, workspace::CopyRelativePath};
 use settings::{SeedQuerySetting, Settings};
 use std::{any::TypeId, sync::Arc};
-use zed_actions::{outline::ToggleOutline, workspace::CopyPath, workspace::CopyRelativePath};
 
-use ui::{BASE_REM_SIZE_IN_PX, IconButtonShape, Tooltip, prelude::*, utils::SearchInputWidth};
+use ui::{
+    BASE_REM_SIZE_IN_PX, IconButtonShape, InputShellGround, Tooltip, prelude::*,
+    utils::SearchInputWidth,
+};
 use util::{ResultExt, paths::PathMatcher};
 use workspace::{
     ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace,
@@ -50,7 +54,7 @@ use registrar::{ForDeployed, ForDismissed, SearchActionsRegistrar};
 
 const MAX_BUFFER_SEARCH_HISTORY_SIZE: usize = 50;
 
-pub use zed_actions::buffer_search::{
+pub use app_actions::buffer_search::{
     Deploy, DeployReplace, Dismiss, FocusEditor, UseSelectionForFind,
 };
 
@@ -185,50 +189,69 @@ impl Render for BufferSearchBar {
             editor.set_placeholder_text("Replace with…", window, cx);
         });
 
-        let mut color_override = None;
-        let match_text = self
+        let matches_count = self
             .active_searchable_item
             .as_ref()
             .and_then(|searchable_item| {
-                if self.query(cx).is_empty() {
-                    return None;
-                }
-                let matches_count = self
-                    .searchable_items_with_matches
+                self.searchable_items_with_matches
                     .get(&searchable_item.downgrade())
-                    .map(|(matches, _)| matches.len())
-                    .unwrap_or(0);
-                if let Some(match_ix) = self.active_match_index {
-                    Some(format!("{}/{}", match_ix + 1, matches_count))
-                } else {
-                    color_override = Some(Color::Error); // No matches found
-                    None
-                }
             })
-            .unwrap_or_else(|| "0/0".to_string());
+            .map(|(matches, _)| matches.len())
+            .unwrap_or(0);
+        let has_query = self.active_searchable_item.is_some() && !self.query(cx).is_empty();
+        let active_match_index = self.active_match_index.filter(|_| has_query);
+        // A query without any match turns the input text and the counter red.
+        let no_matches = has_query && active_match_index.is_none();
+        let color_override = no_matches.then_some(Color::Error);
+        let match_text = match_count_text(active_match_index, matches_count, false);
+        let match_text_color = if active_match_index.is_some() {
+            Color::Muted
+        } else if no_matches {
+            Color::Error
+        } else {
+            Color::Disabled
+        };
+
         let should_show_replace_input = self.replace_enabled && replacement;
         let in_replace = self.replacement_editor.focus_handle(cx).is_focused(window);
+        let in_query = self.query_editor.focus_handle(cx).is_focused(window);
 
         let theme_colors = cx.theme().colors();
-        let query_border = if self.query_error.is_some() {
-            Color::Error.color(cx)
-        } else {
-            theme_colors.border
-        };
-        let replacement_border = theme_colors.border;
+        let has_query_error = self.query_error.is_some();
 
+        // In a plain editor the bar is a find widget: a raised box at the top
+        // right of the editor, as wide as its content. In a multibuffer, where
+        // the fold-all button must stay on the gutter, and as the "Find in
+        // Results" filter it stays a row of the toolbar.
+        let is_widget = !find_in_results && collapse_expand_button.is_none();
         let container_width = window.viewport_size().width;
-        let input_width = SearchInputWidth::calc_width(container_width);
+        let input_width = if is_widget {
+            SearchInputWidth::calc_width(container_width).min(FIND_WIDGET_INPUT_WIDTH)
+        } else {
+            SearchInputWidth::calc_width(container_width)
+        };
+        // An input never has the ground of what it sits on (D9).
+        let input_ground = if is_widget {
+            InputShellGround::Sunken
+        } else {
+            InputShellGround::Raised
+        };
 
-        let input_base_styles =
-            |border_color| input_base_styles(border_color, |div| div.w(input_width));
+        let input_base_styles = |focused, has_error| {
+            input_base_styles(focused, has_error, input_ground, |shell| {
+                shell.w(input_width)
+            })
+        };
 
         let input_style = if find_in_results {
-            filter_search_results_input(query_border, |div| div.w(input_width), cx)
+            filter_search_results_input(in_query, has_query_error, input_ground, |shell| {
+                shell.w(input_width)
+            })
         } else {
-            input_base_styles(query_border)
+            input_base_styles(in_query, has_query_error)
         };
 
+        // Find input with its options inside, like the VS Code find widget.
         let query_column = input_style
             .child(div().flex_1().min_w_0().py_1().child(render_text_input(
                 &self.query_editor,
@@ -238,7 +261,7 @@ impl Render for BufferSearchBar {
             .child(
                 h_flex()
                     .flex_none()
-                    .gap_1()
+                    .gap_0p5()
                     .when(case, |div| {
                         div.child(SearchOption::CaseSensitive.as_button(
                             self.search_options,
@@ -262,20 +285,85 @@ impl Render for BufferSearchBar {
                     }),
             );
 
+        // The chevron in the gutter unfolds the replace row.
+        let replace_toggle = replacement.then(|| {
+            render_local_action_button(
+                "buffer-search-bar-toggle",
+                if should_show_replace_input {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                },
+                None,
+                "Toggle Replace",
+                &ToggleReplace,
+                focus_handle.clone(),
+                cx,
+                Self::toggle_replace,
+            )
+        });
+
+        let close_button = || {
+            render_local_action_button(
+                "buffer-search",
+                IconName::Close,
+                Default::default(),
+                "Close Search Bar",
+                &Dismiss,
+                focus_handle.clone(),
+                cx,
+                Self::dismiss,
+            )
+        };
+
         let mode_column = h_flex()
-            .gap_1()
-            .min_w_64()
-            .when(replacement, |this| {
-                this.child(render_local_action_button(
-                    "buffer-search-bar-toggle",
-                    IconName::Replace,
-                    self.replace_enabled.then_some(ActionButtonState::Toggled),
-                    "Toggle Replace",
-                    &ToggleReplace,
-                    focus_handle.clone(),
+            .gap_0p5()
+            .when(!find_in_results, |el| {
+                let query_focus = self.query_editor.focus_handle(cx);
+                el.when(!narrow_mode, |this| {
+                    this.child(
+                        div()
+                            .mr_1()
+                            .min_w(rems_from_px(80_f32))
+                            .child(match_count_label(match_text, match_text_color, cx)),
+                    )
+                })
+                .child(render_local_action_button(
+                    "buffer-search-nav-button",
+                    ui::IconName::ArrowUp,
+                    active_match_index
+                        .is_none()
+                        .then_some(ActionButtonState::Disabled),
+                    "Select Previous Match",
+                    &SelectPreviousMatch,
+                    query_focus.clone(),
                     cx,
-                    Self::toggle_replace,
+                    Self::select_prev_match,
                 ))
+                .child(render_local_action_button(
+                    "buffer-search-nav-button",
+                    ui::IconName::ArrowDown,
+                    active_match_index
+                        .is_none()
+                        .then_some(ActionButtonState::Disabled),
+                    "Select Next Match",
+                    &SelectNextMatch,
+                    query_focus.clone(),
+                    cx,
+                    Self::select_next_match,
+                ))
+                .when(select_all, |el| {
+                    el.child(render_local_action_button(
+                        "buffer-search-nav-button",
+                        IconName::SelectAll,
+                        Default::default(),
+                        "Select All Matches",
+                        &SelectAllMatches,
+                        query_focus.clone(),
+                        cx,
+                        Self::select_all_matches,
+                    ))
+                })
             })
             .when(selection, |this| {
                 this.child(
@@ -285,9 +373,7 @@ impl Render for BufferSearchBar {
                     )
                     .style(ButtonStyle::Subtle)
                     .shape(IconButtonShape::Square)
-                    .when(self.selection_search_enabled.is_some(), |button| {
-                        button.style(ButtonStyle::Filled)
-                    })
+                    .icon_size(IconSize::Small)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_selection(&ToggleSelection, window, cx);
                     }))
@@ -305,101 +391,43 @@ impl Render for BufferSearchBar {
                     }),
                 )
             })
-            .when(!find_in_results, |el| {
-                let query_focus = self.query_editor.focus_handle(cx);
-                let matches_column = h_flex()
-                    .pl_2()
-                    .ml_2()
-                    .border_l_1()
-                    .border_color(theme_colors.border_variant)
-                    .child(render_local_action_button(
-                        "buffer-search-nav-button",
-                        ui::IconName::ChevronLeft,
-                        self.active_match_index
-                            .is_none()
-                            .then_some(ActionButtonState::Disabled),
-                        "Select Previous Match",
-                        &SelectPreviousMatch,
-                        query_focus.clone(),
-                        cx,
-                        Self::select_prev_match,
-                    ))
-                    .child(render_local_action_button(
-                        "buffer-search-nav-button",
-                        ui::IconName::ChevronRight,
-                        self.active_match_index
-                            .is_none()
-                            .then_some(ActionButtonState::Disabled),
-                        "Select Next Match",
-                        &SelectNextMatch,
-                        query_focus.clone(),
-                        cx,
-                        Self::select_next_match,
-                    ))
-                    .when(!narrow_mode, |this| {
-                        this.child(div().ml_2().min_w(rems_from_px(40_f32)).child(
-                            Label::new(match_text).size(LabelSize::Small).color(
-                                if self.active_match_index.is_some() {
-                                    Color::Default
-                                } else {
-                                    Color::Disabled
-                                },
-                            ),
-                        ))
-                    });
-
-                el.when(select_all, |el| {
-                    el.child(render_local_action_button(
-                        "buffer-search-nav-button",
-                        IconName::SelectAll,
-                        Default::default(),
-                        "Select All Matches",
-                        &SelectAllMatches,
-                        query_focus.clone(),
-                        cx,
-                        Self::select_all_matches,
-                    ))
-                })
-                .child(matches_column)
-            })
-            .when(find_in_results, |el| {
-                el.child(render_local_action_button(
-                    "buffer-search",
-                    IconName::Close,
-                    Default::default(),
-                    "Close Search Bar",
-                    &Dismiss,
-                    focus_handle.clone(),
-                    cx,
-                    Self::dismiss,
-                ))
+            .when(find_in_results || !narrow_mode, |el| {
+                el.child(
+                    h_flex()
+                        .ml_1()
+                        .pl_1()
+                        .border_l_1()
+                        .border_color(theme_colors.border)
+                        .child(close_button()),
+                )
             });
 
         let has_collapse_button = collapse_expand_button.is_some();
+        let has_replace_toggle = replace_toggle.is_some();
 
         let search_line = h_flex()
-            .w_full()
-            .gap_2()
+            .gap_1()
             .when(find_in_results, |el| el.child(alignment_element()))
             .when(!find_in_results && has_collapse_button, |el| {
-                el.pl_0p5().child(collapse_expand_button.expect("button"))
+                el.child(collapse_expand_button.expect("button"))
             })
+            .children(replace_toggle)
             .child(query_column)
             .child(mode_column);
 
         let replace_line = should_show_replace_input.then(|| {
-            let replace_column = input_base_styles(replacement_border).child(
-                div()
-                    .flex_1()
-                    .py_1()
-                    .child(render_text_input(&self.replacement_editor, None, cx)),
+            let replace_column = input_base_styles(in_replace, false).child(
+                div().flex_1().min_w_0().py_1().child(render_text_input(
+                    &self.replacement_editor,
+                    None,
+                    cx,
+                )),
             );
             let focus_handle = self.replacement_editor.read(cx).focus_handle(cx);
 
             let replace_actions = h_flex()
-                .min_w_64()
                 .gap_1()
-                .child(render_local_action_button(
+                .child(render_replace_action_button(
                     "buffer-search-replace-button",
                     IconName::ReplaceNext,
                     Default::default(),
@@ -409,7 +437,7 @@ impl Render for BufferSearchBar {
                     cx,
                     Self::replace_next,
                 ))
-                .child(render_local_action_button(
+                .child(render_replace_action_button(
                     "buffer-search-replace-button",
                     IconName::ReplaceAll,
                     Default::default(),
@@ -420,10 +448,11 @@ impl Render for BufferSearchBar {
                     Self::replace_all,
                 ));
 
+            // Empty gutter slots keep the two inputs in one column.
             h_flex()
-                .w_full()
-                .gap_2()
+                .gap_1()
                 .when(has_collapse_button, |this| this.child(alignment_element()))
+                .when(has_replace_toggle, |this| this.child(alignment_element()))
                 .child(replace_column)
                 .child(replace_actions)
         });
@@ -438,40 +467,17 @@ impl Render for BufferSearchBar {
             Label::new(error)
                 .size(LabelSize::Small)
                 .color(Color::Error)
-                .mt_neg_1()
                 .ml_2()
         });
 
-        let search_line =
-            h_flex()
-                .relative()
-                .child(search_line)
-                .when(!narrow_mode && !find_in_results, |this| {
-                    this.child(
-                        h_flex()
-                            .absolute()
-                            .right_0()
-                            .when(has_collapse_button, |this| {
-                                this.pr_2()
-                                    .border_r_1()
-                                    .border_color(cx.theme().colors().border_variant)
-                            })
-                            .child(render_local_action_button(
-                                "buffer-search",
-                                IconName::Close,
-                                Default::default(),
-                                "Close Search Bar",
-                                &Dismiss,
-                                focus_handle.clone(),
-                                cx,
-                                Self::dismiss,
-                            )),
-                    )
-                });
+        let lines = v_flex()
+            .gap_1()
+            .child(search_line)
+            .children(query_error_line)
+            .children(replace_line);
 
-        v_flex()
+        h_flex()
             .id("buffer_search")
-            .gap_2()
             .w_full()
             .track_scroll(&self.scroll_handle)
             .key_context(key_context)
@@ -516,12 +522,28 @@ impl Render for BufferSearchBar {
             .when(selection, |this| {
                 this.on_action(cx.listener(Self::toggle_selection))
             })
-            .child(search_line)
-            .children(query_error_line)
-            .children(replace_line)
+            .map(|this| {
+                if is_widget {
+                    // A raised surface (D1): raised ground and a 1px strong line.
+                    this.justify_end().child(
+                        lines
+                            .max_w_full()
+                            .p_1()
+                            .rounded_sm()
+                            .bg(theme_colors.elevated_surface_background)
+                            .border_1()
+                            .border_color(theme_colors.border_strong),
+                    )
+                } else {
+                    this.child(lines.w_full())
+                }
+            })
             .into_any_element()
     }
 }
+
+/// The width of the inputs of the find widget (the bar in a plain editor).
+const FIND_WIDGET_INPUT_WIDTH: Pixels = px(320.);
 
 impl Focusable for BufferSearchBar {
     fn focus_handle(&self, cx: &App) -> gpui::FocusHandle {

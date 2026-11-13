@@ -63,7 +63,7 @@ pub(crate) fn render_sandbox_settings_page(
                 "sandbox-enabled",
                 Some("Enable Sandbox"),
                 Some(
-                    "Wrap agent-run terminal commands in an OS-level sandbox. When off, commands run with Zed's own permissions."
+                    "Wrap agent-run terminal commands in an OS-level sandbox. When off, commands run with the IDE's own permissions."
                         .into(),
                 ),
                 sandbox_enabled,
@@ -73,25 +73,6 @@ pub(crate) fn render_sandbox_settings_page(
             )
             .tab_index(0),
         )
-        .child({
-            let docs_url =
-                client::zed_urls::sandboxing_docs(Some("persistent-sandbox-permissions"), cx);
-            let tooltip = format!("Opens {docs_url}");
-            // Wrap in a row so the button shrinks to its content width instead
-            // of stretching across the settings page.
-            h_flex().child(
-                Button::new("sandbox-docs-link", "Learn more about sandboxing")
-                    .label_size(LabelSize::Small)
-                    .color(Color::Muted)
-                    .end_icon(
-                        Icon::new(IconName::ArrowUpRight)
-                            .color(Color::Muted)
-                            .size(IconSize::XSmall),
-                    )
-                    .tooltip(Tooltip::text(tooltip))
-                    .on_click(move |_, _, cx| cx.open_url(&docs_url)),
-            )
-        })
         .when(sandbox_enabled, |this| this
         .when_some(validation_error, |this, error| {
             this.child(

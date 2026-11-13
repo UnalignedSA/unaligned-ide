@@ -8,7 +8,7 @@ use gpui::{
 };
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
-use ui::{Tooltip, prelude::*, rems};
+use ui::{InputShell, InputShellGround, InputShellSize, Tooltip, prelude::*, rems};
 
 #[derive(IntoElement)]
 pub struct SettingsInputField {
@@ -225,8 +225,6 @@ impl RenderOnce for SettingsInputField {
         let (a11y_value, a11y_text_runs) =
             text_field_a11y_state(self.id.clone(), &editor, window, cx);
 
-        let theme_colors = cx.theme().colors();
-
         h_flex()
             .id(self.id.clone())
             .role(Role::TextInput)
@@ -261,14 +259,7 @@ impl RenderOnce for SettingsInputField {
             })
             .group("settings-input-field-editor")
             .relative()
-            .py_1()
-            .px_2()
-            .h_8()
             .min_w_64()
-            .rounded_md()
-            .border_1()
-            .border_color(theme_colors.border)
-            .bg(theme_colors.editor_background)
             .map(|this| {
                 let focus_handle = editor.focus_handle(cx);
                 let focus_handle = if let Some(tab_index) = self.tab_index {
@@ -277,9 +268,17 @@ impl RenderOnce for SettingsInputField {
                     focus_handle
                 };
                 this.track_focus(&focus_handle)
-                    .focus(|s| s.border_color(theme_colors.border_focused))
             })
-            .child(editor)
+            // The shared input: the pages are on the sheet ground, so the field
+            // is the raised kind; strong line at rest, text colour on focus.
+            .child(
+                InputShell::new()
+                    .size(InputShellSize::Medium)
+                    .ground(InputShellGround::Raised)
+                    .focused(is_editor_focused)
+                    .w_full()
+                    .child(editor),
+            )
             .child(
                 h_flex()
                     .absolute()

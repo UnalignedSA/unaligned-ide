@@ -5,12 +5,14 @@ use gpui::{
 };
 use settings::{Settings, SettingsStore};
 use std::{rc::Rc, time::Duration};
-use ui::{
-    ButtonLike, CircularProgress, KeyBinding, KeyBindingStyle, prelude::*, tooltip_container,
-};
+use ui::{CircularProgress, KeyBinding, KeyBindingStyle, Tooltip, prelude::*, tooltip_container};
 use util::ResultExt;
 use vim_mode_setting::{HelixModeSetting, VimModeSetting};
-use workspace::{HideStatusItem, StatusBarSettings, StatusItemView, item::ItemHandle};
+use workspace::{
+    HideStatusItem, StatusBarSettings, StatusItemView,
+    active_file_name::{status_bar_item, status_bar_item_content},
+    item::ItemHandle,
+};
 
 use crate::{
     ShowPendingBindings, bindings_for_pending_input, map_pending_keystrokes,
@@ -278,10 +280,7 @@ impl Render for PendingKeystrokesIndicator {
             });
         }
 
-        let button = ButtonLike::new("pending-keystrokes-indicator")
-            .on_click(|_, window, cx| {
-                window.dispatch_action(zed_actions::dev::OpenKeyContextView.boxed_clone(), cx);
-            })
+        let content = status_bar_item_content()
             .when_some(render_state.timeout.as_ref(), |button, timeout| {
                 let remaining_fraction = if timeout.timeout_duration.is_zero() {
                     0.0
@@ -327,6 +326,15 @@ impl Render for PendingKeystrokesIndicator {
                     .size(rems_from_px(12_f32))
                     .style(KeyBindingStyle::Label),
             );
+        let button = status_bar_item("pending-keystrokes-indicator", cx)
+            // The popover already explains the pending keys when it is enabled.
+            .when(!Self::popover_enabled(cx), |button| {
+                button.tooltip(Tooltip::text("Pending Keystrokes"))
+            })
+            .on_click(|_, window, cx| {
+                window.dispatch_action(app_actions::dev::OpenKeyContextView.boxed_clone(), cx);
+            })
+            .child(content);
 
         let popover = self.popover.visible.then(|| {
             let popover_render_state = render_state.clone();
@@ -466,7 +474,7 @@ mod tests {
 
     /// Binds each keystroke sequence to the action the test view counts.
     fn counted_bindings<const N: usize>(keystrokes: [&'static str; N]) -> [KeyBinding; N] {
-        keystrokes.map(|keystrokes| binding(keystrokes, zed_actions::dev::OpenKeyContextView))
+        keystrokes.map(|keystrokes| binding(keystrokes, app_actions::dev::OpenKeyContextView))
     }
 
     struct TestView {
@@ -713,7 +721,7 @@ mod tests {
                 .on_action(|_: &LongerBinding, _, _| {})
                 .on_action(|_: &LongestBinding, _, _| {})
                 .on_action(
-                    cx.listener(|this, _: &zed_actions::dev::OpenKeyContextView, _, _| {
+                    cx.listener(|this, _: &app_actions::dev::OpenKeyContextView, _, _| {
                         this.open_key_context_view_count
                             .set(this.open_key_context_view_count.get() + 1);
                     }),
@@ -895,7 +903,7 @@ mod tests {
             snapshot.bindings,
             vec![(
                 vec!["j".to_string()],
-                humanize_action_name(zed_actions::dev::OpenKeyContextView.name()),
+                humanize_action_name(app_actions::dev::OpenKeyContextView.name()),
             )]
         );
 
@@ -949,7 +957,7 @@ mod tests {
     fn test_keyboard_popover_respects_overrides_and_unbinding(cx: &mut TestAppContext) {
         // Each override is bound after the default `alt-/`, so it takes precedence.
         for (override_binding, expected_action_count) in [
-            (binding("alt-/", zed_actions::dev::OpenKeyContextView), 1),
+            (binding("alt-/", app_actions::dev::OpenKeyContextView), 1),
             (binding("alt-/", gpui::NoAction), 0),
             (
                 binding("alt-/", gpui::Unbind(ShowPendingBindings.name().into())),

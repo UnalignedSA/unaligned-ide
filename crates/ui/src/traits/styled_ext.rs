@@ -7,7 +7,8 @@ fn elevated<E: Styled>(this: E, cx: &App, index: ElevationIndex) -> E {
     this.bg(cx.theme().colors().elevated_surface_background)
         .rounded_lg()
         .border_1()
-        .border_color(cx.theme().colors().border_variant)
+        // The 1px line carries the separation, not the shadow.
+        .border_color(cx.theme().colors().border_strong)
         .shadow(index.shadow(cx))
 }
 
@@ -88,6 +89,20 @@ pub trait StyledExt: Styled + Sized {
     /// Renders a borderless version [`elevation_3`](Self::elevation_3).
     fn elevation_3_borderless(self, cx: &mut App) -> Self {
         elevated_borderless(self, cx, ElevationIndex::ModalSurface)
+    }
+
+    /// Rounds the element all the way (a pill, or a circle when it is square)
+    /// in themes with rounded corners, and leaves it square in square themes.
+    ///
+    /// Use it where upstream used `rounded_full()` for a shape that follows
+    /// the corner style (badges, progress rules). Shapes that are round by
+    /// nature (avatars, indicator dots) keep `rounded_full()`.
+    fn rounded_pill(self) -> Self {
+        if gpui::corner_radius_scale() == 0.0 {
+            self
+        } else {
+            self.rounded_full()
+        }
     }
 
     /// The theme's primary border color.

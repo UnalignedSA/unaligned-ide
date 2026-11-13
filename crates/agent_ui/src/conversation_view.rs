@@ -17,7 +17,6 @@ use anyhow::{Context as _, Result, anyhow};
 #[cfg(feature = "audio")]
 use audio::{Audio, Sound};
 use buffer_diff::BufferDiff;
-use client::zed_urls;
 use collections::{HashMap, HashSet, IndexMap};
 use editor::scroll::Autoscroll;
 use editor::{
@@ -30,12 +29,12 @@ use gpui::{
     Action, Animation, AnimationExt, App, ClickEvent, ClipboardItem, CursorStyle, ElementId, Empty,
     Entity, EventEmitter, FocusHandle, Focusable, Hsla, ListOffset, ListState, ObjectFit,
     PlatformDisplay, ScrollHandle, SharedString, StyledText, Subscription, Task, TextRun,
-    TextStyle, WeakEntity, Window, WindowHandle, div, ease_in_out, img, linear_color_stop,
-    linear_gradient, list, pulsating_between,
+    TextStyle, WeakEntity, Window, WindowHandle, div, img, linear_color_stop, linear_gradient,
+    list, pulsating_between,
 };
 use language::{Buffer, Language};
 use language_model::{
-    LanguageModelCompletionError, ProviderErrorCategory, ZED_CLOUD_PROVIDER_NAME,
+    LanguageModelCompletionError, LanguageModelProviderId, ProviderErrorCategory,
 };
 use markdown::{
     CodeBlockRenderer, CopyButtonVisibility, Markdown, MarkdownElement, MarkdownFont, MarkdownStyle,
@@ -48,6 +47,7 @@ use crate::conversation_view::elicitation::{
 };
 use crate::message_editor::SessionCapabilities;
 use crate::{AgentThreadSource, DEFAULT_THREAD_TITLE, resolve_agent_image};
+use app_actions::agent::{Chat, ToggleModelSelector};
 use lru::LruCache;
 use rope::Point;
 use settings::{NotifyWhenAgentWaiting, Settings as _, SettingsStore};
@@ -60,9 +60,9 @@ use terminal_view::terminal_panel::TerminalPanel;
 use text::Anchor;
 use theme_settings::{AgentBufferFontSize, AgentUiFontSize};
 use ui::{
-    Callout, CircularProgress, CommonAnimationExt, ContextMenu, ContextMenuEntry, CopyButton,
-    DecoratedIcon, DiffStat, Disclosure, Divider, DividerColor, IconDecoration, IconDecorationKind,
-    KeyBinding, PopoverMenu, PopoverMenuHandle, TintColor, Tooltip, WithScrollbar, prelude::*,
+    Callout, CommonAnimationExt, ContextMenu, ContextMenuEntry, CopyButton, DecoratedIcon,
+    DiffStat, Disclosure, Divider, DividerColor, IconDecoration, IconDecorationKind, KeyBinding,
+    PopoverMenu, PopoverMenuHandle, TintColor, Tooltip, WithScrollbar, prelude::*,
     right_click_menu,
 };
 use util::{
@@ -75,7 +75,6 @@ use util::{
 use workspace::{
     CollaboratorId, MultiWorkspace, NewTerminal, PathList, Workspace, path_link::sanitize_path_text,
 };
-use zed_actions::agent::{Chat, ToggleModelSelector};
 
 use super::config_options::ConfigOptionsView;
 use super::entry_view_state::EntryViewState;
@@ -125,7 +124,6 @@ enum ThreadFeedback {
 
 #[derive(Debug)]
 pub(crate) enum ThreadError {
-    ZedPaymentRequired,
     DataRetentionConsentRequired,
     Refusal,
     AuthenticationRequired(SharedString),
@@ -135,10 +133,22 @@ pub(crate) enum ThreadError {
     ServerOverloaded {
         provider: SharedString,
     },
+    /// The server answered with an error of its own (HTTP 5xx) or took too
+    /// long: `message` is what it said.
+    ServerError {
+        provider: SharedString,
+        message: SharedString,
+    },
     PromptTooLarge,
     NoCredentials {
         provider: SharedString,
     },
+    /// The request never reached the server: no network, a refused
+    /// connection, a name that does not resolve.
+    Unreachable {
+        provider: SharedString,
+    },
+    /// The answer started and broke off, or could not be read.
     StreamError {
         provider: SharedString,
     },
@@ -154,13 +164,45 @@ pub(crate) enum ThreadError {
     },
     MaxOutputTokens,
     NoModelSelected,
+    /// The server does not know the address or the model (HTTP 404).
     ApiError {
+        provider: SharedString,
+    },
+    /// The provider refuses the request for lack of credit (HTTP 402 or a
+    /// billing error), whichever provider it is. `message` is the server's
+    /// own sentence: it says whether the balance is empty or only too low
+    /// for this request.
+    InsufficientCredit {
+        provider: SharedString,
+        message: SharedString,
+    },
+    /// The provider no longer serves the selected model.
+    ModelUnavailable {
         provider: SharedString,
     },
     Other {
         message: SharedString,
         acp_error_code: Option<SharedString>,
     },
+}
+
+impl ThreadError {
+    /// Refines an error with what only the chat knows: which provider the
+    /// selected model belongs to. The error itself carries a display name,
+    /// which two providers can share and a rename would break, so nothing is
+    /// decided on it.
+    pub(crate) fn for_provider(self, provider_id: Option<&LanguageModelProviderId>) -> Self {
+        match self {
+            // Unaligned answers 404 for a model it stopped serving; for any
+            // other provider a 404 can just as well be a wrong address.
+            Self::ApiError { provider }
+                if provider_id.is_some_and(|id| id.0.as_ref() == crate::UNALIGNED_PROVIDER_ID) =>
+            {
+                Self::ModelUnavailable { provider }
+            }
+            error => error,
+        }
+    }
 }
 
 impl From<anyhow::Error> for ThreadError {
@@ -199,12 +241,17 @@ impl From<&anyhow::Error> for ThreadError {
                     ProviderErrorCategory::Overloaded => Self::ServerOverloaded {
                         provider: provider.to_string().into(),
                     },
-                    ProviderErrorCategory::PromptTooLarge { .. } => Self::PromptTooLarge,
-                    ProviderErrorCategory::PaymentRequired
-                        if provider == &ZED_CLOUD_PROVIDER_NAME =>
-                    {
-                        Self::ZedPaymentRequired
+                    ProviderErrorCategory::InternalServer | ProviderErrorCategory::Timeout => {
+                        Self::ServerError {
+                            provider: provider.to_string().into(),
+                            message: message.clone().into(),
+                        }
                     }
+                    ProviderErrorCategory::PromptTooLarge { .. } => Self::PromptTooLarge,
+                    ProviderErrorCategory::PaymentRequired => Self::InsufficientCredit {
+                        provider: provider.to_string().into(),
+                        message: message.clone().into(),
+                    },
                     ProviderErrorCategory::Authentication => Self::AuthenticationFailed {
                         provider: provider.to_string().into(),
                     },
@@ -217,11 +264,8 @@ impl From<&anyhow::Error> for ThreadError {
                     },
                     ProviderErrorCategory::InvalidEncryptedContent
                     | ProviderErrorCategory::ContentPolicy
-                    | ProviderErrorCategory::PaymentRequired
                     | ProviderErrorCategory::InvalidRequest
                     | ProviderErrorCategory::Conflict
-                    | ProviderErrorCategory::Timeout
-                    | ProviderErrorCategory::InternalServer
                     | ProviderErrorCategory::Other => Self::ProviderRejection {
                         message: message.clone().into(),
                     },
@@ -229,13 +273,18 @@ impl From<&anyhow::Error> for ThreadError {
                 NoApiKey { provider } => Self::NoCredentials {
                     provider: provider.to_string().into(),
                 },
+                HttpSend { provider, .. } => Self::Unreachable {
+                    provider: provider.to_string().into(),
+                },
                 StreamEndedUnexpectedly { provider }
                 | ApiReadResponseError { provider, .. }
-                | DeserializeResponse { provider, .. }
-                | HttpSend { provider, .. } => Self::StreamError {
+                | DeserializeResponse { provider, .. } => Self::StreamError {
                     provider: provider.to_string().into(),
                 },
                 DataRetentionConsentRequired { .. } => Self::DataRetentionConsentRequired,
+                ModelUnavailable { provider, .. } => Self::ModelUnavailable {
+                    provider: provider.to_string().into(),
+                },
                 _ => {
                     let message: SharedString = format!("{:#}", error).into();
                     Self::Other {
@@ -289,6 +338,10 @@ impl ProfileProvider for Entity<agent::Thread> {
 
     fn profile_downgraded(&self, cx: &App) -> bool {
         self.read(cx).profile_was_downgraded()
+    }
+
+    fn has_open_folder(&self, cx: &App) -> bool {
+        self.read(cx).has_open_folder(cx)
     }
 }
 
@@ -1506,7 +1559,13 @@ impl ConversationView {
                             });
                         }
 
-                        if this.focus_handle.contains_focused(window, cx) {
+                        // `contains_focused` reads the last rendered frame: when the
+                        // chat connects before the panel drew one, it answers false
+                        // although this view holds the focus, and the focus would stay
+                        // on a handle that takes no text (the typed message was lost).
+                        if this.focus_handle.is_focused(window)
+                            || this.focus_handle.contains_focused(window, cx)
+                        {
                             current
                                 .read(cx)
                                 .message_editor
@@ -1711,11 +1770,12 @@ impl ConversationView {
                 })
             });
 
-        let agent_display_name = self
-            .agent_server_store
-            .read(cx)
-            .agent_display_name(&agent_id.clone())
-            .unwrap_or_else(|| agent_id.0.clone());
+        let agent_display_name = crate::agent_display_name(
+            &agent_id,
+            self.agent_server_store
+                .read(cx)
+                .agent_display_name(&agent_id),
+        );
 
         let agent_icon = self.agent.logo();
         let agent_icon_from_external_svg = self
@@ -2129,6 +2189,7 @@ impl ConversationView {
                         active.update(cx, |active, cx| {
                             active.message_queue.pause();
                             active.handle_thread_error(ThreadError::Refusal, cx);
+                            active.restore_refused_prompt(window, cx);
                         });
                     }
                     if !is_subagent {
@@ -2178,6 +2239,10 @@ impl ConversationView {
                     return;
                 }
 
+                if let Some(active) = self.thread_view(&session_id) {
+                    active.update(cx, |active, cx| active.recheck_connection_after_turn(cx));
+                }
+
                 let sent_queued_message = self.send_queued_after_confirmed_idle(window, cx);
 
                 // Skip notifying when a queued message was just auto-sent: the agent
@@ -2191,7 +2256,7 @@ impl ConversationView {
                         } else {
                             "New message"
                         },
-                        IconName::ZedAssistant,
+                        IconName::AppAssistant,
                         window,
                         cx,
                     );
@@ -2203,6 +2268,7 @@ impl ConversationView {
                     active.update(cx, |active, cx| {
                         active.handle_thread_error(error, cx);
                         active.thread_retry_status.take();
+                        active.restore_refused_prompt(window, cx);
                     });
                 }
                 if !is_subagent {
@@ -2305,11 +2371,13 @@ impl ConversationView {
                     let has_slash_completions =
                         !available_commands.is_empty() || !available_skills.is_empty();
 
-                    let agent_display_name = self
-                        .agent_server_store
-                        .read(cx)
-                        .agent_display_name(&self.agent.agent_id())
-                        .unwrap_or_else(|| self.agent.agent_id().0.to_string().into());
+                    let agent_id = self.agent.agent_id();
+                    let agent_display_name = crate::agent_display_name(
+                        &agent_id,
+                        self.agent_server_store
+                            .read(cx)
+                            .agent_display_name(&agent_id),
+                    );
 
                     let new_placeholder =
                         placeholder_text(agent_display_name.as_ref(), has_slash_completions);
@@ -2803,11 +2871,13 @@ impl ConversationView {
             .filter(|method| acp_thread::auth_methods::is_supported(method))
             .collect::<Vec<_>>();
 
-        let agent_display_name = self
-            .agent_server_store
-            .read(cx)
-            .agent_display_name(&self.agent.agent_id())
-            .unwrap_or_else(|| self.agent.agent_id().0);
+        let agent_id = self.agent.agent_id();
+        let agent_display_name = crate::agent_display_name(
+            &agent_id,
+            self.agent_server_store
+                .read(cx)
+                .agent_display_name(&agent_id),
+        );
 
         let show_fallback_description =
             auth_methods.len() > 1 && description.is_none() && pending_auth_method.is_none();
@@ -2943,11 +3013,13 @@ impl ConversationView {
         };
 
         let handlers = Self::request_elicitation_card_handlers(view);
-        let agent_display_name = self
-            .agent_server_store
-            .read(cx)
-            .agent_display_name(&self.agent.agent_id())
-            .unwrap_or_else(|| self.agent.agent_id().0);
+        let agent_id = self.agent.agent_id();
+        let agent_display_name = crate::agent_display_name(
+            &agent_id,
+            self.agent_server_store
+                .read(cx)
+                .agent_display_name(&agent_id),
+        );
 
         store
             .read(cx)
@@ -3337,7 +3409,11 @@ impl ConversationView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (heading_label, description_label) = (
-            format!("Upgrade {} to work with Zed", self.agent.agent_id()),
+            format!(
+                "Upgrade {} to work with {}",
+                self.agent.agent_id(),
+                branding::PRODUCT_NAME
+            ),
             if version.is_empty() {
                 format!(
                     "Currently using {}, which does not report a valid --version",
@@ -3787,8 +3863,8 @@ impl ConversationView {
     }
 
     fn current_model_name(&self, cx: &App) -> SharedString {
-        // For native agent (Zed Agent), use the specific model name (e.g., "Claude 3.5 Sonnet")
-        // For ACP agents, use the agent name (e.g., "Claude Agent", "Gemini CLI")
+        // For the built-in agent, use the specific model name (e.g. Claude Sonnet).
+        // For ACP agents, use the agent name (e.g. Claude Code, Gemini CLI).
         // This provides better clarity about what refused the request
         if self.as_native_connection(cx).is_some() {
             self.root_thread_view()
@@ -3797,8 +3873,14 @@ impl ConversationView {
                 .map(|model| model.name.clone())
                 .unwrap_or_else(|| SharedString::from("The model"))
         } else {
-            // ACP agent - use the agent name (e.g., "Claude Agent", "Gemini CLI")
-            self.agent.agent_id().0
+            // ACP agent - use the agent name (e.g., "Claude Code", "Gemini CLI")
+            let agent_id = self.agent.agent_id();
+            crate::agent_display_name(
+                &agent_id,
+                self.agent_server_store
+                    .read(cx)
+                    .agent_display_name(&agent_id),
+            )
         }
     }
 
@@ -3901,18 +3983,14 @@ fn native_available_skills(
 }
 
 fn placeholder_text(agent_name: &str, has_commands: bool) -> String {
-    if agent_name == agent::ZED_AGENT_ID.as_ref() {
-        format!(
-            "Message the {}, @ to include context, / for commands",
-            agent_name
-        )
+    // The built-in agent is the chat itself: no need to name it in the
+    // composer (its id is not a name the user knows).
+    if agent_name == agent::IDE_AGENT_ID.as_ref() {
+        "Ask anything. @ adds context, / runs a command.".to_string()
     } else if has_commands {
-        format!(
-            "Message {} — @ to include context, / for commands",
-            agent_name
-        )
+        format!("Message {}. @ adds context, / runs a command.", agent_name)
     } else {
-        format!("Message {} — @ to include context", agent_name)
+        format!("Message {}. @ adds context.", agent_name)
     }
 }
 
@@ -4087,6 +4165,7 @@ fn render_agent_markdown(
             wrap_button_visibility: markdown::WrapButtonVisibility::VisibleOnHover,
             border: false,
         })
+        .code_block_header(true)
         .image_resolver(move |dest_url, _cx| resolve_agent_image(dest_url, &worktree_roots))
         .on_url_click(move |text, window, cx| {
             thread_view::open_link(text, &workspace, window, cx);
@@ -4330,6 +4409,7 @@ pub(crate) mod tests {
     use crate::completion_provider::AgentContextSource;
     use crate::test_support::register_test_sidebar;
     use crate::thread_metadata_store::ThreadMetadataStore;
+    use language_model::IDE_CLOUD_PROVIDER_NAME;
 
     use super::*;
 
@@ -4488,11 +4568,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_payment_required_preserves_non_zed_provider_message() {
+    fn test_payment_required_is_insufficient_credit_for_any_provider() {
         for provider in [
+            language_model::LanguageModelProviderName::new("Unaligned"),
             language_model::LanguageModelProviderName::new("OpenRouter"),
             language_model::OPEN_AI_PROVIDER_NAME,
             language_model::ANTHROPIC_PROVIDER_NAME,
+            language_model::IDE_CLOUD_PROVIDER_NAME,
         ] {
             for status in [None, Some(http_client::StatusCode::PAYMENT_REQUIRED)] {
                 let provider_error = LanguageModelCompletionError::from_provider_response(
@@ -4509,32 +4591,145 @@ pub(crate) mod tests {
                 assert!(
                     matches!(
                         &error,
-                        ThreadError::ProviderRejection { message }
+                        ThreadError::InsufficientCredit { provider: name, message }
                             if message == "Insufficient credits. Add credits to your account."
+                                && name.as_ref() == provider.to_string().as_str()
                     ),
-                    "expected provider billing message for {provider}, got: {error:?}"
+                    "expected the server's own billing sentence for {provider}, got: {error:?}"
                 );
             }
         }
     }
 
     #[test]
-    fn test_payment_required_from_zed_uses_upgrade_prompt() {
-        let provider_error = LanguageModelCompletionError::from_provider_response(
-            ZED_CLOUD_PROVIDER_NAME,
-            Some(http_client::StatusCode::PAYMENT_REQUIRED),
-            None,
-            "Payment required".to_string(),
-            None,
-            ProviderErrorCategory::PaymentRequired,
-        );
+    fn test_not_found_is_model_unavailable_by_provider_id_not_by_name() {
+        let not_found = |name: &'static str| {
+            ThreadError::from(anyhow!(LanguageModelCompletionError::from_http_status(
+                language_model::LanguageModelProviderName::new(name),
+                http_client::StatusCode::NOT_FOUND,
+                "No such model".to_string(),
+                None,
+            )))
+        };
+        let unaligned = LanguageModelProviderId::new(crate::UNALIGNED_PROVIDER_ID);
+        let other = LanguageModelProviderId::new("acme-extension");
 
-        let error = ThreadError::from(anyhow!(provider_error));
+        // Whatever the error calls the provider, the id of the chat's model decides.
+        assert!(matches!(
+            not_found("Renamed").for_provider(Some(&unaligned)),
+            ThreadError::ModelUnavailable { provider } if provider == "Renamed"
+        ));
+        // A provider that merely shares Unaligned's display name is not Unaligned.
+        assert!(matches!(
+            not_found("Unaligned").for_provider(Some(&other)),
+            ThreadError::ApiError { provider } if provider == "Unaligned"
+        ));
+        assert!(matches!(
+            not_found("Unaligned").for_provider(None),
+            ThreadError::ApiError { .. }
+        ));
+    }
 
-        assert!(
-            matches!(error, ThreadError::ZedPaymentRequired),
-            "expected Zed upgrade prompt, got: {error:?}"
-        );
+    #[test]
+    fn test_server_and_network_failures_are_told_apart() {
+        let provider = language_model::LanguageModelProviderName::new("Unaligned");
+        let from_status = |status: u16, message: &str| {
+            ThreadError::from(anyhow!(LanguageModelCompletionError::from_http_status(
+                provider.clone(),
+                http_client::StatusCode::from_u16(status).expect("valid status"),
+                message.to_string(),
+                None,
+            )))
+        };
+
+        assert!(matches!(
+            from_status(500, "Internal server error."),
+            ThreadError::ServerError { message, .. } if message == "Internal server error."
+        ));
+        assert!(matches!(
+            from_status(504, "Gateway timeout"),
+            ThreadError::ServerError { .. }
+        ));
+        assert!(matches!(
+            from_status(503, "Busy"),
+            ThreadError::ServerOverloaded { .. }
+        ));
+        assert!(matches!(
+            from_status(429, "Slow down"),
+            ThreadError::RateLimitExceeded { .. }
+        ));
+        assert!(matches!(
+            from_status(401, "Missing or invalid credentials."),
+            ThreadError::AuthenticationFailed { .. }
+        ));
+        assert!(matches!(
+            ThreadError::from(anyhow!(LanguageModelCompletionError::HttpSend {
+                provider: provider.clone(),
+                host: "127.0.0.1".to_string(),
+                error: anyhow!("connection refused"),
+            })),
+            ThreadError::Unreachable { provider } if provider == "Unaligned"
+        ));
+        assert!(matches!(
+            ThreadError::from(anyhow!(
+                LanguageModelCompletionError::StreamEndedUnexpectedly {
+                    provider: provider.clone(),
+                }
+            )),
+            ThreadError::StreamError { .. }
+        ));
+    }
+
+    #[gpui::test]
+    async fn test_composer_is_shown_only_while_a_model_is_connected(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let (server, provider) = cx.update(|cx| {
+            let provider = language_model::LanguageModelRegistry::test(cx);
+            <dyn fs::Fs>::set_global(fs.clone(), cx);
+            let thread_store = cx.new(|cx| ThreadStore::new(cx));
+            (NativeAgentServer::new(fs, thread_store), provider)
+        });
+        let (conversation_view, cx) = setup_conversation_view(server, cx).await;
+        add_to_workspace_with_size(conversation_view.clone(), true, cx);
+        cx.run_until_parked();
+        let thread_view = active_thread(&conversation_view, cx);
+
+        // Connected: the chat names who answers and the composer is there.
+        thread_view.read_with(cx, |view, cx| {
+            let readiness = view.chat_readiness(cx);
+            assert!(
+                matches!(
+                    readiness,
+                    ChatReadiness::Ready {
+                        checking: false,
+                        ..
+                    }
+                ),
+                "expected a ready chat, got: {readiness:?}"
+            );
+            assert!(readiness.can_send());
+        });
+        assert!(cx.debug_bounds("chat-composer").is_some());
+        assert!(cx.debug_bounds("empty-state-suggestion-0").is_some());
+
+        // Nothing connected: the panel is the connection screen, and there is
+        // no composer under it that could not send.
+        cx.update(|_, cx| {
+            language_model::LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                use language_model::LanguageModelProvider as _;
+                registry.unregister_provider(provider.id(), cx);
+            });
+        });
+        cx.run_until_parked();
+        thread_view.read_with(cx, |view, cx| {
+            let readiness = view.chat_readiness(cx);
+            assert_eq!(readiness, ChatReadiness::NotConnected);
+            assert!(!readiness.can_send());
+        });
+        assert!(cx.debug_bounds("chat-composer").is_none());
+        assert!(cx.debug_bounds("empty-state-suggestion-0").is_none());
     }
 
     #[gpui::test]
@@ -6299,7 +6494,7 @@ pub(crate) mod tests {
             thread
                 .report_local_execution_error(
                     Arc::new(anyhow!(LanguageModelCompletionError::NoApiKey {
-                        provider: ZED_CLOUD_PROVIDER_NAME,
+                        provider: IDE_CLOUD_PROVIDER_NAME,
                     })),
                     cx,
                 )
@@ -6310,7 +6505,7 @@ pub(crate) mod tests {
             let Some(ThreadError::NoCredentials { provider }) = &view.thread_error else {
                 panic!("local provider error classification should be retained");
             };
-            assert_eq!(provider.to_string(), ZED_CLOUD_PROVIDER_NAME.to_string());
+            assert_eq!(provider.to_string(), IDE_CLOUD_PROVIDER_NAME.to_string());
             assert_eq!(view.message_queue.len(), 1);
             assert!(view.message_queue.auto_send_candidate(false).is_none());
         });
@@ -6751,9 +6946,25 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("dismiss-session-notice-0").is_none());
 
         assert!(cx.debug_bounds("dismiss-session-notice-1").is_some());
+        // The empty chat's starting points are tab stops too, and come first:
+        // tab past them to the notice's dismiss button.
+        let suggestion_count = [
+            "empty-state-suggestion-0",
+            "empty-state-suggestion-1",
+            "empty-state-suggestion-2",
+        ]
+        .into_iter()
+        .filter(|selector| cx.debug_bounds(selector).is_some())
+        .count();
+        assert!(
+            suggestion_count > 0,
+            "an empty chat offers a starting point"
+        );
         thread_view.update_in(cx, |view, window, cx| {
             view.focus_handle(cx).focus(window, cx);
-            window.focus_next(cx);
+            for _ in 0..=suggestion_count {
+                window.focus_next(cx);
+            }
         });
         cx.simulate_keystrokes("enter");
         cx.simulate_event(gpui::KeyUpEvent {
@@ -7598,7 +7809,7 @@ pub(crate) mod tests {
 
         assert_eq!(
             placeholder,
-            Some("Message Test — @ to include context, / for commands".to_string())
+            Some("Message Test. @ adds context, / runs a command.".to_string())
         );
 
         message_editor.update_in(cx, |editor, window, cx| {
@@ -7884,6 +8095,95 @@ pub(crate) mod tests {
                 "Expected refusal error to be set"
             );
         });
+
+        // The refusal took the prompt out of the chat: its words are back in
+        // the message box, ready to be reworded.
+        message_editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.text(cx), "Do something harmful");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_allow_all_tools_answers_the_request_and_stops_asking(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let tool_call_id = acp_v2::ToolCallId::new("allow-all-1");
+        let tool_call = acp_v1::ToolCall::new(
+            acp_v1::ToolCallId::new(tool_call_id.0.clone()),
+            "Run `cargo test`",
+        )
+        .kind(acp_v1::ToolKind::Execute);
+        let permission_options =
+            ToolPermissionContext::new(TerminalTool::NAME, vec!["cargo test".to_string()])
+                .build_permission_options();
+        let connection =
+            StubAgentConnection::new().with_permission_requests(HashMap::from_iter([(
+                tool_call_id.clone(),
+                permission_options,
+            )]));
+        connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::ToolCall(tool_call)]);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+        cx.update(|_window, cx| {
+            AgentSettings::override_global(
+                AgentSettings {
+                    notify_when_agent_waiting: NotifyWhenAgentWaiting::Never,
+                    ..AgentSettings::get_global(cx).clone()
+                },
+                cx,
+            );
+        });
+
+        let message_editor = message_editor(&conversation_view, cx);
+        message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("Run tests", window, cx);
+        });
+        let thread_view = active_thread(&conversation_view, cx);
+        thread_view.update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        let (fs, session_id, request_id, allow_once) = thread_view.read_with(cx, |view, cx| {
+            let thread = view.thread.read(cx);
+            let request = thread
+                .permission_request_for_tool(&tool_call_id)
+                .expect("the tool call waits for an answer");
+            let option = request
+                .legacy_options()
+                .and_then(|options| {
+                    options.first_option_of_kind(acp_v2::PermissionOptionKind::AllowOnce)
+                })
+                .expect("the request can be allowed once");
+            (
+                thread.project().read(cx).fs().clone(),
+                thread.session_id().clone(),
+                request.id,
+                SelectedPermissionOutcome::new(option.option_id.clone(), option.kind.clone()),
+            )
+        });
+        fs.create_dir(paths::settings_file().parent().unwrap())
+            .await
+            .unwrap();
+
+        thread_view.update_in(cx, |view, window, cx| {
+            view.allow_all_tools(session_id, request_id, allow_once, window, cx);
+        });
+        cx.run_until_parked();
+
+        conversation_view.read_with(cx, |conversation_view, cx| {
+            assert!(
+                conversation_view.pending_tool_call(cx).is_none(),
+                "Allow All answers the request it was clicked on"
+            );
+        });
+        // The settings file has comments: it is compared as text.
+        let settings = fs.load(paths::settings_file()).await.unwrap();
+        let settings: String = settings.split_whitespace().collect();
+        assert!(
+            settings.contains(r#""tool_permissions":{"default":"allow""#),
+            "Allow All makes \"allow\" the default answer of every tool, got: {settings}"
+        );
     }
 
     #[gpui::test]
@@ -10002,7 +10302,7 @@ pub(crate) mod tests {
         C: 'static + AgentConnection + Send + Clone,
     {
         fn logo(&self) -> ui::IconName {
-            ui::IconName::ZedAgent
+            ui::IconName::AppAgent
         }
 
         fn agent_id(&self) -> AgentId {
@@ -10078,7 +10378,7 @@ pub(crate) mod tests {
 
     impl AgentServer for FlakyAgentServer {
         fn logo(&self) -> ui::IconName {
-            ui::IconName::ZedAgent
+            ui::IconName::AppAgent
         }
 
         fn agent_id(&self) -> AgentId {
@@ -10225,7 +10525,7 @@ pub(crate) mod tests {
 
     impl AgentServer for SessionCreationRequestElicitationServer {
         fn logo(&self) -> ui::IconName {
-            ui::IconName::ZedAgent
+            ui::IconName::AppAgent
         }
 
         fn agent_id(&self) -> AgentId {
@@ -10357,7 +10657,7 @@ pub(crate) mod tests {
 
     impl AgentServer for ReleaseRequestElicitationServer {
         fn logo(&self) -> ui::IconName {
-            ui::IconName::ZedAgent
+            ui::IconName::AppAgent
         }
 
         fn agent_id(&self) -> AgentId {
@@ -17105,7 +17405,7 @@ pub(crate) mod tests {
             ),
             acp_v2::PermissionOption::new(
                 acp_v2::PermissionOptionId::new("allow_thread"),
-                "Allow for this thread",
+                "Allow for this chat",
                 acp_v2::PermissionOptionKind::AllowAlways,
             ),
             acp_v2::PermissionOption::new(
@@ -20064,7 +20364,7 @@ pub(crate) mod tests {
         cx.focus(&editor);
 
         editor.update_in(cx, |_editor, window, cx| {
-            window.dispatch_action(Box::new(zed_actions::editor::MoveUp), cx);
+            window.dispatch_action(Box::new(app_actions::editor::MoveUp), cx);
         });
         cx.run_until_parked();
 
@@ -20082,7 +20382,7 @@ pub(crate) mod tests {
 
         // With a non-empty editor, another MoveUp must not consume the queue.
         editor.update_in(cx, |_editor, window, cx| {
-            window.dispatch_action(Box::new(zed_actions::editor::MoveUp), cx);
+            window.dispatch_action(Box::new(app_actions::editor::MoveUp), cx);
         });
         cx.run_until_parked();
 

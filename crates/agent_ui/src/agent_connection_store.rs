@@ -479,7 +479,7 @@ mod tests {
 
     impl AgentServer for PendingAgentServer {
         fn logo(&self) -> ui::IconName {
-            ui::IconName::ZedAgent
+            ui::IconName::AppAgent
         }
 
         fn agent_id(&self) -> project::AgentId {

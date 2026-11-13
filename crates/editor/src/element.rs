@@ -1547,6 +1547,19 @@ impl EditorElement {
             ShowScrollbar::Always => true,
             ShowScrollbar::Never => return None,
         };
+        // The reasons above belong to the vertical bar and its markers. The
+        // horizontal bar would sit on the last visible line of code for as
+        // long as one of them holds, so it is drawn only while the pointer is
+        // on its track or its thumb is dragged, unless the user asked for
+        // bars that are always there.
+        let show_horizontal_scrollbar = match scrollbar_settings.show {
+            ShowScrollbar::Always => true,
+            _ => self
+                .editor
+                .read(cx)
+                .scroll_manager
+                .horizontal_scrollbar_visible(),
+        };
 
         // The horizontal scrollbar is usually slightly offset to align nicely with
         // indent guides. However, this offset is not needed if indent guides are
@@ -1573,6 +1586,7 @@ impl EditorElement {
             right_margin,
             editor_width,
             show_scrollbars,
+            show_horizontal_scrollbar,
             self.editor.read(cx).scroll_manager.active_scrollbar_state(),
             window,
         ))
@@ -3592,7 +3606,9 @@ impl EditorElement {
         let scale = window.scale_factor();
         let pattern_size =
             Self::spacer_pattern_period(f32::from(line_height) * scale, target_size * scale);
-        let color = cx.theme().colors().panel_background;
+        // A line colour, not a ground: a theme may give the panels and the
+        // editor the same ground (Unaligned Contrast), which hid the hatch.
+        let color = cx.theme().colors().border_variant;
         let background = pattern_slash(color, 2.0, pattern_size - 2.0);
 
         div()
@@ -5990,11 +6006,17 @@ impl EditorElement {
                 );
             }
 
-            let corner_radius = if EditorSettings::get_global(cx).rounded_selection {
+            let selection_radius = if EditorSettings::get_global(cx).rounded_selection {
                 0.15 * layout.position_map.line_height
             } else {
                 Pixels::ZERO
             };
+            // A radius computed by hand follows the theme's corner style:
+            // square selections in the Unaligned family, round in One. The
+            // overshoot past the end of a line (it shows that the line break
+            // is selected) stays the same in both.
+            let corner_radius = selection_radius * gpui::corner_radius_scale();
+            let selection_line_end_overshoot = selection_radius * 2.;
 
             for (player_color, selections) in &layout.selections {
                 for selection in selections.iter() {
@@ -6003,7 +6025,7 @@ impl EditorElement {
                         true,
                         player_color.selection,
                         corner_radius,
-                        corner_radius * 2.,
+                        selection_line_end_overshoot,
                         layout,
                         window,
                     );
@@ -6157,7 +6179,7 @@ impl EditorElement {
 
         for (scrollbar_layout, axis) in scrollbars_layout.iter_scrollbars() {
             let hitbox = &scrollbar_layout.hitbox;
-            if scrollbars_layout.visible {
+            if scrollbars_layout.visible_along(axis) {
                 let scrollbar_edges = match axis {
                     ScrollbarAxis::Horizontal => Edges {
                         top: Pixels::ZERO,
@@ -6276,6 +6298,10 @@ impl EditorElement {
                         .get_hovered_axis(window)
                         .filter(|_| !event.dragging())
                     {
+                        editor.scroll_manager.set_horizontal_scrollbar_hovered(
+                            axis == ScrollbarAxis::Horizontal,
+                            cx,
+                        );
                         if layout.thumb_hovered(&event.position) {
                             editor
                                 .scroll_manager
@@ -6286,6 +6312,9 @@ impl EditorElement {
 
                         editor.scroll_manager.show_scrollbars(window, cx);
                     } else {
+                        editor
+                            .scroll_manager
+                            .set_horizontal_scrollbar_hovered(false, cx);
                         editor.scroll_manager.reset_scrollbar_state(cx);
                     }
 
@@ -6485,7 +6514,14 @@ impl EditorElement {
                                     || (is_text_highlights && scrollbar_settings.selected_text)
                                     || (is_symbol_occurrences && scrollbar_settings.selected_symbol)
                                 {
-                                    let mut color = theme.status().info;
+                                    // Search markers take the colour of the matches
+                                    // they stand for, opaque so that a thin marker
+                                    // stays visible.
+                                    let mut color = if is_search_highlights {
+                                        theme.colors().search_match_background.opacity(1.)
+                                    } else {
+                                        theme.status().info
+                                    };
                                     if is_symbol_occurrences {
                                         color.fade_out(0.5);
                                     }
@@ -7227,7 +7263,7 @@ pub fn render_breadcrumb_text(
                                         .justify_between()
                                         .child(Label::new("Show Symbol Outline"))
                                         .child(ui::KeyBinding::for_action_in(
-                                            &zed_actions::outline::ToggleOutline,
+                                            &app_actions::outline::ToggleOutline,
                                             &focus_handle,
                                             cx,
                                         )),
@@ -7250,7 +7286,7 @@ pub fn render_breadcrumb_text(
                             move |_, window, cx| {
                                 if let Some((editor, callback)) = editor
                                     .upgrade()
-                                    .zip(zed_actions::outline::TOGGLE_OUTLINE.get())
+                                    .zip(app_actions::outline::TOGGLE_OUTLINE.get())
                                 {
                                     callback(editor.to_any_view(), window, cx);
                                 }
@@ -10028,7 +10064,8 @@ impl Element for EditorElement {
 
                     let visible_horizontal_scrollbar =
                         scrollbars_layout.as_ref().is_some_and(|scrollbars_layout| {
-                            scrollbars_layout.visible && scrollbars_layout.horizontal.is_some()
+                            scrollbars_layout.horizontal_visible
+                                && scrollbars_layout.horizontal.is_some()
                         });
 
                     self.editor.update(cx, |editor, _| {
@@ -10350,7 +10387,19 @@ impl Along for ScrollbarAxes {
 struct EditorScrollbars {
     pub vertical: Option<ScrollbarLayout>,
     pub horizontal: Option<ScrollbarLayout>,
+    /// Whether the vertical bar is drawn (and its width reserved).
     pub visible: bool,
+    /// Whether the horizontal bar is drawn.
+    pub horizontal_visible: bool,
+}
+
+impl EditorScrollbars {
+    fn visible_along(&self, axis: ScrollbarAxis) -> bool {
+        match axis {
+            ScrollbarAxis::Horizontal => self.horizontal_visible,
+            ScrollbarAxis::Vertical => self.visible,
+        }
+    }
 }
 
 impl EditorScrollbars {
@@ -10363,6 +10412,7 @@ impl EditorScrollbars {
         right_margin: Pixels,
         editor_width: Pixels,
         show_scrollbars: bool,
+        show_horizontal_scrollbar: bool,
         scrollbar_state: Option<&ActiveScrollbarState>,
         window: &mut Window,
     ) -> Self {
@@ -10407,7 +10457,10 @@ impl EditorScrollbars {
                         glyph_grid_cell.along(axis),
                         content_offset.along(axis),
                         scroll_position.along(axis),
-                        show_scrollbars,
+                        match axis {
+                            ScrollbarAxis::Horizontal => show_horizontal_scrollbar,
+                            ScrollbarAxis::Vertical => show_scrollbars,
+                        },
                         axis,
                     )
                     .with_thumb_state(
@@ -10420,6 +10473,7 @@ impl EditorScrollbars {
             vertical: create_scrollbar_layout(ScrollbarAxis::Vertical),
             horizontal: create_scrollbar_layout(ScrollbarAxis::Horizontal),
             visible: show_scrollbars,
+            horizontal_visible: show_horizontal_scrollbar,
         }
     }
 

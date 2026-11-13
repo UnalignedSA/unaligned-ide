@@ -13,6 +13,7 @@ use acp_thread::MentionUri;
 use agent::ThreadStore;
 use agent_client_protocol::v2::schema as acp_v2;
 use anyhow::{Result, anyhow};
+use app_actions::agent::{Chat, PasteRaw};
 use base64::Engine as _;
 use editor::{
     Addon, AnchorRangeExt, ContextMenuOptions, Editor, EditorElement, EditorEvent, EditorMode,
@@ -43,7 +44,6 @@ use ui::{ContextMenu, prelude::*};
 use util::paths::PathStyle;
 use util::{ResultExt, debug_panic};
 use workspace::{CollaboratorId, Workspace};
-use zed_actions::agent::{Chat, PasteRaw};
 
 #[derive(Default)]
 pub struct SessionCapabilities {
@@ -214,6 +214,8 @@ pub struct MessageEditor {
     local_commands: SharedLocalCommands,
     agent_id: AgentId,
     thread_store: Option<Entity<ThreadStore>>,
+    /// Sent messages sit on a raised block; the composer on the editor colour.
+    on_raised_surface: bool,
     _subscriptions: Vec<Subscription>,
     _parse_slash_command_task: Task<()>,
 }
@@ -631,6 +633,7 @@ impl MessageEditor {
             agent_id,
             thread_store,
             _subscriptions: subscriptions,
+            on_raised_surface: false,
             _parse_slash_command_task: Task::ready(()),
         }
     }
@@ -1945,6 +1948,27 @@ impl MessageEditor {
         });
     }
 
+    /// Paints the editor on the raised ground, to match the box it sits in:
+    /// the composer, or the block a sent message is shown in.
+    pub fn set_on_raised_surface(&mut self, raised: bool, cx: &mut Context<Self>) {
+        self.on_raised_surface = raised;
+        cx.notify();
+    }
+
+    /// The height of one line of a message being written or shown: what the
+    /// composer measures its minimum and maximum heights in.
+    pub fn line_height(_window: &Window, cx: &App) -> Pixels {
+        Self::font_size(cx) * MESSAGE_LINE_HEIGHT
+    }
+
+    /// Body text (14px at the default size) in the chat's own scale: the
+    /// agent UI font size is the chat's rem, as for the answers.
+    fn font_size(cx: &App) -> Pixels {
+        ui::TextSize::Default
+            .rems(cx)
+            .to_pixels(ThemeSettings::get_global(cx).agent_ui_font_size(cx))
+    }
+
     pub fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if text.is_empty() {
             return;
@@ -2059,6 +2083,9 @@ impl MessageEditor {
     }
 }
 
+/// Line height of message text, relative to its font size.
+const MESSAGE_LINE_HEIGHT: f32 = 1.5;
+
 impl Focusable for MessageEditor {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.editor.focus_handle(cx)
@@ -2081,21 +2108,27 @@ impl Render for MessageEditor {
             .child({
                 let settings = ThemeSettings::get_global(cx);
 
+                // What the user writes is prose, like the answers: the chat's
+                // body type (UI font), not the code font.
                 let text_style = TextStyle {
                     color: cx.theme().colors().text,
-                    font_family: settings.agent_buffer_font_family().clone(),
-                    font_fallbacks: settings.buffer_font.fallbacks.clone(),
-                    font_features: settings.buffer_font.features.clone(),
-                    font_size: settings.agent_buffer_font_size(cx).into(),
-                    font_weight: settings.buffer_font.weight,
-                    line_height: relative(settings.buffer_line_height.value()),
+                    font_family: settings.agent_ui_font_family().clone(),
+                    font_fallbacks: settings.ui_font.fallbacks.clone(),
+                    font_features: settings.ui_font.features.clone(),
+                    font_size: Self::font_size(cx).into(),
+                    font_weight: settings.ui_font.weight,
+                    line_height: relative(MESSAGE_LINE_HEIGHT),
                     ..Default::default()
                 };
 
                 EditorElement::new(
                     &self.editor,
                     EditorStyle {
-                        background: cx.theme().colors().editor_background,
+                        background: if self.on_raised_surface {
+                            cx.theme().colors().elevated_surface_background
+                        } else {
+                            cx.theme().colors().editor_background
+                        },
                         local_player: cx.theme().players().local(),
                         text: text_style,
                         syntax: cx.theme().syntax().clone(),
@@ -2722,7 +2755,7 @@ mod tests {
         fs.insert_tree(
             "/test",
             json!({
-                ".zed": {
+                ".unaligned": {
                     "tasks.json": r#"[{"label": "test", "command": "echo"}]"#
                 },
                 "src": {

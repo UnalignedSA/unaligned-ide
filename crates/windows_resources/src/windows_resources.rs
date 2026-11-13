@@ -7,7 +7,7 @@
 use std::process::Command;
 
 fn git_sha() -> Option<String> {
-    if let Ok(sha) = std::env::var("ZED_COMMIT_SHA") {
+    if let Ok(sha) = std::env::var("IDE_COMMIT_SHA") {
         return Some(sha);
     }
 
@@ -38,17 +38,32 @@ fn product_version() -> String {
     format!("{pkg_version}+{metadata}")
 }
 
-const ICON_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../zed/resources/windows");
+const ICON_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ide/resources/windows");
 const MANIFEST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/manifest.xml");
 
 pub fn compile(manifest: bool) -> Result<(), Box<dyn std::error::Error>> {
     let channel = option_env!("RELEASE_CHANNEL").unwrap_or("dev");
     let (icon_filename, product_name) = match channel {
-        "stable" => ("app-icon.ico", "Zed"),
-        "preview" => ("app-icon-preview.ico", "Zed Preview"),
-        "nightly" => ("app-icon-nightly.ico", "Zed Nightly"),
-        _ => ("app-icon-dev.ico", "Zed Dev"),
+        "stable" => ("app-icon.ico", branding::PRODUCT_NAME.to_string()),
+        "preview" => (
+            "app-icon-preview.ico",
+            format!("{} Preview", branding::PRODUCT_NAME),
+        ),
+        "nightly" => (
+            "app-icon-nightly.ico",
+            format!("{} Nightly", branding::PRODUCT_NAME),
+        ),
+        _ => (
+            "app-icon-dev.ico",
+            format!("{} Dev", branding::PRODUCT_NAME),
+        ),
     };
+    let company_name = branding::PUBLISHER;
+    // Upstream's notice stays (the licences ask for it); the fork adds its own line.
+    let legal_copyright = format!(
+        "Copyright 2022 - 2025 Zed Industries, Inc. Modified by the {} contributors since 2026.",
+        branding::PRODUCT_NAME
+    );
     let icon = std::path::PathBuf::from(ICON_DIR).join(icon_filename);
     let icon_escaped = icon.to_string_lossy().replace('\\', "\\\\");
 
@@ -100,8 +115,8 @@ BEGIN
             VALUE "FileVersion", "{pkg_version}\0"
             VALUE "ProductName", "{product_name}\0"
             VALUE "ProductVersion", "{product_version}\0"
-            VALUE "CompanyName", "Zed Industries, Inc.\0"
-            VALUE "LegalCopyright", "Copyright 2022 - 2025 Zed Industries, Inc.\0"
+            VALUE "CompanyName", "{company_name}\0"
+            VALUE "LegalCopyright", "{legal_copyright}\0"
         END
     END
     BLOCK "VarFileInfo"
@@ -113,10 +128,10 @@ END
     );
 
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
-    let rc_path = out_dir.join("zed_resources.rc");
+    let rc_path = out_dir.join("app_resources.rc");
     std::fs::write(&rc_path, rc_content)?;
 
-    if let Ok(toolkit_path) = std::env::var("ZED_RC_TOOLKIT_PATH") {
+    if let Ok(toolkit_path) = std::env::var("IDE_RC_TOOLKIT_PATH") {
         let rc_exe = std::path::Path::new(&toolkit_path).join("rc.exe");
         unsafe {
             std::env::set_var("RC", rc_exe);

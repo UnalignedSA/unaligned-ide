@@ -223,7 +223,7 @@ impl AgentServer for CustomAgentServer {
 
         if is_registry_agent {
             if let Some(registry_store) = project::AgentRegistryStore::try_global(cx) {
-                registry_store.update(cx, |store, cx| store.refresh_if_stale(cx));
+                registry_store.update(cx, |store, cx| store.refresh_before_agent_start(cx));
             }
         }
 
@@ -245,7 +245,7 @@ impl AgentServer for CustomAgentServer {
                     }
                 }
                 GEMINI_ID => {
-                    extra_env.insert("SURFACE".to_owned(), "zed".to_owned());
+                    extra_env.insert("SURFACE".to_owned(), branding::APP_ID.to_owned());
                 }
                 _ => {}
             }
@@ -295,7 +295,7 @@ fn api_key_for_gemini_cli(cx: &mut App) -> Task<Result<String>> {
     if let Some(key) = env_var.value {
         return Task::ready(Ok(key));
     }
-    let credentials_provider = zed_credentials_provider::global(cx);
+    let credentials_provider = app_credentials_provider::global(cx);
     let api_url = GOOGLE_AI_API_URL.to_string();
     cx.spawn(async move |cx| {
         Ok(

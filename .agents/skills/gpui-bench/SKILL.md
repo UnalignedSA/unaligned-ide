@@ -368,13 +368,13 @@ Run `dsymutil` on the exact executable printed by Cargo:
 dsymutil target/release-fast/deps/<target>-<hash>
 ```
 
-Prefer the `zed-bench` Instruments template, which combines Time Profiler data, CPU counters, and hang or microhang tables. Fall back to `Time Profiler` if it is unavailable:
+Record with the `Time Profiler` Instruments template. A custom template that also records CPU counters and hang or microhang tables is better when one is installed on the machine:
 
 ```sh
-rm -rf /tmp/zed-profiles/<name>.trace
+rm -rf /tmp/gpui-profiles/<name>.trace
 xctrace record \
-  --template "zed-bench" \
-  --output /tmp/zed-profiles/<name>.trace \
+  --template "Time Profiler" \
+  --output /tmp/gpui-profiles/<name>.trace \
   --launch -- target/release-fast/deps/<target>-<hash> \
   --bench <workload-filter> --profile-time 10
 ```

@@ -6,7 +6,10 @@ use gpui::{
 };
 use smallvec::SmallVec;
 
-use crate::{DynamicSpacing, ElevationIndex, prelude::*};
+use crate::{
+    DynamicSpacing, ElevationIndex, accent_fill, accent_fill_hover, focus_ring, on_accent,
+    prelude::*,
+};
 
 /// A trait for buttons that can be Selected. Enables setting the [`ButtonStyle`] of a button when it is selected.
 pub trait SelectableButton: Toggleable {
@@ -69,29 +72,46 @@ pub enum TintColor {
 }
 
 impl TintColor {
+    /// The status colour behind a non-accent tint.
+    fn status_color(self, cx: &App) -> Hsla {
+        match self {
+            TintColor::Accent => accent_fill(cx),
+            TintColor::Error => cx.theme().status().error,
+            TintColor::Warning => cx.theme().status().warning,
+            TintColor::Success => cx.theme().status().success,
+        }
+    }
+
     fn button_like_style(self, cx: &mut App) -> ButtonLikeStyles {
         match self {
+            // The primary action: the only solid accent in the interface.
             TintColor::Accent => ButtonLikeStyles {
-                background: cx.theme().status().info_background,
-                border_color: cx.theme().status().info_border,
+                background: accent_fill(cx),
+                border_color: accent_fill(cx),
+                label_color: on_accent(cx),
+                icon_color: on_accent(cx),
+            },
+            // Destructive and status actions are outlined in their colour, never filled.
+            tint => ButtonLikeStyles {
+                background: transparent_black(),
+                border_color: tint.status_color(cx).opacity(0.6),
                 label_color: cx.theme().colors().text,
                 icon_color: cx.theme().colors().text,
             },
-            TintColor::Error => ButtonLikeStyles {
-                background: cx.theme().status().error_background,
-                border_color: cx.theme().status().error_border,
-                label_color: cx.theme().colors().text,
-                icon_color: cx.theme().colors().text,
+        }
+    }
+
+    fn button_like_hover_style(self, cx: &mut App) -> ButtonLikeStyles {
+        match self {
+            TintColor::Accent => ButtonLikeStyles {
+                background: accent_fill_hover(cx),
+                border_color: accent_fill_hover(cx),
+                label_color: on_accent(cx),
+                icon_color: on_accent(cx),
             },
-            TintColor::Warning => ButtonLikeStyles {
-                background: cx.theme().status().warning_background,
-                border_color: cx.theme().status().warning_border,
-                label_color: cx.theme().colors().text,
-                icon_color: cx.theme().colors().text,
-            },
-            TintColor::Success => ButtonLikeStyles {
-                background: cx.theme().status().success_background,
-                border_color: cx.theme().status().success_border,
+            tint => ButtonLikeStyles {
+                background: tint.status_color(cx).opacity(0.1),
+                border_color: tint.status_color(cx),
                 label_color: cx.theme().colors().text,
                 icon_color: cx.theme().colors().text,
             },
@@ -221,9 +241,10 @@ impl ButtonStyle {
                 icon_color: Color::Default.color(cx),
             },
             ButtonStyle::Tinted(tint) => tint.button_like_style(cx),
+            // Secondary action: a 1px strong line on a transparent ground.
             ButtonStyle::Outlined => ButtonLikeStyles {
-                background: element_bg_from_elevation(elevation, cx),
-                border_color: cx.theme().colors().border_variant,
+                background: transparent_black(),
+                border_color: cx.theme().colors().border_strong,
                 label_color: Color::Default.color(cx),
                 icon_color: Color::Default.color(cx),
             },
@@ -256,30 +277,21 @@ impl ButtonStyle {
 
     pub(crate) fn hovered(
         self,
-        elevation: Option<ElevationIndex>,
+        _elevation: Option<ElevationIndex>,
         cx: &mut App,
     ) -> ButtonLikeStyles {
         match self {
-            ButtonStyle::Filled => {
-                let mut filled_background = element_bg_from_elevation(elevation, cx);
-                filled_background.fade_out(0.5);
-
-                ButtonLikeStyles {
-                    background: filled_background,
-                    border_color: transparent_black(),
-                    label_color: Color::Default.color(cx),
-                    icon_color: Color::Default.color(cx),
-                }
-            }
-            ButtonStyle::Tinted(tint) => {
-                let mut styles = tint.button_like_style(cx);
-                let theme = cx.theme();
-                styles.background = theme.darken(styles.background, 0.05, 0.2);
-                styles
-            }
+            ButtonStyle::Filled => ButtonLikeStyles {
+                background: cx.theme().colors().element_hover,
+                border_color: transparent_black(),
+                label_color: Color::Default.color(cx),
+                icon_color: Color::Default.color(cx),
+            },
+            ButtonStyle::Tinted(tint) => tint.button_like_hover_style(cx),
+            // The line lightens, the ground stays empty.
             ButtonStyle::Outlined => ButtonLikeStyles {
-                background: cx.theme().colors().ghost_element_hover,
-                border_color: cx.theme().colors().border,
+                background: transparent_black(),
+                border_color: cx.theme().colors().border_focused,
                 label_color: Color::Default.color(cx),
                 icon_color: Color::Default.color(cx),
             },
@@ -320,7 +332,12 @@ impl ButtonStyle {
                 label_color: Color::Default.color(cx),
                 icon_color: Color::Default.color(cx),
             },
-            ButtonStyle::Tinted(tint) => tint.button_like_style(cx),
+            ButtonStyle::Tinted(TintColor::Accent) => TintColor::Accent.button_like_style(cx),
+            ButtonStyle::Tinted(tint) => {
+                let mut styles = tint.button_like_hover_style(cx);
+                styles.background = tint.status_color(cx).opacity(0.16);
+                styles
+            }
             ButtonStyle::Subtle => ButtonLikeStyles {
                 background: cx.theme().colors().ghost_element_active,
                 border_color: transparent_black(),
@@ -328,14 +345,14 @@ impl ButtonStyle {
                 icon_color: Color::Default.color(cx),
             },
             ButtonStyle::Outlined => ButtonLikeStyles {
-                background: cx.theme().colors().element_active,
-                border_color: cx.theme().colors().border_variant,
+                background: cx.theme().colors().ghost_element_hover,
+                border_color: cx.theme().colors().border_focused,
                 label_color: Color::Default.color(cx),
                 icon_color: Color::Default.color(cx),
             },
             ButtonStyle::OutlinedGhost => ButtonLikeStyles {
-                background: transparent_black(),
-                border_color: cx.theme().colors().border_variant,
+                background: cx.theme().colors().ghost_element_active,
+                border_color: cx.theme().colors().border,
                 label_color: Color::Default.color(cx),
                 icon_color: Color::Default.color(cx),
             },
@@ -353,6 +370,16 @@ impl ButtonStyle {
                 // TODO: These are not great
                 icon_color: Color::Muted.color(cx),
             },
+        }
+    }
+
+    /// The selected state of a toggle: one neutral step up, never a tint.
+    pub(crate) fn selected_neutral(cx: &mut App) -> ButtonLikeStyles {
+        ButtonLikeStyles {
+            background: cx.theme().colors().element_selected,
+            border_color: transparent_black(),
+            label_color: Color::Default.color(cx),
+            icon_color: Color::Default.color(cx),
         }
     }
 
@@ -374,7 +401,7 @@ impl ButtonStyle {
             },
             ButtonStyle::Outlined => ButtonLikeStyles {
                 background: cx.theme().colors().ghost_element_background,
-                border_color: cx.theme().colors().border,
+                border_color: cx.theme().colors().border_strong,
                 label_color: Color::Default.color(cx),
                 icon_color: Color::Default.color(cx),
             },
@@ -399,6 +426,19 @@ impl ButtonStyle {
         }
     }
 
+    /// A primary action that cannot be taken: a neutral block, no accent left
+    /// in it and no opacity, so it never reads as a muddy red.
+    pub(crate) fn disabled_primary(cx: &App) -> ButtonLikeStyles {
+        ButtonLikeStyles {
+            background: cx.theme().colors().element_disabled,
+            // The line keeps the button's outline on grounds that share the
+            // colour of `element_disabled`.
+            border_color: cx.theme().colors().border_disabled,
+            label_color: cx.theme().colors().text_disabled,
+            icon_color: cx.theme().colors().text_disabled,
+        }
+    }
+
     #[allow(unused)]
     pub(crate) fn disabled(
         self,
@@ -413,6 +453,7 @@ impl ButtonStyle {
                 label_color: Color::Disabled.color(cx),
                 icon_color: Color::Disabled.color(cx),
             },
+            ButtonStyle::Tinted(TintColor::Accent) => Self::disabled_primary(cx),
             ButtonStyle::Tinted(tint) => tint.button_like_style(cx),
             ButtonStyle::Subtle => ButtonLikeStyles {
                 background: cx.theme().colors().ghost_element_disabled,
@@ -465,12 +506,20 @@ impl ButtonSize {
     pub fn rems(self) -> Rems {
         match self {
             ButtonSize::Large => rems_from_px(32_f32),
-            ButtonSize::Medium => rems_from_px(28_f32),
+            ButtonSize::Medium => rems_from_px(26_f32),
             ButtonSize::Default => rems_from_px(22_f32),
             ButtonSize::Compact => rems_from_px(18_f32),
             ButtonSize::None => rems_from_px(16_f32),
         }
     }
+}
+
+/// A state a button is drawn in without the pointer or the keyboard being
+/// there, so the component gallery can show it in a still picture.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum ButtonPreviewState {
+    Hovered,
+    Focused,
 }
 
 /// A button-like element that can be used to create a custom button when
@@ -512,6 +561,11 @@ pub struct ButtonLike {
     )>,
     children: SmallVec<[AnyElement; 2]>,
     focus_handle: Option<FocusHandle>,
+    pub(super) preview_state: Option<ButtonPreviewState>,
+    /// Set by [`Button`](super::Button) and [`IconButton`](super::IconButton), whose
+    /// label and icon take `Color::Disabled` themselves: the disabled state is then
+    /// drawn from the theme's token alone, with no opacity on top of it.
+    pub(super) disabled_content_uses_token: bool,
 }
 
 impl ButtonLike {
@@ -545,8 +599,44 @@ impl ButtonLike {
             a11y_actions: Vec::new(),
             layer: None,
             tab_index: None,
+            disabled_content_uses_token: false,
             focus_handle: None,
+            preview_state: None,
         }
+    }
+
+    /// Draws the button as if it were hovered or focused. For previews only.
+    pub(crate) fn preview_state(mut self, state: ButtonPreviewState) -> Self {
+        self.preview_state = Some(state);
+        self
+    }
+
+    /// Whether this is the filled accent button, the primary action of a view.
+    pub(super) fn is_primary(&self) -> bool {
+        !self.selected_is_neutral()
+            && self.effective_style() == ButtonStyle::Tinted(TintColor::Accent)
+    }
+
+    /// Whether the selected state is drawn as the neutral `element_selected`
+    /// step. An accent tint asked for a selected toggle is read the same way:
+    /// the accent is kept for the primary action.
+    pub(super) fn selected_is_neutral(&self) -> bool {
+        self.selected
+            && match self.selected_style {
+                None => !matches!(
+                    self.style,
+                    ButtonStyle::Transparent | ButtonStyle::Tinted(_)
+                ),
+                Some(ButtonStyle::Tinted(TintColor::Accent)) => true,
+                Some(_) => false,
+            }
+    }
+
+    /// The style in effect once the selected state is taken into account.
+    pub(super) fn effective_style(&self) -> ButtonStyle {
+        self.selected_style
+            .filter(|_| self.selected)
+            .unwrap_or(self.style)
     }
 
     pub fn new_rounded_left(id: impl Into<ElementId>) -> Self {
@@ -755,19 +845,44 @@ impl ParentElement for ButtonLike {
 
 impl RenderOnce for ButtonLike {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let style = self
-            .selected_style
-            .filter(|_| self.selected)
-            .unwrap_or(self.style);
+        let selected_neutral = self.selected_is_neutral();
+        // A neutral selected state keeps the shape (and border) of the base style.
+        let style = if selected_neutral {
+            self.style
+        } else {
+            self.effective_style()
+        };
 
-        let is_outlined = matches!(
-            self.style,
-            ButtonStyle::Outlined | ButtonStyle::OutlinedGhost | ButtonStyle::OutlinedCustom(_)
+        let has_border = matches!(
+            style,
+            ButtonStyle::Outlined
+                | ButtonStyle::OutlinedGhost
+                | ButtonStyle::OutlinedCustom(_)
+                | ButtonStyle::Tinted(_)
         );
 
-        let active_background = self
-            .active_background
-            .unwrap_or_else(|| style.active(cx).background);
+        let disabled_primary = self.disabled && self.is_primary();
+
+        let mut enabled_style = style.enabled(self.layer, cx);
+        let mut hovered_style = style.hovered(self.layer, cx);
+        let mut active_style = style.active(cx);
+        if selected_neutral {
+            let selected = ButtonStyle::selected_neutral(cx);
+            enabled_style.background = selected.background;
+            hovered_style.background = selected.background;
+            active_style.background = cx.theme().colors().element_active;
+        }
+        if disabled_primary {
+            enabled_style = ButtonStyle::disabled_primary(cx);
+        } else if !self.disabled && self.preview_state == Some(ButtonPreviewState::Hovered) {
+            enabled_style.background = self.hover_background.unwrap_or(hovered_style.background);
+            enabled_style.border_color = hovered_style.border_color;
+        }
+
+        let active_background = self.active_background.unwrap_or(active_style.background);
+        let focus_ring = focus_ring(cx);
+        let preview_focused =
+            !self.disabled && self.preview_state == Some(ButtonPreviewState::Focused);
 
         self.base
             .h_flex()
@@ -806,7 +921,7 @@ impl RenderOnce for ButtonLike {
             .when_some(self.width, |this, width| {
                 this.w(width).justify_center().text_center()
             })
-            .when(is_outlined, |this| this.border_1())
+            .when(has_border, |this| this.border_1())
             .when_some(self.rounding, |this, rounding| {
                 this.when(rounding.top_left, |this| this.rounded_tl_sm())
                     .when(rounding.top_right, |this| this.rounded_tr_sm())
@@ -815,15 +930,29 @@ impl RenderOnce for ButtonLike {
             })
             .gap(DynamicSpacing::Base04.rems(cx))
             .map(|this| match self.size {
-                ButtonSize::Large | ButtonSize::Medium => this.px(DynamicSpacing::Base08.rems(cx)),
+                ButtonSize::Large => this.px(DynamicSpacing::Base12.rems(cx)),
+                ButtonSize::Medium => this.px(DynamicSpacing::Base08.rems(cx)),
                 ButtonSize::Default | ButtonSize::Compact => {
                     this.px(DynamicSpacing::Base04.rems(cx))
                 }
                 ButtonSize::None => this.px_px(),
             })
-            .border_color(style.enabled(self.layer, cx).border_color)
-            .bg(style.enabled(self.layer, cx).background)
+            .border_color(enabled_style.border_color)
+            .bg(enabled_style.background)
+            .when(preview_focused, |this| this.shadow(focus_ring.clone()))
             .when(self.disabled, |this| {
+                let this = if disabled_primary {
+                    // A dimmed accent is a muddy colour: the disabled primary
+                    // is a neutral block, and its content takes the disabled colour.
+                    this.text_color(enabled_style.label_color)
+                } else if self.disabled_content_uses_token {
+                    // The label and the icon are drawn in `text.disabled`, the contrast
+                    // the theme chose: dimming them again would fall below it.
+                    this
+                } else {
+                    // Content this button knows nothing about: the same button, dimmed.
+                    this.opacity(0.5)
+                };
                 if self.cursor_style == CursorStyle::PointingHand {
                     this.cursor_not_allowed()
                 } else {
@@ -831,22 +960,19 @@ impl RenderOnce for ButtonLike {
                 }
             })
             .when(!self.disabled, |this| {
-                let hovered_style = style.hovered(self.layer, cx);
                 let hover_background = self.hover_background.unwrap_or(hovered_style.background);
-                let focus_color = |refinement: StyleRefinement| refinement.bg(hover_background);
+                let hover_border = hovered_style.border_color;
+                let active_border = active_style.border_color;
 
                 this.cursor(self.cursor_style)
-                    .hover(focus_color)
-                    .map(|this| {
-                        if is_outlined {
-                            this.focus_visible(|s| {
-                                s.border_color(cx.theme().colors().border_focused)
-                            })
-                        } else {
-                            this.focus_visible(focus_color)
-                        }
+                    .hover(move |refinement: StyleRefinement| {
+                        refinement.bg(hover_background).border_color(hover_border)
                     })
-                    .active(|active| active.bg(active_background))
+                    .focus_visible(move |mut refinement: StyleRefinement| {
+                        refinement.box_shadow = Some(focus_ring);
+                        refinement
+                    })
+                    .active(move |active| active.bg(active_background).border_color(active_border))
             })
             .when_some(
                 self.on_right_click.filter(|_| !self.disabled),

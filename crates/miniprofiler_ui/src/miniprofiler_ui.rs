@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use app_actions::OpenPerformanceProfiler;
 use command_palette_hooks::CommandPaletteFilter;
 use gpui::{
     App, AppContext, ClipboardItem, Context, Div, Entity, Hsla, InteractiveElement,
@@ -26,7 +27,6 @@ use workspace::{
         WithScrollbar, h_flex, v_flex,
     },
 };
-use zed_actions::OpenPerformanceProfiler;
 
 const NANOS_PER_MS: u128 = Duration::from_millis(1).as_nanos();
 const VISIBLE_WINDOW_NANOS: u128 = Duration::from_secs(10).as_nanos();

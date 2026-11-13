@@ -1,9 +1,9 @@
 use std::rc::Rc;
 
+use app_actions::toast;
 use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement};
 use ui::{Tooltip, prelude::*};
 use workspace::{ToastAction, ToastView};
-use zed_actions::toast;
 
 #[derive(RegisterComponent)]
 pub struct StatusToast {
@@ -80,7 +80,9 @@ impl Render for StatusToast {
 
         h_flex()
             .id("status-toast")
-            .elevation_3(cx)
+            // Flat: a raised surface inside a 1px line, no shadow.
+            .border_1()
+            .border_color(cx.theme().colors().text_disabled.opacity(0.5))
             .gap_2()
             .py_1p5()
             .pl_2p5()
@@ -92,10 +94,13 @@ impl Render for StatusToast {
                 }
             })
             .flex_none()
-            .bg(cx.theme().colors().surface_background)
-            .shadow_lg()
+            .bg(cx.theme().colors().elevated_surface_background)
             .when_some(self.icon.clone(), |this, icon| this.child(icon))
-            .child(Label::new(self.text.clone()).color(Color::Default))
+            .child(
+                Label::new(self.text.clone())
+                    .size(LabelSize::Small)
+                    .color(Color::Default),
+            )
             .when_some(self.action.as_ref(), |this, action| {
                 this.child(
                     Button::new(action.id.clone(), action.label.clone())
@@ -103,7 +108,8 @@ impl Render for StatusToast {
                             action.label.clone(),
                             &toast::RunAction,
                         ))
-                        .color(Color::Muted)
+                        .style(ButtonStyle::Outlined)
+                        .label_size(LabelSize::Small)
                         .when_some(action.on_click.clone(), |el, handler| {
                             el.on_click(move |_click_event, window, cx| handler(window, cx))
                         }),
@@ -178,7 +184,7 @@ impl Component for StatusToast {
             },
         );
 
-        let success_example = StatusToast::new("Pushed 4 changes to `zed/main`", cx, |this, _| {
+        let success_example = StatusToast::new("Pushed 4 changes to `app/main`", cx, |this, _| {
             this.icon(
                 Icon::new(IconName::Check)
                     .size(IconSize::Small)
@@ -187,7 +193,7 @@ impl Component for StatusToast {
         });
 
         let error_example = StatusToast::new(
-            "git push: Couldn't find remote origin `iamnbutler/zed`",
+            "git push: Couldn't find remote origin `iamnbutler/app`",
             cx,
             |this, _cx| {
                 this.icon(
@@ -209,7 +215,7 @@ impl Component for StatusToast {
         });
 
         let pr_example =
-            StatusToast::new("`zed/new-notification-system` created!", cx, |this, _cx| {
+            StatusToast::new("`app/new-notification-system` created!", cx, |this, _cx| {
                 this.icon(
                     Icon::new(IconName::GitBranch)
                         .size(IconSize::Small)

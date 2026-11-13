@@ -20,6 +20,7 @@ pub mod open_router;
 pub mod openai_subscribed;
 pub mod opencode;
 
+pub mod unaligned;
 pub mod vercel_ai_gateway;
 pub mod x_ai;
 pub mod x_ai_subscribed;
@@ -43,7 +44,7 @@ pub(crate) fn resolve_custom_headers(
                 .any(|reserved| reserved.eq_ignore_ascii_case(name))
             {
                 log::warn!(
-                    "ignoring custom {provider_name} header `{name}`: managed by Zed and cannot be overridden"
+                    "ignoring custom {provider_name} header `{name}`: managed by the app and cannot be overridden"
                 );
                 return None;
             }

@@ -1,9 +1,9 @@
 use gpui::{AnyView, DefiniteLength, Hsla};
 
-use super::button_like::{ButtonCommon, ButtonLike, ButtonSize, ButtonStyle};
+use super::button_like::{ButtonCommon, ButtonLike, ButtonPreviewState, ButtonSize, ButtonStyle};
 use crate::{
     ElevationIndex, Icon, IconWithIndicator, Indicator, SelectableButton, TintColor, Tooltip,
-    prelude::*,
+    on_accent, prelude::*,
 };
 use crate::{IconName, IconSize};
 
@@ -32,8 +32,10 @@ pub struct IconButton {
 
 impl IconButton {
     pub fn new(id: impl Into<ElementId>, icon: IconName) -> Self {
+        let mut base = ButtonLike::new(id);
+        base.disabled_content_uses_token = true;
         let mut this = Self {
-            base: ButtonLike::new(id),
+            base,
             shape: IconButtonShape::Wide,
             icon,
             icon_size: IconSize::default(),
@@ -48,6 +50,12 @@ impl IconButton {
         };
         this.base.base = this.base.base.debug_selector(|| format!("ICON-{:?}", icon));
         this
+    }
+
+    /// Creates the primary action of a view as an icon: a filled accent button
+    /// (the send button of a composer, for example). See [`Button::primary`](crate::Button::primary).
+    pub fn primary(id: impl Into<ElementId>, icon: IconName) -> Self {
+        Self::new(id, icon).style(ButtonStyle::Tinted(TintColor::Accent))
     }
 
     pub fn shape(mut self, shape: IconButtonShape) -> Self {
@@ -260,10 +268,23 @@ impl RenderOnce for IconButton {
             .filter(|_| is_selected)
             .unwrap_or(self.icon);
 
-        let icon_color = if is_disabled {
+        let selected_neutral = self.base.selected_is_neutral();
+
+        let is_primary = self.base.is_primary();
+
+        let icon_color = if is_primary && is_disabled {
+            // A disabled primary is a neutral block that `ButtonLike` does not dim.
             Color::Disabled
-        } else if self.selected_style.is_some() && is_selected {
-            self.selected_style.unwrap().into()
+        } else if is_primary {
+            // The theme's colour for content on the accent fill.
+            Color::Custom(on_accent(cx))
+        } else if is_disabled {
+            // The theme's disabled colour alone: `ButtonLike` adds no opacity to it.
+            Color::Disabled
+        } else if selected_neutral {
+            self.selected_icon_color.unwrap_or(Color::Default)
+        } else if let Some(selected_style) = self.selected_style.filter(|_| is_selected) {
+            selected_style.into()
         } else if is_selected {
             self.selected_icon_color.unwrap_or(Color::Selected)
         } else {
@@ -309,13 +330,45 @@ impl Component for IconButton {
 
     fn description() -> &'static str {
         "A compact button that displays a single icon with an optional tooltip.\
-        The most frequently used button in the Zed codebase."
+        The most frequently used button in the codebase."
     }
 
     fn preview(_window: &mut Window, _cx: &mut App) -> AnyElement {
+        let primary_in_state = |id: &'static str, state: ButtonPreviewState| {
+            let mut button = IconButton::primary(id, IconName::Send).size(ButtonSize::Medium);
+            button.base = button.base.preview_state(state);
+            button
+        };
+
         v_flex()
             .gap_6()
             .children(vec![
+                example_group_with_title(
+                    "Primary",
+                    vec![single_example(
+                        "Normal, Hover, Focused, Disabled",
+                        h_flex()
+                            .gap_4()
+                            .child(
+                                IconButton::primary("primary", IconName::Send)
+                                    .size(ButtonSize::Medium),
+                            )
+                            .child(primary_in_state(
+                                "primary_hover",
+                                ButtonPreviewState::Hovered,
+                            ))
+                            .child(primary_in_state(
+                                "primary_focused",
+                                ButtonPreviewState::Focused,
+                            ))
+                            .child(
+                                IconButton::primary("primary_disabled", IconName::Send)
+                                    .size(ButtonSize::Medium)
+                                    .disabled(true),
+                            )
+                            .into_any_element(),
+                    )],
+                ),
                 example_group_with_title(
                     "Icon Button Styles",
                     vec![

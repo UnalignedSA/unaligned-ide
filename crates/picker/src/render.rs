@@ -2,24 +2,25 @@ use gpui::{KeyContext, canvas};
 use settings::Settings;
 use theme_settings::ThemeSettings;
 use ui::{
-    ActiveTheme, Color, Context, Disableable, DocumentationAside, DocumentationSide, FluentBuilder,
-    InteractiveElement, IntoElement, Label, LabelCommon, ListItem, ListItemSpacing, ParentElement,
-    Render, ScrollAxes, Scrollbars, Styled, StyledExt, Window, WithScrollbar, div, h_flex,
-    rems_from_px, utils::WithRemSize, v_flex,
+    ActiveTheme, Context, DocumentationAside, DocumentationSide, EmptyState, FluentBuilder,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, ScrollAxes, Scrollbars,
+    Styled, StyledExt, Window, WithScrollbar, div, h_flex, rems_from_px, utils::WithRemSize,
+    v_flex,
 };
 
 use crate::shape::Shape;
 use crate::{
-    ElementContainer, Picker, PickerDelegate, PickerEditorPosition, Preview, ToggleMultiSelect,
+    ElementContainer, Picker, PickerDelegate, PickerEditorPosition, PickerEmptyAction, Preview,
+    ToggleMultiSelect,
     head::Head,
     preview::Layout,
     render::window_controls::{Bottom, Left, LeftCorner, Middle, Right, RightCorner},
 };
-use crate::{persistence, preview};
+use crate::{persistence, preview, surface};
 use gpui::Action as _;
 use gpui::Focusable as _;
 use std::sync::Arc;
-use ui::{Divider, Tooltip, prelude::*};
+use ui::{Divider, DividerColor, Tooltip, prelude::*};
 use ui_input::ErasedEditor;
 
 pub mod window_controls;
@@ -104,25 +105,42 @@ impl<D: PickerDelegate> Picker<D> {
         }
         let editor_position = self.delegate.editor_position();
 
+        // The shared query row, on the picker's own raised ground, closed by a
+        // 1px line.
         v_flex()
             .when(editor_position == PickerEditorPosition::End, |this| {
-                this.child(Divider::horizontal())
+                this.child(Divider::horizontal().color(DividerColor::Border))
             })
             .child(
-                h_flex()
-                    .h_9()
-                    .px_2p5()
-                    .flex_none()
-                    .overflow_hidden()
-                    .child(div().flex_1().child(editor.render(window, cx)))
+                surface::query_row(editor.render(window, cx))
                     .children(self.delegate.searchbar_trailer(window, cx))
                     .when(self.delegate.supports_multi_select(), |this| {
                         this.child(self.render_multi_select_toggle(cx))
                     }),
             )
             .when(editor_position == PickerEditorPosition::Start, |this| {
-                this.child(Divider::horizontal())
+                this.child(Divider::horizontal().color(DividerColor::Border))
             })
+    }
+
+    /// Nothing matches: one line, and the delegate's one optional action.
+    fn render_empty_state(
+        &self,
+        text: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut empty_state = EmptyState::new(text);
+        if let Some(PickerEmptyAction { label, action }) =
+            self.delegate.no_matches_action(window, cx)
+        {
+            let key_binding = KeyBinding::for_action_in(&*action, &self.focus_handle(cx), cx);
+            let key_binding = key_binding.has_binding(window).then_some(key_binding);
+            empty_state = empty_state.action(label, key_binding, move |_, window, cx| {
+                window.dispatch_action(action.boxed_clone(), cx);
+            });
+        }
+        v_flex().flex_grow_1().child(empty_state)
     }
 
     /// The multi-select toggle is picker-owned so it can reflect the mode,
@@ -255,15 +273,7 @@ impl<D: PickerDelegate> Picker<D> {
             })
             .when(self.delegate.match_count() == 0, |el| {
                 el.when_some(self.delegate.no_matches_text(window, cx), |el, text| {
-                    el.child(
-                        v_flex().flex_grow_1().py_2().child(
-                            ListItem::new("empty_state")
-                                .inset(true)
-                                .spacing(ListItemSpacing::Sparse)
-                                .disabled(true)
-                                .child(Label::new(text).color(Color::Muted)),
-                        ),
-                    )
+                    el.child(self.render_empty_state(text, window, cx))
                 })
             })
             .children(self.render_footer(window, cx))
@@ -370,7 +380,7 @@ impl<D: PickerDelegate> Picker<D> {
                                 window,
                             ))
                             .border_t_1()
-                            .border_color(cx.theme().colors().border_variant)
+                            .border_color(cx.theme().colors().border)
                             .child(preview.render(cx)),
                     ),
             )
@@ -417,7 +427,7 @@ impl<D: PickerDelegate> Picker<D> {
                                 )
                             })
                             .border_l_1()
-                            .border_color(cx.theme().colors().border_variant)
+                            .border_color(cx.theme().colors().border)
                             .overflow_hidden()
                             .child(preview.render(cx)),
                     ),

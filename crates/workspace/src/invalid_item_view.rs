@@ -1,5 +1,6 @@
 use std::{fmt, path::Path, sync::Arc};
 
+use app_actions::workspace::OpenWithSystem;
 use gpui::{Entity, EventEmitter, FocusHandle, Focusable};
 use project::{ProjectPath, Worktree};
 use ui::{
@@ -7,7 +8,6 @@ use ui::{
     KeyBinding, Label, LabelCommon, LabelSize, ParentElement, Render, SharedString, Styled as _,
     Window, h_flex, v_flex,
 };
-use zed_actions::workspace::OpenWithSystem;
 
 use crate::{Item, ItemNavHistory, Workspace};
 

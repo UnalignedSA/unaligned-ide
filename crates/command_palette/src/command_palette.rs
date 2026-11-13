@@ -16,6 +16,12 @@ use command_palette_hooks::{
 };
 use command_palette_settings::CommandPaletteSettings;
 
+/// The filter that decides which actions the palette lists, re-exported so
+/// that the application crate can hide the commands of features the product
+/// does not have without depending on the hooks crate.
+pub use command_palette_hooks::CommandPaletteFilter as Filter;
+
+use app_actions::{OpenAppUrl, command_palette::Toggle};
 use fuzzy_nucleo::{StringMatch, StringMatchCandidate};
 use gpui::{
     Action, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
@@ -31,7 +37,6 @@ use ui::{
 };
 use util::ResultExt;
 use workspace::{ModalView, Workspace, WorkspaceSettings};
-use zed_actions::{OpenZedUrl, command_palette::Toggle};
 
 actions!(command_palette, [RemoveSelected]);
 
@@ -52,7 +57,8 @@ pub struct CommandPalette {
 ///
 /// This improves the likelihood of a match by either humanized name or keymap-style name.
 /// Underscores are converted to spaces because `humanize_action_name` converts them to spaces
-/// when building the search candidates (e.g. `terminal_panel::Toggle` -> `terminal panel: toggle`).
+/// when building the search candidates (e.g. `terminal_panel::Toggle` -> `Terminal Panel: Toggle`).
+/// Matching ignores case unless the query has an uppercase letter.
 pub fn normalize_action_query(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut last_char = None;
@@ -145,7 +151,6 @@ impl CommandPalette {
         let picker = cx.new(|cx| {
             // One-shot action; there's nothing to reopen.
             let picker = Picker::uniform_list(delegate, window, cx)
-                .initial_width(rems(38.0))
                 .reopenable(false, cx)
                 .show_scrollbar(true);
             picker.set_query(query, window, cx);
@@ -641,7 +646,7 @@ impl PickerDelegate for CommandPaletteDelegate {
                 let intercept_result = if is_zed_link {
                     CommandInterceptResult {
                         results: vec![CommandInterceptItem {
-                            action: OpenZedUrl {
+                            action: OpenAppUrl {
                                 url: query_for_link.clone().into(),
                             }
                             .boxed_clone(),
@@ -720,7 +725,7 @@ impl PickerDelegate for CommandPaletteDelegate {
                 return;
             };
             let action_name = selected_command.action.name();
-            let open_keymap = Box::new(zed_actions::ChangeKeybinding {
+            let open_keymap = Box::new(app_actions::ChangeKeybinding {
                 action: action_name.to_string(),
             });
             window.dispatch_action(open_keymap, cx);
@@ -774,21 +779,17 @@ impl PickerDelegate for CommandPaletteDelegate {
         Some(
             ListItem::new(ix)
                 .inset(true)
-                .spacing(ListItemSpacing::Sparse)
+                .spacing(ListItemSpacing::Dense)
                 .toggle_state(selected)
                 .child(
                     h_flex()
                         .w_full()
-                        .py_px()
                         .justify_between()
                         .gap_2()
-                        .child(
-                            HighlightedLabel::new(
-                                command.name.clone(),
-                                matching_command.positions.clone(),
-                            )
-                            .truncate(),
-                        )
+                        .child(render_command_name(
+                            &command.name,
+                            &matching_command.positions,
+                        ))
                         .child(
                             h_flex()
                                 .flex_shrink_0()
@@ -820,41 +821,29 @@ impl PickerDelegate for CommandPaletteDelegate {
             KeyBinding::for_action_in(&*selected_command.action, &self.previous_focus_handle, cx);
 
         let focus_handle = &self.previous_focus_handle;
-        let keybinding_buttons = if keybind.has_binding(window) {
-            Button::new("change", "Change Keybinding…")
-                .key_binding(
-                    KeyBinding::for_action_in(&menu::SecondaryConfirm, focus_handle, cx)
-                        .map(|kb| kb.size(rems_from_px(12_f32))),
-                )
-                .on_click(move |_, window, cx| {
-                    window.dispatch_action(menu::SecondaryConfirm.boxed_clone(), cx);
-                })
+        let (id, label) = if keybind.has_binding(window) {
+            ("change", "Change Keybinding…")
         } else {
-            Button::new("add", "Add Keybinding…")
-                .key_binding(
-                    KeyBinding::for_action_in(&menu::SecondaryConfirm, focus_handle, cx)
-                        .map(|kb| kb.size(rems_from_px(12_f32))),
-                )
-                .on_click(move |_, window, cx| {
-                    window.dispatch_action(menu::SecondaryConfirm.boxed_clone(), cx);
-                })
+            ("add", "Add Keybinding…")
         };
 
         Some(
-            h_flex()
-                .w_full()
-                .p_1p5()
-                .gap_1()
+            picker::footer(cx)
                 .justify_end()
-                .border_t_1()
-                .border_color(cx.theme().colors().border_variant)
-                .child(keybinding_buttons)
                 .child(
-                    Button::new("run-action", "Run")
-                        .key_binding(
-                            KeyBinding::for_action_in(&menu::Confirm, &focus_handle, cx)
-                                .map(|kb| kb.size(rems_from_px(12_f32))),
-                        )
+                    picker::footer_button(id, label)
+                        .key_binding(picker::footer_key_cap(
+                            &menu::SecondaryConfirm,
+                            focus_handle,
+                            cx,
+                        ))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(menu::SecondaryConfirm.boxed_clone(), cx);
+                        }),
+                )
+                .child(
+                    picker::footer_button("run-action", "Run")
+                        .key_binding(picker::footer_key_cap(&menu::Confirm, focus_handle, cx))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(menu::Confirm.boxed_clone(), cx)
                         }),
@@ -864,7 +853,127 @@ impl PickerDelegate for CommandPaletteDelegate {
     }
 }
 
+/// A command's name as a row shows it: the namespace ("Pane:") in the muted
+/// colour, the command itself in the text colour. Matched characters keep
+/// their highlight on both sides of the split.
+fn render_command_name(name: &str, positions: &[usize]) -> AnyElement {
+    let Some((namespace, command)) = name.split_once(": ") else {
+        return HighlightedLabel::new(name.to_string(), positions.to_vec())
+            .truncate()
+            .into_any_element();
+    };
+    let (namespace_positions, command_positions) = split_positions(namespace.len(), positions);
+
+    h_flex()
+        .min_w_0()
+        .overflow_hidden()
+        .gap_1()
+        .child(
+            HighlightedLabel::new(format!("{namespace}:"), namespace_positions)
+                .color(Color::Muted)
+                .flex_none(),
+        )
+        .child(HighlightedLabel::new(command.to_string(), command_positions).truncate())
+        .into_any_element()
+}
+
+/// Splits the matched positions of "Namespace: Command" into those of
+/// "Namespace:" and those of "Command", the latter counted from its start.
+/// The space between the two is not drawn, so a match on it is dropped.
+fn split_positions(namespace_len: usize, positions: &[usize]) -> (Vec<usize>, Vec<usize>) {
+    let colon = namespace_len;
+    let command_start = namespace_len + ": ".len();
+    let namespace_positions = positions
+        .iter()
+        .copied()
+        .filter(|position| *position <= colon)
+        .collect();
+    let command_positions = positions
+        .iter()
+        .filter(|position| **position >= command_start)
+        .map(|position| position - command_start)
+        .collect();
+    (namespace_positions, command_positions)
+}
+
+/// The name a command carries wherever the user reads it (command palette,
+/// keymap editor, key hints): `editor::GoToDefinition` becomes
+/// "Editor: Go to Definition".
+///
+/// Only the display changes. The `app::` namespace holds the application's
+/// own commands and reads "App" ("App: Open Settings"); upstream's name
+/// inside an action name reads as the product's.
 pub fn humanize_action_name(name: &str) -> String {
+    let words = split_action_name(name);
+    let words = words.trim_start();
+    let mut result = String::with_capacity(words.len() + 8);
+    for (part_index, part) in words.split(": ").enumerate() {
+        if part_index > 0 {
+            result.push_str(": ");
+        }
+        let is_namespace = part_index == 0 && words.contains(": ");
+        if is_namespace && part == APP_NAMESPACE {
+            result.push_str(APP_NAMESPACE_LABEL);
+            continue;
+        }
+        let last_word = part.split(' ').filter(|word| !word.is_empty()).count();
+        let mut word_index = 0;
+        for (index, word) in part.split(' ').enumerate() {
+            if index > 0 {
+                result.push(' ');
+            }
+            if word.is_empty() {
+                continue;
+            }
+            word_index += 1;
+            push_title_case_word(
+                &mut result,
+                word,
+                word_index == 1 || word_index == last_word,
+            );
+        }
+    }
+    result
+}
+
+/// The namespace of the application's own actions, and what it is called on screen.
+const APP_NAMESPACE: &str = "app";
+const APP_NAMESPACE_LABEL: &str = "App";
+/// Upstream's name as a word inside an action name: shown as the product's.
+const UPSTREAM_WORD: &str = "zed";
+
+/// Words that stay lowercase inside a title, unless they open or close it.
+const TITLE_SMALL_WORDS: &[&str] = &[
+    "a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with",
+];
+
+/// Abbreviations that action names spell as words (`OpenLspLog`).
+const TITLE_ACRONYMS: &[&str] = &[
+    "acp", "ai", "cli", "dap", "fps", "gpui", "json", "lsp", "mcp", "repl", "svg", "ui", "url",
+];
+
+fn push_title_case_word(result: &mut String, word: &str, edge_of_title: bool) {
+    if word.chars().any(|character| character.is_uppercase()) {
+        // Already cased by the action's author: "URL", "AGENTS.md".
+        result.push_str(word);
+    } else if word == UPSTREAM_WORD {
+        result.push_str(branding::PRODUCT_SHORT_NAME);
+    } else if TITLE_ACRONYMS.contains(&word) {
+        result.extend(word.chars().flat_map(char::to_uppercase));
+    } else if !edge_of_title && TITLE_SMALL_WORDS.contains(&word) {
+        result.push_str(word);
+    } else {
+        let mut characters = word.chars();
+        if let Some(first) = characters.next() {
+            result.extend(first.to_uppercase());
+            result.push_str(characters.as_str());
+        }
+    }
+}
+
+/// Splits an action name into lowercase words: `editor::GoToDefinition`
+/// becomes "editor: go to definition". Runs of capitals are kept ("open URL").
+fn split_action_name(name: &str) -> String {
     let chars = name.chars().collect::<Vec<_>>();
     let capacity = name.len() + chars.iter().filter(|c| c.is_uppercase()).count();
     let mut result = String::with_capacity(capacity);
@@ -956,29 +1065,102 @@ mod tests {
     fn test_humanize_action_name() {
         assert_eq!(
             humanize_action_name("editor::GoToDefinition"),
-            "editor: go to definition"
+            "Editor: Go to Definition"
         );
         assert_eq!(
             humanize_action_name("editor::Backspace"),
-            "editor: backspace"
+            "Editor: Backspace"
         );
         assert_eq!(
             humanize_action_name("go_to_line::Deploy"),
-            "go to line: deploy"
+            "Go to Line: Deploy"
         );
         assert_eq!(
             humanize_action_name("agent::OpenGlobalAGENTS.mdRules"),
-            "agent: open global AGENTS.md rules"
+            "Agent: Open Global AGENTS.md Rules"
         );
         assert_eq!(
             humanize_action_name("agent::OpenProjectAGENTS.mdRules"),
-            "agent: open project AGENTS.md rules"
+            "Agent: Open Project AGENTS.md Rules"
         );
-        assert_eq!(humanize_action_name("editor::OpenURL"), "editor: open URL");
+        assert_eq!(humanize_action_name("editor::OpenURL"), "Editor: Open URL");
         assert_eq!(
             humanize_action_name("editor::OpenURLParser"),
-            "editor: open URL parser"
+            "Editor: Open URL Parser"
         );
+    }
+
+    #[test]
+    fn test_humanize_action_name_title_case() {
+        // Small words stay lowercase inside a title, not at its ends.
+        assert_eq!(
+            humanize_action_name("project_panel::RevealInFileManager"),
+            "Project Panel: Reveal in File Manager"
+        );
+        assert_eq!(humanize_action_name("pane::ZoomIn"), "Pane: Zoom In");
+        assert_eq!(
+            humanize_action_name("workspace::ToggleZoom"),
+            "Workspace: Toggle Zoom"
+        );
+        assert_eq!(
+            humanize_action_name("debugger::StepInto"),
+            "Debugger: Step Into"
+        );
+        // Abbreviations spelled as words in the action name.
+        assert_eq!(humanize_action_name("dev::OpenLspLog"), "Dev: Open LSP Log");
+        assert_eq!(
+            humanize_action_name("lsp_tool::ToggleMenu"),
+            "LSP Tool: Toggle Menu"
+        );
+        assert_eq!(humanize_action_name("repl::Run"), "REPL: Run");
+        // No namespace: the whole name is the title.
+        assert_eq!(humanize_action_name("GoToLine"), "Go to Line");
+        assert_eq!(humanize_action_name(""), "");
+    }
+
+    #[test]
+    fn test_split_positions() {
+        // "Pane: Split Up" matched on "pa" and "sp".
+        assert_eq!(
+            split_positions("Pane".len(), &[0, 1, 6, 7]),
+            (vec![0, 1], vec![0, 1])
+        );
+        // The colon belongs to the namespace, the space after it to nobody.
+        assert_eq!(
+            split_positions("Pane".len(), &[4, 5, 13]),
+            (vec![4], vec![7])
+        );
+        assert_eq!(split_positions("Pane".len(), &[]), (vec![], vec![]));
+    }
+
+    #[test]
+    fn test_humanize_action_name_never_says_zed() {
+        // The application's own namespace is an identifier: only its label changes.
+        assert_eq!(
+            humanize_action_name("app::OpenSettings"),
+            "App: Open Settings"
+        );
+        assert_eq!(humanize_action_name("app::About"), "App: About");
+        assert_eq!(
+            humanize_action_name("cli::RegisterUrlScheme"),
+            "CLI: Register URL Scheme"
+        );
+        // Upstream's name inside an action name reads as the product's.
+        assert_eq!(
+            humanize_action_name("example::AboutZed"),
+            format!("Example: About {}", branding::PRODUCT_SHORT_NAME)
+        );
+        // A namespace that merely starts with the same letters is left alone.
+        assert_eq!(
+            humanize_action_name("zeta::RateCompletions"),
+            "Zeta: Rate Completions"
+        );
+        for name in ["app::Quit", "app::OpenAppUrl", "example::AboutZed"] {
+            assert!(
+                !humanize_action_name(name).contains("Zed"),
+                "{name} still reads as upstream's product"
+            );
+        }
     }
 
     #[test]
@@ -1059,7 +1241,7 @@ mod tests {
         cx.simulate_input("bcksp");
 
         palette.read_with(cx, |palette, _| {
-            assert_eq!(palette.delegate.matches[0].string, "editor: backspace");
+            assert_eq!(palette.delegate.matches[0].string, "Editor: Backspace");
         });
 
         cx.dispatch_action(menu::Confirm);
@@ -1103,7 +1285,7 @@ mod tests {
             assert_eq!(editor.read(cx).text(cx), "ab");
         });
         assert_eq!(
-            db.get_command_usage("editor: backspace")
+            db.get_command_usage("Editor: Backspace")
                 .unwrap()
                 .unwrap()
                 .invocations,
@@ -1114,7 +1296,7 @@ mod tests {
         cx.simulate_click(history_button.center(), gpui::Modifiers::default());
         cx.run_until_parked();
 
-        assert_eq!(db.get_command_usage("editor: backspace").unwrap(), None);
+        assert_eq!(db.get_command_usage("Editor: Backspace").unwrap(), None);
         workspace.update_in(cx, |workspace, window, cx| {
             assert_eq!(editor.read(cx).text(cx), "ab");
             let palette = workspace.active_modal::<CommandPalette>(cx).unwrap();
@@ -1124,7 +1306,7 @@ mod tests {
                     .delegate
                     .matches
                     .iter()
-                    .filter(|matching_command| matching_command.string == "editor: backspace")
+                    .filter(|matching_command| matching_command.string == "Editor: Backspace")
                     .count(),
                 1,
             );
@@ -1160,19 +1342,19 @@ mod tests {
         cx.update(|cx| cx.set_global(db::AppDatabase::test_new()));
         let db = cx.update(|cx| persistence::CommandPaletteDB::global(cx));
 
-        db.write_command_invocation("editor: backspace", "")
+        db.write_command_invocation("Editor: Backspace", "")
             .await
             .unwrap();
-        db.write_command_invocation("editor: backspace", "")
+        db.write_command_invocation("Editor: Backspace", "")
             .await
             .unwrap();
-        db.write_command_invocation("go to line: toggle", "")
+        db.write_command_invocation("Go to Line: Toggle", "")
             .await
             .unwrap();
-        db.set_last_invoked(100, "editor: backspace".to_string())
+        db.set_last_invoked(100, "Editor: Backspace".to_string())
             .await
             .unwrap();
-        db.set_last_invoked(200, "go to line: toggle".to_string())
+        db.set_last_invoked(200, "Go to Line: Toggle".to_string())
             .await
             .unwrap();
 
@@ -1200,8 +1382,8 @@ mod tests {
                 .iter()
                 .map(|command| command.name.as_str())
                 .collect::<Vec<_>>();
-            assert_eq!(names[0], "go to line: toggle");
-            assert_eq!(names[1], "editor: backspace");
+            assert_eq!(names[0], "Go to Line: Toggle");
+            assert_eq!(names[1], "Editor: Backspace");
             assert!(
                 names[2..].windows(2).all(|pair| pair[0] <= pair[1]),
                 "unused commands should stay alphabetical"
@@ -1486,7 +1668,7 @@ mod tests {
 
         cx.simulate_input("Editor::    Backspace");
         palette.read_with(cx, |palette, _| {
-            assert_eq!(palette.delegate.matches[0].string, "editor: backspace");
+            assert_eq!(palette.delegate.matches[0].string, "Editor: Backspace");
         });
     }
 

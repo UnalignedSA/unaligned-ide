@@ -641,9 +641,43 @@ mod macos {
         }
     }
 }
+/// The `--user-data-dir` this process was started with, if any.
+///
+/// The crash handler is this same executable started again. Without the
+/// argument it would write its minidumps to the default logs directory even
+/// when the app keeps everything else in a directory of its own; `main`
+/// applies `--user-data-dir` before it looks at `--crash-handler`.
+fn user_data_dir_argument() -> Option<std::ffi::OsString> {
+    user_data_dir_argument_in(std::env::args_os().skip(1))
+}
+
+fn user_data_dir_argument_in(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
+    while let Some(argument) = arguments.next() {
+        if argument == "--" {
+            break;
+        }
+        if argument == "--user-data-dir" {
+            return arguments.next();
+        }
+        if let Some(value) = argument
+            .to_str()
+            .and_then(|argument| argument.strip_prefix("--user-data-dir="))
+        {
+            return Some(value.into());
+        }
+    }
+    None
+}
+
 #[cfg(not(target_os = "windows"))]
 fn spawn_crash_handler(exe: &Path, socket_name: &Path) -> async_process::Child {
-    async_process::Command::new(exe)
+    let mut command = async_process::Command::new(exe);
+    if let Some(user_data_dir) = user_data_dir_argument() {
+        command.arg("--user-data-dir").arg(user_data_dir);
+    }
+    command
         .arg("--crash-handler")
         .arg(&socket_name)
         .spawn()
@@ -661,9 +695,17 @@ fn spawn_crash_handler(exe: &Path, socket_name: &Path) {
     };
     use windows::core::PWSTR;
 
+    // A trailing backslash would escape the closing quote of the argument.
+    let user_data_dir = user_data_dir_argument()
+        .map(|directory| {
+            let directory = directory.to_string_lossy();
+            format!(" --user-data-dir \"{}\"", directory.trim_end_matches('\\'))
+        })
+        .unwrap_or_default();
     let mut command_line: Vec<u16> = OsStr::new(&format!(
-        "\"{}\" --crash-handler \"{}\"",
+        "\"{}\"{} --crash-handler \"{}\"",
         exe.display(),
+        user_data_dir,
         socket_name.display()
     ))
     .encode_wide()
@@ -745,6 +787,26 @@ pub fn crash_server(socket: &Path, logs_dir: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_crash_handler_inherits_the_user_data_dir() {
+        let arguments = |list: &[&str]| {
+            user_data_dir_argument_in(list.iter().map(std::ffi::OsString::from))
+                .map(|directory| directory.to_string_lossy().into_owned())
+        };
+        assert_eq!(arguments(&["project"]), None);
+        assert_eq!(
+            arguments(&["--user-data-dir", "/tmp/own", "project"]),
+            Some("/tmp/own".to_string())
+        );
+        assert_eq!(
+            arguments(&["-n", "--user-data-dir=/tmp/own"]),
+            Some("/tmp/own".to_string())
+        );
+        // After `--` everything is a path, even one that looks like the option.
+        assert_eq!(arguments(&["--", "--user-data-dir", "/tmp/own"]), None);
+        assert_eq!(arguments(&["--user-data-dir"]), None);
+    }
 
     /// Clearing a tag has to remove it rather than record an empty value,
     /// because that is how an application withdraws identifying state from

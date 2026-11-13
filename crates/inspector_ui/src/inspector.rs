@@ -8,7 +8,7 @@ use workspace::AppState;
 use crate::div_inspector::DivInspector;
 
 pub fn init(app_state: Arc<AppState>, cx: &mut App) {
-    cx.on_action(|_: &zed_actions::dev::ToggleInspector, cx| {
+    cx.on_action(|_: &app_actions::dev::ToggleInspector, cx| {
         let Some(active_window) = cx
             .active_window()
             .context("no active window to toggle inspector")
@@ -139,7 +139,7 @@ fn render_inspector_id(inspector_id: &InspectorElementId, cx: &App) -> Div {
                 .font_buffer(cx)
                 .text_xs()
                 .child(source_location_string)
-                .tooltip(Tooltip::text("Click to open by running Zed CLI"))
+                .tooltip(Tooltip::text("Click to open with the command-line tool"))
                 .on_click(move |_, _window, cx| {
                     cx.background_spawn(open_zed_source_location(source_location))
                         .detach_and_log_err(cx);
@@ -161,7 +161,7 @@ async fn open_zed_source_location(
     location: &'static std::panic::Location<'static>,
 ) -> anyhow::Result<()> {
     let mut path = util::dev_repo_root()
-        .context("locating the zed checkout to open sources from")?
+        .context("locating the source checkout to open sources from")?
         .to_path_buf();
     path.push(Path::new(location.file()));
     let path_arg = format!(
@@ -171,15 +171,17 @@ async fn open_zed_source_location(
         location.column()
     );
 
-    let output = new_command("zed")
+    // The product's own command, as the packaged application installs it.
+    let command_name = branding::APP_ID;
+    let output = new_command(command_name)
         .arg(&path_arg)
         .output()
         .await
-        .with_context(|| format!("running zed to open {path_arg} failed"))?;
+        .with_context(|| format!("running {command_name} to open {path_arg} failed"))?;
 
     if !output.status.success() {
         Err(anyhow!(
-            "running zed to open {path_arg} failed with stderr: {}",
+            "running {command_name} to open {path_arg} failed with stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         ))
     } else {

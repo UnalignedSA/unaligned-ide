@@ -1,13 +1,13 @@
 use crate::{BufferDiagnosticsEditor, ProjectDiagnosticsEditor, ToggleDiagnosticsRefresh};
 use agent_settings::AgentSettings;
+use app_actions::assistant::InlineAssist;
+use app_actions::buffer_search;
 use gpui::{Context, EventEmitter, ParentElement, Render, Window};
 use language::DiagnosticEntry;
 use settings::Settings;
 use text::{Anchor, BufferId};
 use ui::{Tooltip, prelude::*};
 use workspace::{ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, item::ItemHandle};
-use zed_actions::assistant::InlineAssist;
-use zed_actions::buffer_search;
 
 pub struct ToolbarControls {
     editor: Option<Box<dyn DiagnosticsToolbarEditor>>,
@@ -71,7 +71,7 @@ impl Render for ToolbarControls {
             })
             .when(is_agent_enabled, |this| {
                 this.child(
-                    IconButton::new("inline_assist", IconName::ZedAssistant)
+                    IconButton::new("inline_assist", IconName::AppAssistant)
                         .icon_size(IconSize::Small)
                         .tooltip(Tooltip::for_action_title(
                             "Inline Assist",

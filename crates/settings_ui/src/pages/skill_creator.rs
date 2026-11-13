@@ -711,7 +711,7 @@ impl SkillCreatorPage {
             .child(match &self.url_import_status {
                 UrlImportStatus::Idle => Label::new(
                     "Paste a GitHub .md URL to fetch it and fill out the form. \
-                     For private files, Zed retries using GITHUB_TOKEN, if set.",
+                     For private files, the IDE retries using GITHUB_TOKEN, if set.",
                 )
                 .size(LabelSize::Small)
                 .color(Color::Muted)
@@ -1886,7 +1886,7 @@ mod tests {
         let existing_content = "---\nname: draft-pr\ndescription: existing\n---\nbody\n";
         let (fs, project, worktree) = init_worktree_test(
             serde_json::json!({
-                ".zed": { "settings.json": r#"{ "file_scan_exclusions": [".agents"] }"# },
+                ".unaligned": { "settings.json": r#"{ "file_scan_exclusions": [".agents"] }"# },
                 ".agents": { "skills": { "draft-pr": { "SKILL.md": existing_content } } },
             }),
             cx,

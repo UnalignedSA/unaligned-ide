@@ -1,18 +1,20 @@
+use app_actions::{ExtensionCategoryFilter, Extensions};
 use fs::Fs;
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
     App, Context, DismissEvent, Entity, EventEmitter, Focusable, Render, UpdateGlobal, WeakEntity,
     Window,
 };
-use picker::{Picker, PickerDelegate};
+use picker::{Picker, PickerDelegate, PickerEmptyAction};
 use settings::{Settings as _, SettingsStore, update_settings_file};
 use std::sync::Arc;
-use theme::{Appearance, SystemAppearance, ThemeMeta, ThemeRegistry};
+use theme::{
+    Appearance, LEGACY_DEFAULT_ICON_THEME_NAME, SystemAppearance, ThemeMeta, ThemeRegistry,
+};
 use theme_settings::{IconThemeName, IconThemeSelection, ThemeSettings};
 use ui::{ListItem, ListItemSpacing, prelude::*, v_flex};
 use util::ResultExt;
 use workspace::{ModalView, ui::HighlightedLabel};
-use zed_actions::{ExtensionCategoryFilter, Extensions};
 
 pub(crate) struct IconThemeSelector {
     picker: Entity<Picker<IconThemeSelectorDelegate>>,
@@ -167,7 +169,7 @@ impl PickerDelegate for IconThemeSelectorDelegate {
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
-        "Select Icon Theme...".into()
+        "Select Icon Theme…".into()
     }
 
     fn match_count(&self) -> usize {
@@ -302,20 +304,29 @@ impl PickerDelegate for IconThemeSelectorDelegate {
     ) -> Option<Self::ListItem> {
         let theme_match = &self.matches.get(ix)?;
         let is_original_theme = theme_match.string.as_str() == self.original_theme.0.as_ref();
+        let (label, positions) = display_name(&theme_match.string, &theme_match.positions);
 
         Some(
             ListItem::new(ix)
                 .inset(true)
-                .spacing(ListItemSpacing::Sparse)
+                .spacing(ListItemSpacing::Dense)
                 .toggle_state(selected)
-                .child(HighlightedLabel::new(
-                    theme_match.string.clone(),
-                    theme_match.positions.clone(),
-                ))
+                .child(HighlightedLabel::new(label, positions))
                 .when(is_original_theme, |this| {
                     this.end_slot(Icon::new(IconName::Check).color(Color::Muted))
                 }),
         )
+    }
+
+    fn no_matches_action(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Picker<Self>>,
+    ) -> Option<PickerEmptyAction> {
+        Some(PickerEmptyAction::new(
+            "More Icon Themes…",
+            more_icon_themes_action(),
+        ))
     }
 
     fn render_footer(
@@ -323,40 +334,47 @@ impl PickerDelegate for IconThemeSelectorDelegate {
         _window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Option<gpui::AnyElement> {
+        // With nothing to list, the empty state offers the same action.
+        if self.matches.is_empty() {
+            return None;
+        }
         Some(
-            h_flex()
-                .p_2()
-                .w_full()
-                .justify_between()
-                .gap_2()
-                .border_t_1()
-                .border_color(cx.theme().colors().border_variant)
+            picker::footer(cx)
+                .justify_end()
                 .child(
-                    Button::new("docs", "View Icon Theme Docs")
-                        .end_icon(
-                            Icon::new(IconName::ArrowUpRight)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .on_click(|_event, _window, cx| {
-                            cx.open_url("https://zed.dev/docs/icon-themes");
-                        }),
-                )
-                .child(
-                    Button::new("more-icon-themes", "Install Icon Themes").on_click(
-                        move |_event, window, cx| {
-                            window.dispatch_action(
-                                Box::new(Extensions {
-                                    category_filter: Some(ExtensionCategoryFilter::IconThemes),
-                                    id: None,
-                                }),
-                                cx,
-                            );
-                        },
+                    picker::footer_button("more-icon-themes", "More Icon Themes…").on_click(
+                        |_, window, cx| window.dispatch_action(more_icon_themes_action(), cx),
                     ),
                 )
                 .into_any_element(),
         )
+    }
+}
+
+fn more_icon_themes_action() -> Box<dyn gpui::Action> {
+    Box::new(Extensions {
+        category_filter: Some(ExtensionCategoryFilter::IconThemes),
+        id: None,
+    })
+}
+
+/// The name a row shows for an icon theme, with the positions of the matched
+/// characters moved along. The built-in theme is named "Default" since wave 5;
+/// its legacy name (the one old settings files use) still reads "Default".
+fn display_name(name: &str, positions: &[usize]) -> (String, Vec<usize>) {
+    const DEFAULT_LABEL: &str = "Default";
+    if name == LEGACY_DEFAULT_ICON_THEME_NAME
+        && let Some(start) = name.find(DEFAULT_LABEL)
+    {
+        let range = start..start + DEFAULT_LABEL.len();
+        let positions = positions
+            .iter()
+            .filter(|position| range.contains(*position))
+            .map(|position| position - start)
+            .collect();
+        (DEFAULT_LABEL.to_string(), positions)
+    } else {
+        (name.to_string(), positions.to_vec())
     }
 }
 
@@ -425,7 +443,7 @@ mod tests {
         workspace: &Entity<workspace::Workspace>,
         cx: &mut VisualTestContext,
     ) -> Entity<Picker<IconThemeSelectorDelegate>> {
-        cx.dispatch_action(zed_actions::icon_theme_selector::Toggle {
+        cx.dispatch_action(app_actions::icon_theme_selector::Toggle {
             themes_filter: None,
         });
         cx.run_until_parked();
@@ -511,6 +529,19 @@ mod tests {
             previewed_theme_name(&picker, cx),
             "Test Icons A",
             "previewed icon theme should be preserved after clearing an empty filter"
+        );
+    }
+
+    #[test]
+    fn test_default_icon_theme_reads_default() {
+        // The legacy name matched on "ed" and "fau".
+        assert_eq!(
+            display_name(LEGACY_DEFAULT_ICON_THEME_NAME, &[1, 2, 7, 8, 9]),
+            ("Default".to_string(), vec![2, 3, 4])
+        );
+        assert_eq!(
+            display_name("Test Icons A", &[0, 5]),
+            ("Test Icons A".to_string(), vec![0, 5])
         );
     }
 }

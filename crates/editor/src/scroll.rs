@@ -158,6 +158,10 @@ pub struct ScrollManager {
     )>,
     show_scrollbars: bool,
     hide_scrollbar_task: Option<Task<()>>,
+    /// The horizontal bar lies over the last visible line of code, so it is
+    /// shown only while the pointer is on its track (or its thumb is dragged),
+    /// whatever the system says about hiding scroll bars.
+    horizontal_scrollbar_hovered: bool,
     active_scrollbar: Option<ActiveScrollbarState>,
     visible_line_count: Option<f64>,
     visible_column_count: Option<f64>,
@@ -180,6 +184,7 @@ impl ScrollManager {
             autoscroll_request: None,
             show_scrollbars: true,
             hide_scrollbar_task: None,
+            horizontal_scrollbar_hovered: false,
             active_scrollbar: None,
             last_autoscroll: None,
             visible_line_count: None,
@@ -460,6 +465,28 @@ impl ScrollManager {
 
     pub fn scrollbars_visible(&self) -> bool {
         self.show_scrollbars
+    }
+
+    /// Called by the editor element on pointer moves: whether the pointer is
+    /// on the horizontal bar's track.
+    pub fn set_horizontal_scrollbar_hovered(&mut self, hovered: bool, cx: &mut Context<Editor>) {
+        if self.horizontal_scrollbar_hovered != hovered {
+            self.horizontal_scrollbar_hovered = hovered;
+            cx.notify();
+        }
+    }
+
+    /// Whether the horizontal bar is drawn when the `scrollbar.show` setting
+    /// leaves the choice to the editor (`auto`, `system`): while the pointer
+    /// is on its track at the bottom edge of the editor, and for as long as
+    /// its thumb is dragged. Unlike the vertical bar it carries no markers and
+    /// covers a line of code, so it never stays. No timer is involved.
+    pub fn horizontal_scrollbar_visible(&self) -> bool {
+        self.horizontal_scrollbar_hovered
+            || self
+                .active_scrollbar
+                .as_ref()
+                .is_some_and(|scrollbar| scrollbar.axis == Axis::Horizontal)
     }
 
     pub fn has_autoscroll_request(&self) -> bool {

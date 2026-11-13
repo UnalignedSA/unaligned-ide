@@ -1,9 +1,9 @@
 use std::rc::Rc;
 
-use acp_thread::{AgentModelIcon, AgentModelInfo, AgentModelSelector};
+use acp_thread::{AgentModelInfo, AgentModelSelector};
 use gpui::{Entity, FocusHandle};
 use picker::popover_menu::PickerPopoverMenu;
-use ui::{PopoverMenuHandle, Tooltip, prelude::*};
+use ui::{ButtonLike, PopoverMenuHandle, Tooltip, prelude::*};
 
 use crate::ui::ModelSelectorTooltip;
 use crate::{ModelSelector, model_selector::acp_model_selector};
@@ -52,10 +52,13 @@ impl Render for ModelSelectorPopover {
             .map(|model| model.name.clone())
             .unwrap_or_else(|| SharedString::from("Select a Model"));
 
-        let model_icon = model.as_ref().and_then(|model| model.icon.clone());
+        // Who answers and at which price is said by the tooltip; the button
+        // itself carries the model's name only.
+        let connection = selector.delegate.active_model_connection();
+        let cost = model.as_ref().and_then(|model| model.cost.clone());
 
         let (color, icon) = if self.menu_handle.is_deployed() {
-            (Color::Accent, IconName::ChevronUp)
+            (Color::Default, IconName::ChevronUp)
         } else {
             (Color::Muted, IconName::ChevronDown)
         };
@@ -65,6 +68,8 @@ impl Render for ModelSelectorPopover {
         let tooltip = Tooltip::element({
             move |_, _cx| {
                 ModelSelectorTooltip::new()
+                    .provider(connection.clone())
+                    .cost(cost.clone())
                     .show_cycle_row(show_cycle_row)
                     .into_any_element()
             }
@@ -72,22 +77,21 @@ impl Render for ModelSelectorPopover {
 
         PickerPopoverMenu::new(
             self.selector.clone(),
-            Button::new("active-model", model_name)
-                .label_size(LabelSize::Small)
-                .color(color)
-                .when_some(model_icon, |this, icon| {
-                    this.start_icon(
-                        match icon {
-                            AgentModelIcon::Path(path) => Icon::from_external_svg(path),
-                            AgentModelIcon::Named(icon_name) => Icon::new(icon_name),
-                        }
-                        .color(color)
-                        .size(IconSize::XSmall),
+            ButtonLike::new("active-model").child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Label::new(model_name)
+                            .size(LabelSize::Small)
+                            .color(color)
+                            .truncate(),
                     )
-                })
-                .end_icon(Icon::new(icon).color(Color::Muted).size(IconSize::XSmall)),
+                    .child(Icon::new(icon).color(Color::Muted).size(IconSize::XSmall)),
+            ),
             tooltip,
-            gpui::Anchor::BottomRight,
+            // Opens from the button's left edge and is kept inside the window:
+            // with the chat docked right it stays within the chat column.
+            gpui::Anchor::BottomLeft,
             cx,
         )
         .with_handle(self.menu_handle.clone())

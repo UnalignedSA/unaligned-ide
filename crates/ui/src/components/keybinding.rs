@@ -555,6 +555,8 @@ impl RenderOnce for Key {
                 }
             })
             .h(size)
+            // Key names are set in the code font, like the site's kbd.
+            .font_buffer(cx)
             .text_size(size)
             .line_height(relative(1.))
             .text_color(self.color.unwrap_or(Color::Muted).color(cx))
@@ -585,7 +587,7 @@ struct LabelKey {
 }
 
 impl RenderOnce for LabelKey {
-    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let size = self
             .size
             .map(|size| LabelSize::Custom(size.to_rems(window.rem_size())))
@@ -593,6 +595,7 @@ impl RenderOnce for LabelKey {
 
         Label::new(self.key)
             .size(size)
+            .buffer_font(cx)
             .color(self.color.unwrap_or(Color::Default))
     }
 }

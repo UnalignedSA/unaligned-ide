@@ -1,3 +1,4 @@
+// Modified by the Unaligned IDE contributors, 2026: see NOTICE at the repository root.
 #[cfg(test)]
 extern crate self as util;
 
@@ -218,19 +219,19 @@ where
 ///
 /// This function checks if the current process is running with root privileges
 /// and terminates the program with an error message unless explicitly allowed via the
-/// `ZED_ALLOW_ROOT` environment variable.
+/// `IDE_ALLOW_ROOT` environment variable.
 #[cfg(unix)]
 pub fn prevent_root_execution() {
     let is_root = nix::unistd::geteuid().is_root();
-    let allow_root = std::env::var("ZED_ALLOW_ROOT").is_ok_and(|val| val == "true");
+    let allow_root = std::env::var("IDE_ALLOW_ROOT").is_ok_and(|val| val == "true");
 
     if is_root && !allow_root {
         eprintln!(
             "\
-Error: Running Zed as root or via sudo is unsupported.
-       Doing so (even once) may subtly break things for all subsequent non-root usage of Zed.
+Error: Running this editor as root or via sudo is unsupported.
+       Doing so (even once) may subtly break things for all subsequent non-root usage of it.
        It is untested and not recommended, don't complain when things break.
-       If you wish to proceed anyways, set `ZED_ALLOW_ROOT=true` in your environment."
+       If you wish to proceed anyways, set `IDE_ALLOW_ROOT=true` in your environment."
         );
         std::process::exit(1);
     }
@@ -330,7 +331,7 @@ pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<S
     use anyhow::Context as _;
     use paths::PathExt;
     let mut zed_path =
-        std::env::current_exe().context("Failed to determine current zed executable path.")?;
+        std::env::current_exe().context("Failed to determine the editor's executable path.")?;
     if cfg!(target_os = "linux")
         && !zed_path.is_file()
         && let Some(truncated) = zed_path
@@ -345,31 +346,34 @@ pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<S
 
     zed_path
         .try_shell_safe(shell_kind)
-        .context("Failed to shell-escape Zed executable path.")
+        .context("Failed to shell-escape the editor's executable path.")
 }
 
-/// Returns a path for the zed cli executable, this function
-/// should be called from the zed executable, not zed-cli.
-pub fn get_zed_cli_path() -> Result<PathBuf> {
+/// Returns the path of the command-line tool. Call it from the editor's
+/// executable, not from the tool itself.
+///
+/// `app_id` is the name packaging gives to the installed command
+/// (`branding::APP_ID`; this crate is Apache-2.0 and cannot read it itself).
+pub fn get_zed_cli_path(app_id: &str) -> Result<PathBuf> {
     use anyhow::Context as _;
     let zed_path =
-        std::env::current_exe().context("Failed to determine current zed executable path.")?;
+        std::env::current_exe().context("Failed to determine the editor's executable path.")?;
     let parent = zed_path
         .parent()
-        .context("Failed to determine parent directory of zed executable path.")?;
+        .context("Failed to determine the parent directory of the editor's executable path.")?;
 
-    let possible_locations: &[&str] = if cfg!(target_os = "macos") {
-        // On macOS, the zed executable and zed-cli are inside the app bundle,
+    let possible_locations: Vec<String> = if cfg!(target_os = "macos") {
+        // On macOS, the editor and the command are inside the app bundle,
         // so here ./cli is for both installed and development builds.
-        &["./cli"]
+        vec!["./cli".to_string()]
     } else if cfg!(target_os = "windows") {
-        // bin/zed.exe is for installed builds, ./cli.exe is for development builds.
-        &["bin/zed.exe", "./cli.exe"]
+        // bin/<app_id>.exe is for installed builds, ./cli.exe is for development builds.
+        vec![format!("bin/{app_id}.exe"), "./cli.exe".to_string()]
     } else if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") {
         // bin is the standard, ./cli is for the target directory in development builds.
-        &["../bin/zed", "./cli"]
+        vec![format!("../bin/{app_id}"), "./cli".to_string()]
     } else {
-        anyhow::bail!("unsupported platform for determining zed-cli path");
+        anyhow::bail!("unsupported platform for determining the command-line tool's path");
     };
 
     possible_locations
@@ -383,7 +387,7 @@ pub fn get_zed_cli_path() -> Result<PathBuf> {
         })
         .with_context(|| {
             format!(
-                "could not find zed-cli from any of: {}",
+                "could not find the command-line tool at any of: {}",
                 possible_locations.join(", ")
             )
         })

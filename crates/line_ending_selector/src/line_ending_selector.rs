@@ -182,7 +182,7 @@ impl PickerDelegate for LineEndingSelectorDelegate {
 
         let mut list_item = ListItem::new(ix)
             .inset(true)
-            .spacing(ListItemSpacing::Sparse)
+            .spacing(ListItemSpacing::Dense)
             .toggle_state(selected)
             .child(Label::new(label));
 

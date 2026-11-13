@@ -1,0 +1,15 @@
+#!/bin/bash
+# Builds the offscreen variant of the app used by `shot --backend offscreen`: .work/bin/ide-offscreen
+# It is the same app compiled with the `visual-tests` feature, which lets a window render itself
+# to a PNG (gpui `Window::render_to_image`), so no screen capture and no unlocked screen is needed.
+# The normal binary (target/debug/unaligned-ide) is put back at the end.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+mkdir -p .work/bin
+cargo build -p ide --bin unaligned-ide --features visual-tests,gpui_platform/runtime_shaders
+# -c: copy-on-write clone on APFS, instant and without using another gigabyte.
+cp -c target/debug/unaligned-ide .work/bin/ide-offscreen 2>/dev/null || cp target/debug/unaligned-ide .work/bin/ide-offscreen
+cargo build -p ide --features gpui_platform/runtime_shaders
+# `shot` refuses the offscreen binary once target/debug/unaligned-ide has been rebuilt after this point.
+stat -f %m target/debug/unaligned-ide > .work/bin/ide-offscreen.stamp
+echo "$PWD/.work/bin/ide-offscreen"

@@ -421,7 +421,12 @@ fn icon_keys_by_association(
 }
 
 /// The name of the default icon theme.
-pub const DEFAULT_ICON_THEME_NAME: &str = "Zed (Default)";
+pub const DEFAULT_ICON_THEME_NAME: &str = "Default";
+
+/// The name the default icon theme had upstream. Settings files written before
+/// the rename still say it: [`crate::ThemeRegistry::get_icon_theme`] resolves it
+/// to the default theme.
+pub const LEGACY_DEFAULT_ICON_THEME_NAME: &str = "Zed (Default)";
 
 static DEFAULT_ICON_THEME: LazyLock<Arc<IconTheme>> = LazyLock::new(|| {
     Arc::new(IconTheme {

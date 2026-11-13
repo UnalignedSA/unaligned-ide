@@ -6,7 +6,8 @@ use crate::{
     buffer_search::Deploy,
     search_bar::{
         ActionButtonState, HistoryNavigationDirection, alignment_element, input_base_styles,
-        render_local_action_button, render_text_input, should_navigate_history,
+        match_count_label, match_count_text, render_local_action_button,
+        render_replace_action_button, render_text_input, should_navigate_history,
     },
     text_finder::TextFinder,
 };
@@ -14,7 +15,7 @@ use anyhow::Context as _;
 use collections::HashMap;
 use editor::{
     Anchor, Editor, EditorEvent, EditorSettings, MAX_TAB_TITLE_LEN, MultiBuffer, PathKey,
-    SearchResultsStatus, SelectionEffects,
+    SearchResultsStatus, SelectionEffects, ToOffset as _,
     actions::{Backtab, FoldAll, SelectAll, Tab, UnfoldAll},
     items::active_match_index,
     multibuffer_context_lines,
@@ -22,10 +23,10 @@ use editor::{
 };
 use futures::{StreamExt, stream::FuturesOrdered};
 use gpui::{
-    Action, AnyElement, App, AsyncApp, ClickEvent, Context, Entity, EntityId, EventEmitter,
-    FocusHandle, Focusable, Global, Hsla, InteractiveElement, IntoElement, KeyContext,
-    ParentElement, Point, Render, SharedString, Styled, Subscription, Task, TaskExt, UpdateGlobal,
-    WeakEntity, Window, actions, div,
+    Action, App, AsyncApp, ClickEvent, Context, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, Global, InteractiveElement, IntoElement, KeyContext, ParentElement, Point, Render,
+    SharedString, Styled, Subscription, Task, TaskExt, UpdateGlobal, WeakEntity, Window, actions,
+    div,
 };
 use itertools::Itertools;
 use language::{Buffer, Language};
@@ -51,8 +52,8 @@ use std::{
 };
 use text::OffsetRangeExt;
 use ui::{
-    CommonAnimationExt, IconButtonShape, KeyBinding, Toggleable, Tooltip, prelude::*,
-    utils::SearchInputWidth,
+    CommonAnimationExt, EmptyState, IconButtonShape, InputShellGround, KeyBinding, Toggleable,
+    Tooltip, prelude::*, utils::SearchInputWidth,
 };
 use util::{ResultExt as _, paths::PathMatcher};
 use workspace::{
@@ -231,7 +232,7 @@ pub fn init(cx: &mut App) {
             cx.notify();
         });
         workspace.register_action(
-            move |workspace, action: &zed_actions::search::NewSearchInDirectory, window, cx| {
+            move |workspace, action: &app_actions::search::NewSearchInDirectory, window, cx| {
                 ProjectSearchView::new_search_with_filter(
                     workspace,
                     action.directory.clone(),
@@ -1029,29 +1030,6 @@ pub enum ViewEvent {
 
 impl EventEmitter<ViewEvent> for ProjectSearchView {}
 
-fn render_landing_action_button<A: Action>(
-    id: &'static str,
-    label: &'static str,
-    icon: IconName,
-    action: &'static A,
-    focus_handle: FocusHandle,
-    cx: &Context<ProjectSearchView>,
-    handler: fn(&mut ProjectSearchView, &A, &mut Window, &mut Context<ProjectSearchView>),
-) -> impl IntoElement {
-    Button::new(id, label)
-        .start_icon(Icon::new(icon).size(IconSize::Small))
-        .key_binding(KeyBinding::for_action_in(action, &focus_handle, cx))
-        .on_click({
-            let focus_handle = focus_handle.clone();
-            cx.listener(move |this, _: &ClickEvent, window, cx| {
-                if !focus_handle.is_focused(window) {
-                    window.focus(&focus_handle, cx);
-                }
-                handler(this, action, window, cx);
-            })
-        })
-}
-
 impl Render for ProjectSearchView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut key_context = KeyContext::default();
@@ -1066,57 +1044,14 @@ impl Render for ProjectSearchView {
                 .track_focus(&self.focus_handle(cx))
                 .child(self.results_editor.clone())
         } else {
-            let model = self.entity.read(cx);
-
-            let heading_text = match model.search_state {
-                SearchState::Running { .. } if model.search_state.no_results_so_far() => {
-                    "No Results"
-                }
-                SearchState::Running {
-                    activity: SearchActivity::WaitingForScan,
-                    ..
-                } => "Loading project…",
-                SearchState::Running {
-                    activity: SearchActivity::Searching,
-                    ..
-                } => "Searching…",
-                SearchState::Completed(SearchCompletion::NoResults) => "No Results",
-                _ => "Search All Files",
-            };
-
-            let heading_text = div()
-                .justify_center()
-                .child(Label::new(heading_text).size(LabelSize::Large));
-
-            let page_content: Option<AnyElement> = match model.search_state {
-                SearchState::Idle => Some(self.landing_text_minor(cx).into_any_element()),
-                _ if model.search_state.no_results_so_far() => Some(
-                    Label::new("No results found in this project for the provided query")
-                        .size(LabelSize::Small)
-                        .into_any_element(),
-                ),
-                _ => None,
-            };
-
-            let page_content = page_content.map(|text| div().child(text));
-
-            h_flex()
+            div()
                 .key_context(key_context)
                 .on_action(cx.listener(Self::open_text_finder))
                 .size_full()
-                .items_center()
-                .justify_center()
                 .overflow_hidden()
                 .bg(cx.theme().colors().editor_background)
                 .track_focus(&self.focus_handle(cx))
-                .child(
-                    v_flex()
-                        .id("project-search-landing-page")
-                        .overflow_y_scroll()
-                        .gap_1()
-                        .child(heading_text)
-                        .children(page_content),
-                )
+                .child(self.render_empty_state(cx))
         }
     }
 }
@@ -1627,6 +1562,7 @@ impl ProjectSearchView {
             cx.subscribe(&results_editor, |this, _, event: &EditorEvent, cx| {
                 if matches!(event, editor::EditorEvent::SelectionsChanged { .. }) {
                     this.update_match_index(cx);
+                    this.sync_selection_highlight(cx);
                 }
                 // Reraise editor events for workspace item activation purposes
                 cx.emit(ViewEvent::EditorEvent(event.clone()));
@@ -2300,6 +2236,8 @@ impl ProjectSearchView {
                     Autoscroll::fit()
                 };
                 editor.unfold_ranges(std::slice::from_ref(&range_to_select), false, true, cx);
+                // See `sync_selection_highlight`: a match is painted once.
+                editor.set_use_selection_highlight(false);
                 editor.change_selections(SelectionEffects::scroll(autoscroll), window, cx, |s| {
                     s.select_ranges([range_to_select])
                 });
@@ -2404,6 +2342,7 @@ impl ProjectSearchView {
             self.results_editor.update(cx, |editor, cx| {
                 let range_to_select = editor.range_for_match(first_match);
                 if editor.selections.newest_anchor().range() != range_to_select {
+                    editor.set_use_selection_highlight(false);
                     editor.change_selections(
                         SelectionEffects::no_scroll().nav_history(false),
                         window,
@@ -2439,6 +2378,7 @@ impl ProjectSearchView {
                         let range_to_select = match_ranges
                             .first()
                             .map(|range| editor.range_for_match(range));
+                        editor.set_use_selection_highlight(false);
                         editor.change_selections(Default::default(), window, cx, |s| {
                             s.select_ranges(range_to_select)
                         });
@@ -2487,6 +2427,31 @@ impl ProjectSearchView {
         }
     }
 
+    /// Keeps each match painted once. The editor fills every other occurrence
+    /// of the selected text; when that selection is the match the search just
+    /// selected, those occurrences are the other matches, which would get a
+    /// second, lighter fill over their own. The occurrence fill is therefore
+    /// off while the selection is a match and back as soon as the user selects
+    /// something else (the same rule as the editor's own find bar).
+    fn sync_selection_highlight(&mut self, cx: &mut Context<Self>) {
+        let active_match = self
+            .active_match_index
+            .and_then(|index| self.entity.read(cx).match_ranges.get(index).cloned());
+        self.results_editor.update(cx, |editor, cx| {
+            // Compared as offsets: the selection's anchors are not the match's
+            // own, even when both are at the same place.
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let selection = editor.selections.newest_anchor().range();
+            let selection =
+                selection.start.to_offset(&snapshot)..selection.end.to_offset(&snapshot);
+            let selection_is_match = active_match.is_some_and(|range| {
+                let range = editor.range_for_match(&range);
+                (range.start.to_offset(&snapshot)..range.end.to_offset(&snapshot)) == selection
+            });
+            editor.set_use_selection_highlight(!selection_is_match);
+        });
+    }
+
     #[ztracing::instrument(skip_all)]
     fn highlight_matches(
         &self,
@@ -2514,72 +2479,84 @@ impl ProjectSearchView {
         self.active_match_index.is_some()
     }
 
-    fn landing_text_minor(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let focus_handle = self.focus_handle.clone();
-        v_flex()
-            .gap_1()
-            .child(
-                Label::new(if EditorSettings::get_global(cx).search.search_on_type {
-                    "Start typing to search. For more options:"
+    /// What the tab shows while it has no result to list: what the place is
+    /// for, that a search is running, or that the query matched nothing.
+    fn render_empty_state(&self, cx: &mut Context<Self>) -> EmptyState {
+        let model = self.entity.read(cx);
+        let no_results = model.search_state.no_results_so_far();
+        let empty_state = match model.search_state {
+            SearchState::Running { .. } | SearchState::Completed(_) if no_results => {
+                let query = model
+                    .last_search_query_text
+                    .clone()
+                    .unwrap_or_else(|| self.query_editor.read(cx).text(cx));
+                let query = util::truncate_and_trailoff(query.trim(), 48);
+                return EmptyState::new(format!("No results for \u{201c}{query}\u{201d}"))
+                    .icon(IconName::MagnifyingGlass)
+                    .description("Check the options and the path filters of the search.")
+                    .centered(true);
+            }
+            SearchState::Running {
+                activity: SearchActivity::WaitingForScan,
+                ..
+            } => return EmptyState::new("Loading project\u{2026}").centered(true),
+            SearchState::Running {
+                activity: SearchActivity::Searching,
+                ..
+            } => return EmptyState::new("Searching\u{2026}").centered(true),
+            _ => EmptyState::new("Search across the project")
+                .icon(IconName::MagnifyingGlass)
+                .description(if EditorSettings::get_global(cx).search.search_on_type {
+                    "Results appear as you type."
                 } else {
-                    "Hit enter to search. For more options:"
+                    "Type a query and press Enter."
                 })
-                .color(Color::Muted)
-                .mb_2(),
-            )
-            .child(render_landing_action_button(
-                "filter-paths",
-                "Include/exclude specific paths",
-                IconName::Filter,
-                &ToggleFilters,
-                focus_handle.clone(),
-                cx,
-                Self::toggle_filters_ui,
-            ))
-            .child(render_landing_action_button(
-                "find-replace",
-                "Find and replace",
-                IconName::Replace,
-                &ToggleReplace,
-                focus_handle.clone(),
-                cx,
-                Self::toggle_replace,
-            ))
-            .child(render_landing_action_button(
-                "regex",
-                "Match with regex",
-                IconName::Regex,
-                &ToggleRegex,
-                focus_handle.clone(),
-                cx,
-                |this, _, _, cx| this.toggle_search_option_ui(SearchOptions::REGEX, cx),
-            ))
-            .child(render_landing_action_button(
-                "match-case",
-                "Match case",
-                IconName::CaseSensitive,
-                &ToggleCaseSensitive,
-                focus_handle.clone(),
-                cx,
-                |this, _, _, cx| this.toggle_search_option_ui(SearchOptions::CASE_SENSITIVE, cx),
-            ))
-            .child(render_landing_action_button(
-                "match-whole-words",
-                "Match whole words",
-                IconName::WholeWord,
-                &ToggleWholeWord,
-                focus_handle,
-                cx,
-                |this, _, _, cx| this.toggle_search_option_ui(SearchOptions::WHOLE_WORD, cx),
-            ))
-    }
+                .centered(true),
+        };
 
-    fn border_color_for(&self, panel: InputPanel, cx: &App) -> Hsla {
-        if self.panels_with_errors.contains_key(&panel) {
-            Color::Error.color(cx)
-        } else {
-            cx.theme().colors().border
-        }
+        // The options of a search, each with its key cap.
+        let focus_handle = self.focus_handle.clone();
+        let key_binding =
+            |action: &dyn Action| Some(KeyBinding::for_action_in(action, &focus_handle, cx));
+        let focus = |window: &mut Window, cx: &mut Context<Self>, focus_handle: &FocusHandle| {
+            if !focus_handle.is_focused(window) {
+                window.focus(focus_handle, cx);
+            }
+        };
+        empty_state
+            .action(
+                "Include or Exclude Paths",
+                key_binding(&ToggleFilters),
+                cx.listener({
+                    let focus_handle = focus_handle.clone();
+                    move |this, _: &ClickEvent, window, cx| {
+                        focus(window, cx, &focus_handle);
+                        this.toggle_filters_ui(&ToggleFilters, window, cx);
+                    }
+                }),
+            )
+            .action(
+                "Find and Replace",
+                key_binding(&ToggleReplace),
+                cx.listener({
+                    let focus_handle = focus_handle.clone();
+                    move |this, _: &ClickEvent, window, cx| {
+                        focus(window, cx, &focus_handle);
+                        this.toggle_replace(&ToggleReplace, window, cx);
+                    }
+                }),
+            )
+            .action(
+                "Match with Regex",
+                key_binding(&ToggleRegex),
+                cx.listener({
+                    let focus_handle = focus_handle.clone();
+                    move |this, _: &ClickEvent, window, cx| {
+                        focus(window, cx, &focus_handle);
+                        this.toggle_search_option_ui(SearchOptions::REGEX, cx);
+                    }
+                }),
+            )
     }
 
     fn move_focus_to_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3047,10 +3024,22 @@ impl Render for ProjectSearchBar {
         let input_width = SearchInputWidth::calc_width(container_width);
 
         let input_base_styles = |panel: InputPanel| {
-            input_base_styles(search.border_color_for(panel, cx), |div| match panel {
-                InputPanel::Query | InputPanel::Replacement => div.w(input_width),
-                InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
-            })
+            let editor = match panel {
+                InputPanel::Query => &search.query_editor,
+                InputPanel::Replacement => &search.replacement_editor,
+                InputPanel::Include => &search.included_files_editor,
+                InputPanel::Exclude => &search.excluded_files_editor,
+            };
+            // The bar sits on the editor's ground: its inputs are raised (D9).
+            input_base_styles(
+                editor.focus_handle(cx).is_focused(window),
+                search.panels_with_errors.contains_key(&panel),
+                InputShellGround::Raised,
+                |shell| match panel {
+                    InputPanel::Query | InputPanel::Replacement => shell.w(input_width),
+                    InputPanel::Include | InputPanel::Exclude => shell.flex_grow_1(),
+                },
+            )
         };
         let theme_colors = cx.theme().colors();
         let project_search = search.entity.read(cx);
@@ -3071,23 +3060,11 @@ impl Render for ProjectSearchBar {
             _ => None,
         };
 
-        let match_text = search
-            .active_match_index
-            .and_then(|index| {
-                let index = index + 1;
-                let match_quantity = project_search.match_ranges.len();
-                if match_quantity > 0 {
-                    debug_assert!(match_quantity >= index);
-                    if limit_reached {
-                        Some(format!("{index}/{match_quantity}+"))
-                    } else {
-                        Some(format!("{index}/{match_quantity}"))
-                    }
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "0/0".to_string());
+        let match_text = match_count_text(
+            search.active_match_index,
+            project_search.match_ranges.len(),
+            limit_reached,
+        );
 
         let query_focus = search.query_editor.focus_handle(cx);
 
@@ -3106,7 +3083,7 @@ impl Render for ProjectSearchBar {
             )))
             .child(
                 h_flex()
-                    .gap_1()
+                    .gap_0p5()
                     .child(SearchOption::CaseSensitive.as_button(
                         search.search_options,
                         SearchSource::Project(cx),
@@ -3124,14 +3101,47 @@ impl Render for ProjectSearchBar {
                     )),
             );
 
+        // Same order as the buffer find bar: counter, previous, next, then modes.
         let matches_column = h_flex()
-            .ml_1()
-            .pl_1p5()
-            .border_l_1()
-            .border_color(theme_colors.border_variant)
+            .gap_0p5()
+            .child(
+                div()
+                    .id("matches")
+                    .mr_1()
+                    .min_w(rems_from_px(80_f32))
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .child(match_count_label(
+                                match_text,
+                                if search.active_match_index.is_some() {
+                                    Color::Muted
+                                } else if color_override.is_some() {
+                                    Color::Error
+                                } else {
+                                    Color::Disabled
+                                },
+                                cx,
+                            ))
+                            .when(is_search_underway, |this| {
+                                this.child(
+                                    Icon::new(IconName::ArrowCircle)
+                                        .color(Color::Muted)
+                                        .size(IconSize::Small)
+                                        .with_rotate_animation(2)
+                                        .into_any_element(),
+                                )
+                            }),
+                    )
+                    .when(limit_reached, |this| {
+                        this.tooltip(Tooltip::text(
+                            "Search Limits Reached\nTry narrowing your search",
+                        ))
+                    }),
+            )
             .child(render_local_action_button(
                 "project-search-nav-button",
-                IconName::ChevronLeft,
+                IconName::ArrowUp,
                 search
                     .active_match_index
                     .is_none()
@@ -3144,7 +3154,7 @@ impl Render for ProjectSearchBar {
             ))
             .child(render_local_action_button(
                 "project-search-nav-button",
-                IconName::ChevronRight,
+                IconName::ArrowDown,
                 search
                     .active_match_index
                     .is_none()
@@ -3154,83 +3164,54 @@ impl Render for ProjectSearchBar {
                 query_focus.clone(),
                 cx,
                 Self::select_next_match,
-            ))
-            .child(
-                div()
-                    .id("matches")
-                    .ml_2()
-                    .min_w(rems_from_px(40_f32))
-                    .child(
-                        h_flex()
-                            .gap_1p5()
-                            .child(
-                                Label::new(match_text)
-                                    .size(LabelSize::Small)
-                                    .when(search.active_match_index.is_some(), |this| {
-                                        this.color(Color::Disabled)
-                                    }),
-                            )
-                            .when(is_search_underway, |this| {
-                                this.child(
-                                    Icon::new(IconName::ArrowCircle)
-                                        .color(Color::Accent)
-                                        .size(IconSize::Small)
-                                        .with_rotate_animation(2)
-                                        .into_any_element(),
-                                )
-                            }),
-                    )
-                    .when(limit_reached, |this| {
-                        this.tooltip(Tooltip::text(
-                            "Search Limits Reached\nTry narrowing your search",
-                        ))
-                    }),
-            );
+            ));
 
-        let mode_column = h_flex()
-            .gap_1()
-            .min_w_64()
-            .child(
-                IconButton::new("project-search-filter-button", IconName::Filter)
-                    .shape(IconButtonShape::Square)
-                    .tooltip(|_window, cx| {
-                        Tooltip::for_action("Toggle Filters", &ToggleFilters, cx)
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_filters(window, cx);
-                    }))
-                    .toggle_state(
-                        self.active_project_search
-                            .as_ref()
-                            .map(|search| search.read(cx).filters_enabled)
-                            .unwrap_or_default(),
-                    )
-                    .tooltip({
-                        let focus_handle = focus_handle.clone();
-                        move |_window, cx| {
-                            Tooltip::for_action_in(
-                                "Toggle Filters",
-                                &ToggleFilters,
-                                &focus_handle,
-                                cx,
-                            )
-                        }
-                    }),
-            )
-            .child(render_local_action_button(
-                "project-search",
-                IconName::Replace,
-                self.active_project_search
-                    .as_ref()
-                    .map(|search| search.read(cx).replace_enabled)
-                    .and_then(|enabled| enabled.then_some(ActionButtonState::Toggled)),
-                "Toggle Replace",
-                &ToggleReplace,
-                focus_handle.clone(),
-                cx,
-                Self::toggle_replace,
-            ))
-            .child(matches_column);
+        let mode_column = h_flex().gap_0p5().child(matches_column).child(
+            h_flex()
+                .ml_1()
+                .pl_1()
+                .gap_0p5()
+                .border_l_1()
+                .border_color(theme_colors.border)
+                .child(
+                    IconButton::new("project-search-filter-button", IconName::Filter)
+                        .shape(IconButtonShape::Square)
+                        .icon_size(IconSize::Small)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_filters(window, cx);
+                        }))
+                        .toggle_state(
+                            self.active_project_search
+                                .as_ref()
+                                .map(|search| search.read(cx).filters_enabled)
+                                .unwrap_or_default(),
+                        )
+                        .tooltip({
+                            let focus_handle = focus_handle.clone();
+                            move |_window, cx| {
+                                Tooltip::for_action_in(
+                                    "Toggle Filters",
+                                    &ToggleFilters,
+                                    &focus_handle,
+                                    cx,
+                                )
+                            }
+                        }),
+                )
+                .child(render_local_action_button(
+                    "project-search",
+                    IconName::Replace,
+                    self.active_project_search
+                        .as_ref()
+                        .map(|search| search.read(cx).replace_enabled)
+                        .and_then(|enabled| enabled.then_some(ActionButtonState::Toggled)),
+                    "Toggle Replace",
+                    &ToggleReplace,
+                    focus_handle.clone(),
+                    cx,
+                    Self::toggle_replace,
+                )),
+        );
 
         let is_collapsed = search.results_editor.read(cx).has_any_buffer_folded(cx);
 
@@ -3242,6 +3223,7 @@ impl Render for ProjectSearchBar {
 
         let expand_button = IconButton::new("project-search-collapse-expand", icon)
             .shape(IconButtonShape::Square)
+            .icon_size(IconSize::Small)
             .tooltip(move |_, cx| {
                 Tooltip::for_action_in(
                     tooltip_label,
@@ -3259,9 +3241,8 @@ impl Render for ProjectSearchBar {
             }));
 
         let search_line = h_flex()
-            .pl_0p5()
             .w_full()
-            .gap_2()
+            .gap_1()
             .child(expand_button)
             .child(query_column)
             .child(mode_column);
@@ -3277,9 +3258,8 @@ impl Render for ProjectSearchBar {
 
             let focus_handle = search.replacement_editor.read(cx).focus_handle(cx);
             let replace_actions = h_flex()
-                .min_w_64()
                 .gap_1()
-                .child(render_local_action_button(
+                .child(render_replace_action_button(
                     "project-search-replace-button",
                     IconName::ReplaceNext,
                     is_search_underway.then_some(ActionButtonState::Disabled),
@@ -3289,7 +3269,7 @@ impl Render for ProjectSearchBar {
                     cx,
                     Self::replace_next,
                 ))
-                .child(render_local_action_button(
+                .child(render_replace_action_button(
                     "project-search-replace-button",
                     IconName::ReplaceAll,
                     Default::default(),
@@ -3302,7 +3282,7 @@ impl Render for ProjectSearchBar {
 
             h_flex()
                 .w_full()
-                .gap_2()
+                .gap_1()
                 .child(alignment_element())
                 .child(replace_column)
                 .child(replace_actions)
@@ -3326,11 +3306,11 @@ impl Render for ProjectSearchBar {
                 }))
                 .child(render_text_input(&search.excluded_files_editor, None, cx));
             let mode_column = h_flex()
-                .gap_1()
-                .min_w_64()
+                .gap_0p5()
                 .child(
                     IconButton::new("project-search-opened-only", IconName::FolderSearch)
                         .shape(IconButtonShape::Square)
+                        .icon_size(IconSize::Small)
                         .toggle_state(self.is_opened_only_enabled(cx))
                         .tooltip(Tooltip::text("Only Search Open Files"))
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -3345,12 +3325,12 @@ impl Render for ProjectSearchBar {
 
             h_flex()
                 .w_full()
-                .gap_2()
+                .gap_1()
                 .child(alignment_element())
                 .child(
                     h_flex()
                         .w(input_width)
-                        .gap_2()
+                        .gap_1()
                         .child(include)
                         .child(exclude),
                 )
@@ -3374,7 +3354,6 @@ impl Render for ProjectSearchBar {
                 Label::new(error)
                     .size(LabelSize::Small)
                     .color(Color::Error)
-                    .mt_neg_1()
                     .ml_2()
             });
 
@@ -3386,12 +3365,11 @@ impl Render for ProjectSearchBar {
                 Label::new(error)
                     .size(LabelSize::Small)
                     .color(Color::Error)
-                    .mt_neg_1()
                     .ml_2()
             });
 
         v_flex()
-            .gap_2()
+            .gap_1()
             .w_full()
             .key_context(key_context)
             .on_action(cx.listener(|this, _: &ToggleFocus, window, cx| {
@@ -3909,6 +3887,8 @@ pub mod tests {
             })
             .unwrap();
 
+        // Each match carries one fill: the other matches are not also painted
+        // as occurrences of the selected text while the selection is a match.
         assert_active_match_index(&search_view, cx, 0);
         assert_selection_range(&search_view, cx, dp(2, 32)..dp(2, 35));
         assert_highlights(
@@ -3916,9 +3896,7 @@ pub mod tests {
             cx,
             vec![
                 (dp(2, 32)..dp(2, 35), "active"),
-                (dp(2, 37)..dp(2, 40), "selection"),
                 (dp(2, 37)..dp(2, 40), "match"),
-                (dp(5, 6)..dp(5, 9), "selection"),
                 (dp(5, 6)..dp(5, 9), "match"),
             ],
         );
@@ -3931,10 +3909,8 @@ pub mod tests {
             &search_view,
             cx,
             vec![
-                (dp(2, 32)..dp(2, 35), "selection"),
                 (dp(2, 32)..dp(2, 35), "match"),
                 (dp(2, 37)..dp(2, 40), "active"),
-                (dp(5, 6)..dp(5, 9), "selection"),
                 (dp(5, 6)..dp(5, 9), "match"),
             ],
         );
@@ -3947,9 +3923,7 @@ pub mod tests {
             &search_view,
             cx,
             vec![
-                (dp(2, 32)..dp(2, 35), "selection"),
                 (dp(2, 32)..dp(2, 35), "match"),
-                (dp(2, 37)..dp(2, 40), "selection"),
                 (dp(2, 37)..dp(2, 40), "match"),
                 (dp(5, 6)..dp(5, 9), "active"),
             ],
@@ -3964,9 +3938,7 @@ pub mod tests {
             cx,
             vec![
                 (dp(2, 32)..dp(2, 35), "active"),
-                (dp(2, 37)..dp(2, 40), "selection"),
                 (dp(2, 37)..dp(2, 40), "match"),
-                (dp(5, 6)..dp(5, 9), "selection"),
                 (dp(5, 6)..dp(5, 9), "match"),
             ],
         );
@@ -3979,9 +3951,7 @@ pub mod tests {
             &search_view,
             cx,
             vec![
-                (dp(2, 32)..dp(2, 35), "selection"),
                 (dp(2, 32)..dp(2, 35), "match"),
-                (dp(2, 37)..dp(2, 40), "selection"),
                 (dp(2, 37)..dp(2, 40), "match"),
                 (dp(5, 6)..dp(5, 9), "active"),
             ],
@@ -3995,10 +3965,8 @@ pub mod tests {
             &search_view,
             cx,
             vec![
-                (dp(2, 32)..dp(2, 35), "selection"),
                 (dp(2, 32)..dp(2, 35), "match"),
                 (dp(2, 37)..dp(2, 40), "active"),
-                (dp(5, 6)..dp(5, 9), "selection"),
                 (dp(5, 6)..dp(5, 9), "match"),
             ],
         );
@@ -5087,7 +5055,7 @@ pub mod tests {
         window
             .update(cx, |_, window, cx| {
                 window.dispatch_action(
-                    Box::new(zed_actions::search::NewSearchInDirectory { directory }),
+                    Box::new(app_actions::search::NewSearchInDirectory { directory }),
                     cx,
                 );
             })

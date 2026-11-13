@@ -491,7 +491,7 @@ async fn run_terminal_tool(
             }
             if !ineffective.is_empty() {
                 return Err(format!(
-                    "Sandboxing is disabled for this thread, so every command runs without an OS \
+                    "Sandboxing is disabled for this chat, so every command runs without an OS \
                      sandbox and these fields have no effect: {}. Remove them and rerun the \
                      command (it will run unsandboxed), or pass `unsandboxed: true` to acknowledge \
                      it runs without a sandbox.",
@@ -504,7 +504,7 @@ async fn run_terminal_tool(
                 && !sandbox_input.fs_write_paths.is_empty()
             {
                 return Err(
-                    "Unrestricted filesystem writes are enabled for this thread, so every command \
+                    "Unrestricted filesystem writes are enabled for this chat, so every command \
                      can already write anywhere except protected Git metadata; `fs_write_paths` \
                      cannot narrow that. Remove `fs_write_paths`."
                         .to_string(),
@@ -512,7 +512,7 @@ async fn run_terminal_tool(
             }
             if net_unrestricted_floor && !want_all_hosts && !sandbox_input.allow_hosts.is_empty() {
                 return Err(
-                    "Unrestricted network access is enabled for this thread, so every command can \
+                    "Unrestricted network access is enabled for this chat, so every command can \
                      already reach any host; `allow_hosts` cannot narrow that. Remove `allow_hosts`."
                         .to_string(),
                 );
@@ -598,7 +598,7 @@ async fn run_terminal_tool(
     #[cfg(target_os = "windows")]
     let write_paths: Vec<settings::GrantedWritePath> = {
         let Some(release) = wsl_zed_release.clone() else {
-            return Err("Could not select a Linux Zed release for WSL sandboxing".to_string());
+            return Err("Could not select a Linux release for WSL sandboxing".to_string());
         };
         let mut resolved_paths = Vec::with_capacity(write_paths.len());
         for requested in write_paths {
@@ -951,7 +951,7 @@ async fn run_terminal_tool(
         let mut note = match reason {
             acp_thread::SandboxNotAppliedReason::DisabledForThisThread => {
                 "Note: this command ran WITHOUT an OS sandbox because the user allowed unsandboxed \
-                 execution for the rest of this thread."
+                 execution for the rest of this chat."
                     .to_string()
             }
             acp_thread::SandboxNotAppliedReason::ErrorLinuxWsl(error) => format!(
@@ -3378,7 +3378,7 @@ mod tests {
                 ),
                 (
                     "allow_thread",
-                    "Allow for this thread",
+                    "Allow for this chat",
                     acp_v2::PermissionOptionKind::AllowAlways,
                 ),
                 (
@@ -3480,7 +3480,7 @@ mod tests {
                 ),
                 (
                     "allow_thread",
-                    "Allow for this thread",
+                    "Allow for this chat",
                     acp_v2::PermissionOptionKind::AllowAlways,
                 ),
                 (
@@ -3728,7 +3728,7 @@ mod tests {
             .await
             .expect_err("scoping a request in an unsandboxed thread should be rejected");
         assert!(
-            error.contains("Sandboxing is disabled for this thread"),
+            error.contains("Sandboxing is disabled for this chat"),
             "unexpected error: {error}"
         );
         // The error must name exactly the fields that have no effect.
@@ -3768,7 +3768,7 @@ mod tests {
             .await
             .expect_err("scoping writes when FS is unrestricted should be rejected");
         assert!(
-            error.contains("Unrestricted filesystem writes are enabled for this thread"),
+            error.contains("Unrestricted filesystem writes are enabled for this chat"),
             "unexpected error: {error}"
         );
         assert_eq!(environment.terminal_creation_count(), 0);
@@ -3798,7 +3798,7 @@ mod tests {
             .await
             .expect_err("scoping hosts when network is unrestricted should be rejected");
         assert!(
-            error.contains("Unrestricted network access is enabled for this thread"),
+            error.contains("Unrestricted network access is enabled for this chat"),
             "unexpected error: {error}"
         );
         assert_eq!(environment.terminal_creation_count(), 0);

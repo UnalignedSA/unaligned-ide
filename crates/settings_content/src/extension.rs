@@ -9,7 +9,9 @@ use util::serde::default_true;
 #[with_fallible_options]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct ExtensionSettingsContent {
-    /// The extensions that should be automatically installed by Zed.
+    /// The extensions that should be installed without asking: when a file needs
+    /// one, when the Extensions page is opened or with the daily check for extension
+    /// updates, not at start-up.
     ///
     /// This is used to make functionality provided by extensions (e.g., language support)
     /// available out-of-the-box.

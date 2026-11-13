@@ -344,8 +344,11 @@ impl<'de> Deserialize<'de> for ZedCustomizationsWrapper {
         D: Deserializer<'de>,
     {
         let value = Value::deserialize(deserializer)?;
+        // The product's own key first, then upstream's: devcontainer.json files
+        // written for upstream keep working.
         let zed = value
-            .get("zed")
+            .get(branding::APP_ID)
+            .or_else(|| value.get("zed"))
             .map(|zed_value| serde_json_lenient::from_value::<ZedCustomization>(zed_value.clone()))
             .transpose()
             .map_err(serde::de::Error::custom)?

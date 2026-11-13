@@ -38,15 +38,15 @@ use crate::kernels::{
 use crate::notebook::MovementDirection;
 use crate::repl_store::ReplStore;
 
-use jupyter_protocol::{ExecuteRequest, JupyterMessage, JupyterMessageContent};
-use picker::Picker;
-use ui::PopoverMenuHandle;
-use zed_actions::editor::{MoveDown, MoveUp};
-use zed_actions::notebook::{
+use app_actions::editor::{MoveDown, MoveUp};
+use app_actions::notebook::{
     AddCodeBlock, AddMarkdownBlock, ClearOutputs, DeleteCell, EnterCommandMode, EnterEditMode,
     InterruptKernel, MoveCellDown, MoveCellUp, NotebookMoveDown, NotebookMoveUp, OpenNotebook,
     RestartKernel, Run, RunAll, RunAndAdvance,
 };
+use jupyter_protocol::{ExecuteRequest, JupyterMessage, JupyterMessageContent};
+use picker::Picker;
+use ui::PopoverMenuHandle;
 
 /// Whether the notebook is in command mode (navigating cells) or edit mode (editing a cell).
 #[derive(Clone, Copy, PartialEq, Eq)]

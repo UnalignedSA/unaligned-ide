@@ -16,7 +16,7 @@ use ui::{ConfiguredApiCard, prelude::*};
 use x_ai_subscribed::{PROVIDER_ID, PROVIDER_NAME, State, SuperGrokModel, language_model};
 
 const SUBSCRIPTION_DESCRIPTION: &str =
-    "Sign in with your SuperGrok subscription to use Grok models in Zed's agent.";
+    "Sign in with your SuperGrok subscription to use Grok models in the chat.";
 
 pub struct XAiSubscribedProvider {
     state: Entity<State>,
@@ -150,13 +150,13 @@ impl LanguageModelProvider for XAiSubscribedProvider {
 
     fn authentication_error_message(&self) -> SharedString {
         "Your SuperGrok session is invalid or has expired. \
-        Sign in again via Settings > AI > LLM Providers to continue."
+        Sign in again in Connections to continue."
             .into()
     }
 
     fn missing_credentials_error_message(&self) -> SharedString {
         "You are not signed in to SuperGrok. \
-        Sign in via Settings > AI > LLM Providers to continue."
+        Sign in in Connections to continue."
             .into()
     }
 }

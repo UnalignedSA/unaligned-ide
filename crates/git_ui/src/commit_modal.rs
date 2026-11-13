@@ -3,14 +3,14 @@ use crate::git_panel::{
     GitPanel, commit_message_editor, commit_title_exceeds_limit, git_commit_editor_style,
 };
 use crate::git_panel_settings::GitPanelSettings;
+use app_actions::{DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize};
 use git::{Amend, Commit, GenerateCommitMessage, Signoff, SkipHooks};
 use project::DisableAiSettings;
 use settings::Settings;
 use ui::{
-    ButtonLike, ContextMenu, ContextMenuEntry, DocumentationSide, ElevationIndex, KeybindingHint,
-    PopoverMenu, PopoverMenuHandle, SplitButton, Tooltip, prelude::*,
+    ContextMenu, ContextMenuEntry, DocumentationSide, KeybindingHint, PopoverMenu,
+    PopoverMenuHandle, Tooltip, prelude::*,
 };
-use zed_actions::{DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize};
 
 use editor::{Editor, EditorElement};
 use gpui::*;
@@ -52,12 +52,13 @@ impl ModalContainerProperties {
             editor_height: 300.0,
             footer_height: 24.0,
             container_padding,
-            modal_border_radius: 12.0,
+            // Square corners everywhere in this design language.
+            modal_border_radius: 0.0,
         }
     }
 
     pub fn editor_border_radius(&self) -> Pixels {
-        px(self.modal_border_radius - self.container_padding / 2.0)
+        px((self.modal_border_radius - self.container_padding / 2.0).max(0.0))
     }
 }
 
@@ -274,10 +275,21 @@ impl CommitModal {
         PopoverMenu::new(id.into())
             .with_handle(self.commit_menu_handle.clone())
             .trigger(
-                crate::render_split_button_chevron_trigger(
+                // The commit options: an outlined neighbour of the primary
+                // button, never a second fill.
+                IconButton::new(
                     "modal-commit-split-button-right",
-                    menu_open,
+                    if menu_open {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    },
                 )
+                .style(ButtonStyle::Outlined)
+                .icon_size(IconSize::XSmall)
+                .icon_color(Color::Muted)
+                .toggle_state(menu_open)
+                .aria_label("Commit Options")
                 .disabled(disabled),
             )
             .menu({
@@ -390,10 +402,10 @@ impl CommitModal {
             .start_icon(
                 Icon::new(IconName::GitBranch)
                     .size(IconSize::Small)
-                    .color(Color::Placeholder),
+                    .color(Color::Muted),
             )
             .on_click(cx.listener(|_, _, window, cx| {
-                window.dispatch_action(zed_actions::git::Branch.boxed_clone(), cx);
+                window.dispatch_action(app_actions::git::Branch.boxed_clone(), cx);
             }));
 
         let branch_picker = PopoverMenu::new("popover-button")
@@ -409,7 +421,7 @@ impl CommitModal {
             .with_handle(self.branch_list_handle.clone())
             .trigger_with_tooltip(
                 branch_picker_button,
-                Tooltip::for_action_title("Switch Branch", &zed_actions::git::Branch),
+                Tooltip::for_action_title("Switch Branch", &app_actions::git::Branch),
             )
             .anchor(Anchor::BottomLeft)
             .offset(gpui::Point {
@@ -446,15 +458,16 @@ impl CommitModal {
                     .children(co_authors),
             )
             .child(
-                h_flex()
-                    .gap_4()
-                    .child(close_kb_hint)
-                    .child(SplitButton::new(
-                        ButtonLike::new_rounded_left(format!("split-button-left-{}", commit_label))
-                            .layer(ElevationIndex::ModalSurface)
-                            .size(ButtonSize::Compact)
+                h_flex().gap_4().child(close_kb_hint).child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::primary(
+                                format!("split-button-left-{}", commit_label),
+                                commit_label,
+                            )
+                            .label_size(LabelSize::Small)
                             .disabled(!can_commit)
-                            .child(Label::new(commit_label).size(LabelSize::Small).mr_0p5())
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 telemetry::event!("Git Committed", source = "Git Modal");
                                 this.git_panel.update(cx, |git_panel, cx| {
@@ -492,13 +505,13 @@ impl CommitModal {
                                     }
                                 }
                             }),
-                        self.render_git_commit_menu(
+                        )
+                        .child(self.render_git_commit_menu(
                             format!("split-button-right-{}", commit_label),
                             Some(focus_handle),
                             is_generating,
-                        )
-                        .into_any_element(),
-                    )),
+                        )),
+                ),
             )
     }
 
@@ -626,17 +639,17 @@ impl Render for CommitModal {
                 }))
             })
             .on_action(
-                cx.listener(|this, _: &zed_actions::git::Branch, window, cx| {
+                cx.listener(|this, _: &app_actions::git::Branch, window, cx| {
                     this.toggle_branch_selector(window, cx);
                 }),
             )
             .on_action(
-                cx.listener(|this, _: &zed_actions::git::CheckoutBranch, window, cx| {
+                cx.listener(|this, _: &app_actions::git::CheckoutBranch, window, cx| {
                     this.toggle_branch_selector(window, cx);
                 }),
             )
             .on_action(
-                cx.listener(|this, _: &zed_actions::git::Switch, window, cx| {
+                cx.listener(|this, _: &app_actions::git::Switch, window, cx| {
                     this.toggle_branch_selector(window, cx);
                 }),
             )

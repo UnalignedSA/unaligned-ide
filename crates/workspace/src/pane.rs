@@ -23,7 +23,7 @@ use gpui::{
     DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
     Focusable, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel, Render,
     ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window, actions,
-    anchored, deferred, prelude::*,
+    anchored, deferred, prelude::*, px,
 };
 use itertools::Itertools;
 use language::{Capability, DiagnosticSeverity};
@@ -46,9 +46,9 @@ use std::{
 };
 use theme_settings::ThemeSettings;
 use ui::{
-    ContextMenu, ContextMenuEntry, ContextMenuItem, DecoratedIcon, IconButtonShape, IconDecoration,
-    IconDecorationKind, Indicator, PopoverMenu, PopoverMenuHandle, Tab, TabBar, TabPosition,
-    Tooltip, prelude::*, right_click_menu,
+    ContextMenu, ContextMenuEntry, ContextMenuItem, DecoratedIcon, EmptyState, IconButtonShape,
+    IconDecoration, IconDecorationKind, Indicator, PopoverMenu, PopoverMenuHandle, Tab, TabBar,
+    TabPosition, Tooltip, prelude::*, right_click_menu,
 };
 use util::{
     ResultExt, debug_panic, markdown::MarkdownInlineCode, maybe, paths::PathStyle,
@@ -2955,6 +2955,8 @@ impl Pane {
                 ClosePosition::Right => ui::TabCloseSide::End,
             })
             .toggle_state(is_active)
+            .focused(self.has_focus(window, cx))
+            .compact(is_pinned)
             .on_click(cx.listener({
                 let item_handle = item.boxed_clone();
                 move |pane: &mut Self, event: &ClickEvent, window, cx| {
@@ -3033,21 +3035,21 @@ impl Pane {
                 this.drag_split_direction = None;
                 this.handle_external_paths_drop(paths, window, cx)
             }))
-            .start_slot::<Indicator>(indicator)
             .map(|this| {
+                // One slot on the close side, like VS Code: the dirty dot sits
+                // there and gives way to the close (or unpin) button on hover.
                 let end_slot_action: &'static dyn Action;
                 let end_slot_tooltip_text: &'static str;
-                let end_slot = if is_pinned {
+                let button = if is_pinned {
                     end_slot_action = &TogglePinTab;
                     end_slot_tooltip_text = "Unpin Tab";
-                    IconButton::new("unpin tab", IconName::Pin)
-                        .shape(IconButtonShape::Square)
-                        .icon_color(Color::Muted)
-                        .size(ButtonSize::None)
-                        .icon_size(IconSize::Small)
-                        .on_click(cx.listener(move |pane, _, window, cx| {
-                            pane.unpin_tab_at(ix, window, cx);
-                        }))
+                    Some(
+                        IconButton::new("unpin tab", IconName::Pin).on_click(cx.listener(
+                            move |pane, _, window, cx| {
+                                pane.unpin_tab_at(ix, window, cx);
+                            },
+                        )),
+                    )
                 } else {
                     end_slot_action = &CloseActiveItem {
                         save_intent: None,
@@ -3055,37 +3057,64 @@ impl Pane {
                     };
                     end_slot_tooltip_text = "Close Tab";
                     match show_close_button {
-                        ShowCloseButton::Always => IconButton::new("close tab", IconName::Close),
-                        ShowCloseButton::Hover => {
-                            IconButton::new("close tab", IconName::Close).visible_on_hover("")
+                        ShowCloseButton::Hidden => None,
+                        ShowCloseButton::Always | ShowCloseButton::Hover => {
+                            Some(IconButton::new("close tab", IconName::Close).on_click(
+                                cx.listener(move |pane, _, window, cx| {
+                                    pane.close_item_by_id(item_id, SaveIntent::Close, window, cx)
+                                        .detach_and_log_err(cx);
+                                }),
+                            ))
                         }
-                        ShowCloseButton::Hidden => return this,
                     }
-                    .shape(IconButtonShape::Square)
-                    .icon_color(Color::Muted)
-                    .size(ButtonSize::None)
-                    .icon_size(IconSize::Small)
-                    .on_click(cx.listener(move |pane, _, window, cx| {
-                        pane.close_item_by_id(item_id, SaveIntent::Close, window, cx)
-                            .detach_and_log_err(cx);
-                    }))
-                }
-                .map(|this| {
-                    if is_active {
-                        let focus_handle = focus_handle.clone();
-                        this.tooltip(move |window, cx| {
-                            Tooltip::for_action_in(
-                                end_slot_tooltip_text,
-                                end_slot_action,
-                                &window.focused(cx).unwrap_or_else(|| focus_handle.clone()),
-                                cx,
-                            )
+                };
+                let has_button = button.is_some();
+                let button_always_visible = indicator.is_none()
+                    && (is_pinned || matches!(show_close_button, ShowCloseButton::Always));
+                let button = button.map(|button| {
+                    button
+                        .shape(IconButtonShape::Square)
+                        .icon_color(Color::Muted)
+                        .size(ButtonSize::None)
+                        .icon_size(IconSize::Small)
+                        .when(!button_always_visible, |button| button.visible_on_hover(""))
+                        .map(|this| {
+                            if is_active {
+                                let focus_handle = focus_handle.clone();
+                                this.tooltip(move |window, cx| {
+                                    Tooltip::for_action_in(
+                                        end_slot_tooltip_text,
+                                        end_slot_action,
+                                        &window.focused(cx).unwrap_or_else(|| focus_handle.clone()),
+                                        cx,
+                                    )
+                                })
+                            } else {
+                                this.tooltip(Tooltip::text(end_slot_tooltip_text))
+                            }
                         })
-                    } else {
-                        this.tooltip(Tooltip::text(end_slot_tooltip_text))
-                    }
                 });
-                this.end_slot(end_slot)
+                this.end_slot(
+                    h_flex()
+                        .relative()
+                        .size_full()
+                        .justify_center()
+                        .children(button)
+                        .when_some(indicator, |this, indicator| {
+                            this.child(
+                                h_flex()
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .size_full()
+                                    .justify_center()
+                                    .when(has_button, |this| {
+                                        this.group_hover("", |style| style.invisible())
+                                    })
+                                    .child(indicator),
+                            )
+                        }),
+                )
             })
             .child(
                 h_flex()
@@ -3362,7 +3391,7 @@ impl Pane {
                                 .when_some(entry_abs_path, |menu, abs_path| {
                                     menu.entry(
                                         "Copy Path",
-                                        Some(Box::new(zed_actions::workspace::CopyPath)),
+                                        Some(Box::new(app_actions::workspace::CopyPath)),
                                         window.handler_for(&pane, move |_, _, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 abs_path.to_string_lossy().into_owned(),
@@ -3373,7 +3402,7 @@ impl Pane {
                                 .when_some(relative_path, |menu, relative_path| {
                                     menu.entry(
                                         "Copy Relative Path",
-                                        Some(Box::new(zed_actions::workspace::CopyRelativePath)),
+                                        Some(Box::new(app_actions::workspace::CopyRelativePath)),
                                         window.handler_for(&pane, move |this, _, cx| {
                                             let Some(project) = this.project.upgrade() else {
                                                 return;
@@ -3438,7 +3467,7 @@ impl Pane {
                                         menu.separator().entry(
                                             ui::utils::reveal_in_file_manager_label(is_remote),
                                             Some(Box::new(
-                                                zed_actions::editor::RevealInFileManager,
+                                                app_actions::editor::RevealInFileManager,
                                             )),
                                             window.handler_for(&pane, move |pane, _, cx| {
                                                 if let Some(project) = pane.project.upgrade() {
@@ -3455,7 +3484,7 @@ impl Pane {
                                 .map(pin_tab_entries)
                                 .when(visible_in_project_panel, |menu| {
                                     menu.entry(
-                                        "Reveal In Project Panel",
+                                        "Reveal in Explorer",
                                         Some(Box::new(RevealInProjectPanel::default())),
                                         window.handler_for(&pane, move |pane, _, cx| {
                                             pane.project
@@ -3511,6 +3540,8 @@ impl Pane {
 
         let navigate_backward = IconButton::new("navigate_backward", IconName::ArrowLeft)
             .icon_size(IconSize::Small)
+            .icon_color(Color::Muted)
+            .aria_label("Go Back")
             .on_click({
                 let entity = cx.entity();
                 move |_, window, cx| {
@@ -3534,6 +3565,8 @@ impl Pane {
 
         let navigate_forward = IconButton::new("navigate_forward", IconName::ArrowRight)
             .icon_size(IconSize::Small)
+            .icon_color(Color::Muted)
+            .aria_label("Go Forward")
             .on_click({
                 let entity = cx.entity();
                 move |_, window, cx| {
@@ -3569,8 +3602,7 @@ impl Pane {
         if self.is_tab_pinned(tab_count) {
             log::warn!(
                 "Pinned tab count ({}) exceeds actual tab count ({}). \
-                This should not happen. If possible, add reproduction steps, \
-                in a comment, to https://github.com/zed-industries/zed/issues/33342",
+                This should not happen.",
                 self.pinned_tab_count,
                 tab_count
             );
@@ -3613,26 +3645,22 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Pane>,
     ) -> TabBar {
+        // History navigation lives at the end of the bar, before the pane actions.
+        let show_nav_history_buttons = self.display_nav_history_buttons.unwrap_or_default();
+        let (left_children, right_children) = if self.show_tab_bar_buttons {
+            let render_tab_buttons = self.render_tab_bar_buttons.clone();
+            render_tab_buttons(self, window, cx)
+        } else {
+            (None, None)
+        };
         tab_bar
-            .when(
-                self.display_nav_history_buttons.unwrap_or_default(),
-                |tab_bar| {
-                    tab_bar
-                        .start_child(navigate_backward)
-                        .start_child(navigate_forward)
-                },
-            )
-            .map(|tab_bar| {
-                if self.show_tab_bar_buttons {
-                    let render_tab_buttons = self.render_tab_bar_buttons.clone();
-                    let (left_children, right_children) = render_tab_buttons(self, window, cx);
-                    tab_bar
-                        .start_children(left_children)
-                        .end_children(right_children)
-                } else {
-                    tab_bar
-                }
+            .start_children(left_children)
+            .when(show_nav_history_buttons, |tab_bar| {
+                tab_bar
+                    .end_child(navigate_backward)
+                    .end_child(navigate_forward)
             })
+            .end_children(right_children)
     }
 
     fn render_single_row_tab_bar(
@@ -3660,13 +3688,10 @@ impl Pane {
                 // Avoid flickering when max_offset is very small (< 2px).
                 // The border adds 1-2px which can push max_offset back to 0, creating a loop.
                 let is_scrollable = max_scroll > px(2.0);
-                let has_active_unpinned_tab = self.active_item_index >= self.pinned_tab_count;
                 h_flex()
                     .children(pinned_tabs)
                     .when(is_scrollable && is_scrolled, |this| {
-                        this.when(has_active_unpinned_tab, |this| this.border_r_2())
-                            .when(!has_active_unpinned_tab, |this| this.border_r_1())
-                            .border_color(cx.theme().colors().border)
+                        this.border_r_1().border_color(cx.theme().colors().border)
                     })
             }))
             .child(self.render_unpinned_tabs_container(unpinned_tabs, tab_count, cx));
@@ -3786,8 +3811,6 @@ impl Pane {
             .min_w_6()
             .h(Tab::container_height(cx))
             .flex_grow_1()
-            .border_l_1()
-            .border_color(cx.theme().colors().border)
             // HACK: This empty child is currently necessary to force the drop target to appear
             // despite us setting a min width above.
             .child("")
@@ -3823,6 +3846,48 @@ impl Pane {
                     window.dispatch_action(this.double_click_dispatch_action.boxed_clone(), cx);
                 }
             }))
+    }
+
+    /// What the editor area shows when no file is open: the mark and the three
+    /// things to do from here, each with its key cap.
+    fn render_empty_state(&self, _window: &Window, cx: &App) -> impl IntoElement {
+        let focus_handle = self.focus_handle.clone();
+        let key_binding =
+            |action: &dyn Action| Some(ui::KeyBinding::for_action_in(action, &focus_handle, cx));
+        let dispatch = |action: Box<dyn Action>| {
+            let focus_handle = focus_handle.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                focus_handle.dispatch_action(action.as_ref(), window, cx);
+            }
+        };
+
+        let go_to_file = ToggleFileFinder::default();
+        let command_palette = app_actions::command_palette::Toggle;
+        let ask_the_ai = app_actions::assistant::ToggleFocus;
+
+        // Three actions (the empty state's limit). "Edit with AI" is not offered here:
+        // inline edit needs an editor or a terminal, and an empty pane has neither, so
+        // the row did nothing when clicked.
+        v_flex().w_full().max_w(EMPTY_STATE_WIDTH).child(
+            EmptyState::new("")
+                .icon(IconName::AiUnaligned)
+                .centered(true)
+                .action(
+                    "Go to File",
+                    key_binding(&go_to_file),
+                    dispatch(go_to_file.boxed_clone()),
+                )
+                .action(
+                    "Command Palette",
+                    key_binding(&command_palette),
+                    dispatch(command_palette.boxed_clone()),
+                )
+                .action(
+                    "Ask the AI",
+                    key_binding(&ask_the_ai),
+                    dispatch(ask_the_ai.boxed_clone()),
+                ),
+        )
     }
 
     pub fn render_menu_overlay(menu: &Entity<ContextMenu>) -> Div {
@@ -4346,6 +4411,13 @@ impl Pane {
     }
 }
 
+/// The debug selector of the tab bar's last button, the one that opens the
+/// pane's menu (new file, search, terminal, zoom, close all).
+const TAB_BAR_MENU_BUTTON_SELECTOR: &str = "pane-tab-bar-menu-button";
+
+/// The column of a centred `ui::EmptyState` and its vertical padding.
+const EMPTY_STATE_WIDTH: Pixels = px(320.);
+
 fn default_render_tab_bar_buttons(
     pane: &mut Pane,
     window: &mut Window,
@@ -4359,40 +4431,32 @@ fn default_render_tab_bar_buttons(
         Some(_) => (false, pane.items_len() > 1),
         None => (false, false),
     };
+    let zoomed = pane.is_zoomed();
     // Ideally we would return a vec of elements here to pass directly to the [TabBar]'s
     // `end_slot`, but due to needing a view here that isn't possible.
     let right_children = h_flex()
         // Instead we need to replicate the spacing from the [TabBar]'s `end_slot` here.
-        .gap(DynamicSpacing::Base04.rems(cx))
-        .child(
-            PopoverMenu::new("pane-tab-bar-popover-menu")
-                .trigger_with_tooltip(
-                    IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
-                    Tooltip::text("New…"),
-                )
-                .anchor(Anchor::TopRight)
-                .with_handle(pane.new_item_context_menu_handle.clone())
-                .menu(move |window, cx| {
-                    Some(ContextMenu::build(window, cx, |menu, _, _| {
-                        menu.action("New File", NewFile.boxed_clone())
-                            .action("Open File", ToggleFileFinder::default().boxed_clone())
-                            .separator()
-                            .action("Search Project", DeploySearch::default().boxed_clone())
-                            .action("Search Symbols", ToggleProjectSymbols.boxed_clone())
-                            .separator()
-                            .action("New Terminal", NewTerminal::default().boxed_clone())
-                            .action(
-                                "New Center Terminal",
-                                NewCenterTerminal::default().boxed_clone(),
-                            )
+        .gap(DynamicSpacing::Base02.rems(cx))
+        // Only shown while zoomed, as the way back; zooming in is in the More menu.
+        .when(zoomed, |this| {
+            this.child(
+                IconButton::new("toggle_zoom", IconName::Minimize)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .aria_label("Zoom Out")
+                    .on_click(cx.listener(|pane, _, window, cx| {
+                        pane.toggle_zoom(&crate::ToggleZoom, window, cx);
                     }))
-                }),
-        )
+                    .tooltip(move |_window, cx| Tooltip::for_action("Zoom Out", &ToggleZoom, cx)),
+            )
+        })
         .child(
             PopoverMenu::new("pane-tab-bar-split")
                 .trigger_with_tooltip(
                     IconButton::new("split", IconName::Split)
                         .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .aria_label("Split Pane")
                         .disabled(!can_clone && !can_split_move),
                     Tooltip::text("Split Pane"),
                 )
@@ -4416,23 +4480,52 @@ fn default_render_tab_bar_buttons(
                     .into()
                 }),
         )
-        .child({
-            let zoomed = pane.is_zoomed();
-            IconButton::new("toggle_zoom", IconName::Maximize)
-                .icon_size(IconSize::Small)
-                .toggle_state(zoomed)
-                .selected_icon(IconName::Minimize)
-                .on_click(cx.listener(|pane, _, window, cx| {
-                    pane.toggle_zoom(&crate::ToggleZoom, window, cx);
-                }))
-                .tooltip(move |_window, cx| {
-                    Tooltip::for_action(
-                        if zoomed { "Zoom Out" } else { "Zoom In" },
-                        &ToggleZoom,
-                        cx,
-                    )
-                })
-        })
+        .child(
+            // The selector does not depend on the button's icon, so a test that
+            // looks for the last button of the tab bar survives a redesign.
+            div()
+                .debug_selector(|| TAB_BAR_MENU_BUTTON_SELECTOR.into())
+                .child(
+                    PopoverMenu::new("pane-tab-bar-popover-menu")
+                        .trigger_with_tooltip(
+                            IconButton::new("plus", IconName::Ellipsis)
+                                .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
+                                .aria_label("More Actions"),
+                            Tooltip::text("More Actions…"),
+                        )
+                        .anchor(Anchor::TopRight)
+                        .with_handle(pane.new_item_context_menu_handle.clone())
+                        .menu(move |window, cx| {
+                            Some(ContextMenu::build(window, cx, |menu, _, _| {
+                                menu.action("New File", NewFile.boxed_clone())
+                                    .action("Open File", ToggleFileFinder::default().boxed_clone())
+                                    .separator()
+                                    .action("Search Project", DeploySearch::default().boxed_clone())
+                                    .action("Search Symbols", ToggleProjectSymbols.boxed_clone())
+                                    .separator()
+                                    .action("New Terminal", NewTerminal::default().boxed_clone())
+                                    .action(
+                                        "New Center Terminal",
+                                        NewCenterTerminal::default().boxed_clone(),
+                                    )
+                                    .separator()
+                                    .action(
+                                        if zoomed { "Zoom Out" } else { "Zoom In" },
+                                        ToggleZoom.boxed_clone(),
+                                    )
+                                    .action(
+                                        "Close All",
+                                        CloseAllItems {
+                                            save_intent: None,
+                                            close_pinned: false,
+                                        }
+                                        .boxed_clone(),
+                                    )
+                            }))
+                        }),
+                ),
+        )
         .into_any_element()
         .into();
     (None, right_children)
@@ -4670,7 +4763,12 @@ impl Render for Pane {
                                     },
                                 ));
                             if has_worktrees || !self.should_display_welcome_page {
-                                placeholder
+                                // Shortcuts only make sense in the editor area, not
+                                // in an empty dock pane.
+                                placeholder.when(self.in_center_group, |this| {
+                                    this.bg(cx.theme().colors().editor_background)
+                                        .child(self.render_empty_state(window, cx))
+                                })
                             } else {
                                 if self.welcome_page.is_none() {
                                     let workspace = self.workspace.clone();
@@ -5109,7 +5207,8 @@ pub fn render_item_indicator(item: Box<dyn ItemHandle>, cx: &App) -> Option<Indi
     maybe!({
         let indicator_color = match (item.has_conflict(cx), item.is_dirty(cx)) {
             (true, _) => Color::Warning,
-            (_, true) => Color::Accent,
+            // Neutral: the accent is reserved for the active tab marker.
+            (_, true) => Color::Muted,
             (false, false) => return None,
         };
 
@@ -5136,11 +5235,14 @@ impl Render for DraggedTab {
             self.pane
                 .read(cx)
                 .tab_icon_element(self.item.as_ref(), self.is_active, window, cx);
+        // A flat chip on the raised surface, outlined so it reads over any pane.
         Tab::new("")
-            .toggle_state(self.is_active)
             .children(icon)
             .child(label)
             .render(window, cx)
+            .bg(cx.theme().colors().elevated_surface_background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
             .font(ui_font)
     }
 }
@@ -8849,7 +8951,9 @@ mod tests {
             pane.update_in(cx, |pane, _window, _cx| pane.tab_bar_scroll_handle.clone());
         assert_eq!(tab_bar_scroll_handle.children_count(), 6);
         let tab_bounds = cx.debug_bounds("TAB-4").unwrap();
-        let new_tab_button_bounds = cx.debug_bounds("ICON-Plus").unwrap();
+        // The tab bar's last button opens the pane's menu since the redesign
+        // (it was a "+" button upstream): the tab must not slide under it.
+        let new_tab_button_bounds = cx.debug_bounds(TAB_BAR_MENU_BUTTON_SELECTOR).unwrap();
         let scroll_bounds = tab_bar_scroll_handle.bounds();
         let scroll_offset = tab_bar_scroll_handle.offset();
         assert!(scroll_offset.x < px(0.));

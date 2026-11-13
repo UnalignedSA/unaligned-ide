@@ -196,7 +196,7 @@ impl Render for Tooltip {
         tooltip_container(cx, |el, _| {
             el.child(
                 h_flex()
-                    .gap_4()
+                    .gap_3()
                     .child(div().max_w_72().child(self.title.clone()))
                     .when_some(self.key_binding.clone(), |this, key_binding| {
                         this.justify_between().child(key_binding)
@@ -206,7 +206,7 @@ impl Render for Tooltip {
                 this.child(
                     div()
                         .max_w_72()
-                        .child(Label::new(meta).size(LabelSize::Small).color(Color::Muted)),
+                        .child(Label::new(meta).size(LabelSize::XSmall).color(Color::Muted)),
                 )
             })
         })
@@ -221,14 +221,15 @@ where
     let ui_font = theme::theme_settings(app).ui_font(app).clone();
 
     // padding to avoid tooltip appearing right below the mouse cursor
+    // Small and flat: a raised ground and a 1px line, nothing else.
     div().pl_2().pt_2p5().child(
         v_flex()
             .elevation_2(app)
             .font(ui_font)
-            .text_ui(app)
+            .text_ui_sm(app)
             .text_color(app.theme().colors().text)
-            .py_1()
-            .px_2()
+            .py_0p5()
+            .px_1p5()
             .map(|el| f(el, cx)),
     )
 }

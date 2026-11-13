@@ -1,4 +1,7 @@
 use agent_settings::AgentSettings;
+use app_actions::agent::{
+    ConflictContent, ResolveConflictedFilesWithAgent, ResolveConflictsWithAgent,
+};
 use collections::{HashMap, HashSet};
 use editor::{
     ConflictsOurs, ConflictsOursMarker, ConflictsOuter, ConflictsTheirs, ConflictsTheirsMarker,
@@ -16,11 +19,14 @@ use project::{
 };
 use settings::Settings;
 use std::{ops::Range, sync::Arc};
-use ui::{ButtonLike, Divider, Tooltip, prelude::*};
+use ui::{Divider, Tooltip, prelude::*};
 use util::debug_panic;
-use workspace::{HideStatusItem, StatusItemView, Workspace, item::ItemHandle};
-use zed_actions::agent::{
-    ConflictContent, ResolveConflictedFilesWithAgent, ResolveConflictsWithAgent,
+use workspace::{
+    HideStatusItem, StatusItemView, Workspace,
+    active_file_name::{
+        status_bar_icon, status_bar_item, status_bar_item_content, status_bar_text,
+    },
+    item::ItemHandle,
 };
 
 pub(crate) struct ConflictAddon {
@@ -408,7 +414,7 @@ fn render_conflict_buttons(
                 Button::new("resolve-with-agent", "Resolve with Agent")
                     .label_size(LabelSize::Small)
                     .start_icon(
-                        Icon::new(IconName::ZedAssistant)
+                        Icon::new(IconName::AppAssistant)
                             .size(IconSize::Small)
                             .color(Color::Muted),
                     )
@@ -643,27 +649,17 @@ impl Render for MergeConflictIndicator {
         )
         .into();
 
-        let border_color = cx.theme().colors().text_accent.opacity(0.2);
-
+        // Built from the status bar's shared blocks: an 11px micro-label like
+        // its neighbours, no box around it.
         h_flex()
-            .h(rems_from_px(22_f32))
-            .rounded_sm()
-            .border_1()
-            .border_color(border_color)
             .child(
-                ButtonLike::new("update-button")
+                status_bar_item("update-button", cx)
                     .tab_index(0isize)
                     .aria_label(message.clone())
                     .child(
-                        h_flex()
-                            .h_full()
-                            .gap_1()
-                            .child(
-                                Icon::new(IconName::GitMergeConflict)
-                                    .size(IconSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .child(Label::new(message).size(LabelSize::Small)),
+                        status_bar_item_content()
+                            .child(status_bar_icon(IconName::GitMergeConflict))
+                            .child(status_bar_text(message, cx)),
                     )
                     .tooltip(move |_, cx| {
                         Tooltip::with_meta(
@@ -678,11 +674,11 @@ impl Render for MergeConflictIndicator {
                     })),
             )
             .child(
-                div().border_l_1().border_color(border_color).child(
-                    IconButton::new("dismiss-merge-conflicts", IconName::Close)
-                        .icon_size(IconSize::XSmall)
-                        .on_click(cx.listener(Self::dismiss)),
-                ),
+                IconButton::new("dismiss-merge-conflicts", IconName::Close)
+                    .icon_size(IconSize::XSmall)
+                    .aria_label("Dismiss")
+                    .tooltip(Tooltip::text("Dismiss"))
+                    .on_click(cx.listener(Self::dismiss)),
             )
             .into_any_element()
     }

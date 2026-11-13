@@ -26,7 +26,8 @@ pub use crate::repl_settings::ReplSettings;
 pub use crate::repl_store::ReplStore;
 pub use crate::session::Session;
 
-pub const KERNEL_DOCS_URL: &str = "https://zed.dev/docs/repl#changing-kernels";
+// Jupyter's own page: the product has no manual of its own for the REPL.
+pub const KERNEL_DOCS_URL: &str = "https://docs.jupyter.org/en/latest/install/kernels.html";
 
 pub fn init(fs: Arc<dyn Fs>, cx: &mut App) {
     set_dispatcher(zed_dispatcher(cx));

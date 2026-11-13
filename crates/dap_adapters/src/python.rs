@@ -336,7 +336,7 @@ impl PythonDebugAdapter {
 
                 let debug_adapter_path = paths::debug_adapters_dir().join(Self::DEBUG_ADAPTER_NAME.as_ref());
                 let output = util::command::new_command(&base_python)
-                    .args(["-m", "venv", "zed_base_venv"])
+                    .args(["-m", "venv", "base_venv"])
                     .current_dir(
                         &debug_adapter_path,
                     )
@@ -361,7 +361,7 @@ impl PythonDebugAdapter {
                 Ok(Arc::from(
                     paths::debug_adapters_dir()
                         .join(Self::DEBUG_ADAPTER_NAME.as_ref())
-                        .join("zed_base_venv")
+                        .join("base_venv")
                         .join(PYTHON_PATH)
                         .as_ref(),
                 ))
@@ -623,7 +623,7 @@ impl DebugAdapter for PythonDebugAdapter {
                         "label": "Path mapping",
                         "properties": {
                             "localRoot": {
-                                "default": "${ZED_WORKTREE_ROOT}",
+                                "default": "${IDE_WORKTREE_ROOT}",
                                 "label": "Local source root.",
                                 "type": "string"
                             },
@@ -785,7 +785,7 @@ impl DebugAdapter for PythonDebugAdapter {
                                 ]
                             },
                             "cwd": {
-                                "default": "${ZED_WORKTREE_ROOT}",
+                                "default": "${IDE_WORKTREE_ROOT}",
                                 "description": "Absolute path to the working directory of the program being debugged. Default is the root directory of the file (leave empty).",
                                 "type": "string"
                             },
@@ -803,7 +803,7 @@ impl DebugAdapter for PythonDebugAdapter {
                                 "type": "object"
                             },
                             "envFile": {
-                                "default": "${ZED_WORKTREE_ROOT}/.env",
+                                "default": "${IDE_WORKTREE_ROOT}/.env",
                                 "description": "Absolute path to a file containing environment variable definitions.",
                                 "type": "string"
                             },
@@ -818,7 +818,7 @@ impl DebugAdapter for PythonDebugAdapter {
                                 "type": "string"
                             },
                             "program": {
-                                "default": "${ZED_FILE}",
+                                "default": "${IDE_FILE}",
                                 "description": "Absolute path to the program.",
                                 "type": "string"
                             },

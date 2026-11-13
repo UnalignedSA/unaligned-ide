@@ -13,7 +13,7 @@ use settings::Settings;
 use std::sync::Arc;
 use time::OffsetDateTime;
 use time_format;
-use ui::{HighlightedLabel, KeyBinding, ListItem, ListItemSpacing, Tooltip, prelude::*};
+use ui::{HighlightedLabel, ListItem, ListItemSpacing, Tooltip, prelude::*};
 use util::ResultExt;
 use workspace::notifications::DetachAndPromptErr;
 use workspace::{ModalView, Workspace};
@@ -33,7 +33,7 @@ actions!(
 
 pub fn open(
     workspace: &mut Workspace,
-    _: &zed_actions::git::ViewStash,
+    _: &app_actions::git::ViewStash,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -604,38 +604,26 @@ impl PickerDelegate for StashListDelegate {
         let focus_handle = self.focus_handle.clone();
 
         Some(
-            h_flex()
-                .w_full()
-                .p_1p5()
-                .gap_0p5()
+            picker::footer(cx)
                 .justify_end()
-                .flex_wrap()
-                .border_t_1()
-                .border_color(cx.theme().colors().border_variant)
                 .child(
-                    Button::new("drop-stash", "Drop")
-                        .key_binding(
-                            KeyBinding::for_action_in(
-                                &stash_picker::DropStashItem,
-                                &focus_handle,
-                                cx,
-                            )
-                            .map(|kb| kb.size(rems_from_px(12_f32))),
-                        )
+                    picker::footer_button("drop-stash", "Drop")
+                        .key_binding(picker::footer_key_cap(
+                            &stash_picker::DropStashItem,
+                            &focus_handle,
+                            cx,
+                        ))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(stash_picker::DropStashItem.boxed_clone(), cx)
                         }),
                 )
                 .child(
-                    Button::new("view-stash", "View")
-                        .key_binding(
-                            KeyBinding::for_action_in(
-                                &stash_picker::ShowStashItem,
-                                &focus_handle,
-                                cx,
-                            )
-                            .map(|kb| kb.size(rems_from_px(12_f32))),
-                        )
+                    picker::footer_button("view-stash", "View")
+                        .key_binding(picker::footer_key_cap(
+                            &stash_picker::ShowStashItem,
+                            &focus_handle,
+                            cx,
+                        ))
                         .on_click(cx.listener(move |picker, _, window, cx| {
                             cx.stop_propagation();
                             let selected_ix = picker.delegate.selected_index();
@@ -643,21 +631,19 @@ impl PickerDelegate for StashListDelegate {
                         })),
                 )
                 .child(
-                    Button::new("pop-stash", "Pop")
-                        .key_binding(
-                            KeyBinding::for_action_in(&menu::SecondaryConfirm, &focus_handle, cx)
-                                .map(|kb| kb.size(rems_from_px(12_f32))),
-                        )
+                    picker::footer_button("pop-stash", "Pop")
+                        .key_binding(picker::footer_key_cap(
+                            &menu::SecondaryConfirm,
+                            &focus_handle,
+                            cx,
+                        ))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(menu::SecondaryConfirm.boxed_clone(), cx)
                         }),
                 )
                 .child(
-                    Button::new("apply-stash", "Apply")
-                        .key_binding(
-                            KeyBinding::for_action_in(&menu::Confirm, &focus_handle, cx)
-                                .map(|kb| kb.size(rems_from_px(12_f32))),
-                        )
+                    picker::footer_button("apply-stash", "Apply")
+                        .key_binding(picker::footer_key_cap(&menu::Confirm, &focus_handle, cx))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(menu::Confirm.boxed_clone(), cx)
                         }),

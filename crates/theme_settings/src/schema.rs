@@ -331,6 +331,26 @@ pub fn theme_colors_refinement(
             .border_disabled
             .as_ref()
             .and_then(|color| try_parse_color(color).ok()),
+        border_strong: this
+            .border_strong
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        text_faint: this
+            .text_faint
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        accent_background: this
+            .accent_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        accent_hover: this
+            .accent_hover
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        accent_foreground: this
+            .accent_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
         elevated_surface_background: this
             .elevated_surface_background
             .as_ref()

@@ -4,7 +4,7 @@ use gpui::{Action, ClipboardItem, Entity, FocusHandle, SharedString, WeakEntity,
 use project::{GIT_COMMAND_TASK_TAG, git_store::Repository};
 
 use task::{TaskContext, TaskVariables, VariableName};
-use ui::{Color, ContextMenu, ContextMenuEntry, IconName, IconPosition, prelude::*};
+use ui::{ContextMenu, ContextMenuEntry, prelude::*};
 use util::ResultExt as _;
 use workspace::Workspace;
 
@@ -21,7 +21,6 @@ actions!(
 );
 
 const COMMIT_TAG_LIST_WIDTH_IN_REMS: Rems = rems(10.);
-pub(crate) const CUSTOM_GIT_COMMANDS_DOCS_SLUG: &str = "tasks#custom-git-commands";
 
 pub(crate) struct CommitContextMenuData {
     pub(crate) sha: Oid,
@@ -154,21 +153,14 @@ pub(crate) fn commit_context_menu(
                 })
             })
             .map(|mut menu| {
-                menu = menu.separator().header("Custom Commands");
-
+                // Upstream showed the section even when empty, with a "Learn
+                // More" entry that opened its manual. The product has no such
+                // page: the section appears once a custom command exists.
                 if git_tasks.is_empty() {
-                    return menu.item(
-                        ContextMenuEntry::new("Learn More")
-                            .icon(IconName::ArrowUpRight)
-                            .icon_color(Color::Muted)
-                            .icon_position(IconPosition::End)
-                            .handler(|_window, cx| {
-                                let docs_url =
-                                    release_channel::docs_url(CUSTOM_GIT_COMMANDS_DOCS_SLUG, cx);
-                                cx.open_url(&docs_url);
-                            }),
-                    );
+                    return menu;
                 }
+
+                menu = menu.separator().header("Custom Commands");
 
                 for (task_source_kind, resolved_task) in git_tasks {
                     let label = resolved_task.display_label().to_string();

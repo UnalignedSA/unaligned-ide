@@ -105,21 +105,21 @@ impl RenderOnce for AnnouncementToast {
             .occlude()
             .relative()
             .w_full()
-            .elevation_3(cx)
+            // A flat card: raised ground and a 1px line.
+            .elevation_2(cx)
             .when_some(illustration, |this, i| this.child(i))
             .child(
                 v_flex()
                     .p_4()
                     .gap_4()
                     .when(has_illustration, |s| {
-                        s.border_t_1()
-                            .border_color(cx.theme().colors().border_variant)
+                        s.border_t_1().border_color(cx.theme().colors().border)
                     })
                     .child(
                         v_flex()
                             .min_w_0()
                             .when_some(self.heading, |this, heading| {
-                                this.child(Headline::new(heading).size(HeadlineSize::Small))
+                                this.child(Headline::new(heading).size(HeadlineSize::XSmall))
                             })
                             .when_some(self.description, |this, description| {
                                 this.child(Label::new(description).color(Color::Muted))
@@ -130,16 +130,17 @@ impl RenderOnce for AnnouncementToast {
                     })
                     .child(
                         v_flex()
-                            .gap_1()
+                            .gap_1p5()
                             .child(
-                                Button::new("try-now", self.primary_action_label)
-                                    .style(ButtonStyle::Tinted(crate::TintColor::Accent))
+                                Button::primary("try-now", self.primary_action_label)
+                                    .size(ButtonSize::Medium)
                                     .full_width()
                                     .on_click(self.primary_on_click),
                             )
                             .child(
                                 Button::new("release-notes", self.secondary_action_label)
-                                    .style(ButtonStyle::OutlinedGhost)
+                                    .style(ButtonStyle::Outlined)
+                                    .size(ButtonSize::Medium)
                                     .full_width()
                                     .on_click(self.secondary_on_click),
                             ),
@@ -174,7 +175,7 @@ impl Component for AnnouncementToast {
                         .heading("Introducing Parallel Agents")
                         .description("Run multiple agent threads simultaneously across projects.")
                         .bullet_item(ListBulletItem::new(
-                            "Mix and match Zed's agent with any ACP-compatible agent",
+                            "Mix and match the built-in agent with any ACP-compatible agent",
                         ))
                         .bullet_item(ListBulletItem::new(
                             "Optional worktree isolation keeps agents from conflicting",

@@ -305,8 +305,9 @@ impl RenderOnce for ListItem {
             .relative()
             // When an item is inset draw the indent spacing outside of the item
             .when(self.inset, |this| {
+                // Rows run edge to edge: with square corners an inset gutter
+                // would read as a row of floating boxes.
                 this.ml(self.indent_level as f32 * self.indent_step_size)
-                    .px(DynamicSpacing::Base04.rems(cx))
             })
             .when(!self.inset, |this| {
                 this.when_some(self.focused, |this, focused| {
@@ -361,7 +362,17 @@ impl RenderOnce for ListItem {
                     .w_full()
                     .relative()
                     .gap_1()
-                    .px(DynamicSpacing::Base06.rems(cx))
+                    .px(if self.inset {
+                        DynamicSpacing::Base08.rems(cx)
+                    } else {
+                        DynamicSpacing::Base06.rems(cx)
+                    })
+                    // VS Code row rhythm; an explicit height from the caller wins.
+                    .when(self.height.is_none(), |this| match self.spacing {
+                        ListItemSpacing::Dense => this.min_h(rems_from_px(24_f32)),
+                        ListItemSpacing::ExtraDense => this.min_h(rems_from_px(22_f32)),
+                        ListItemSpacing::Sparse => this.min_h(rems_from_px(28_f32)),
+                    })
                     .map(|this| match self.spacing {
                         ListItemSpacing::Dense => this,
                         ListItemSpacing::ExtraDense => this.py_neg_px(),

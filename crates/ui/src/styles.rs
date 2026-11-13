@@ -2,6 +2,7 @@ pub mod animation;
 mod appearance;
 mod color;
 mod elevation;
+pub mod metrics;
 mod platform;
 mod severity;
 mod spacing;

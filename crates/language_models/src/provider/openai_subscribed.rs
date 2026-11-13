@@ -17,7 +17,7 @@ use std::sync::Arc;
 use ui::{ConfiguredApiCard, prelude::*};
 
 const SUBSCRIPTION_DESCRIPTION: &str =
-    "Sign in with your ChatGPT Plus or Pro subscription to use OpenAI models in Zed's agent.";
+    "Sign in with your ChatGPT Plus or Pro subscription to use OpenAI models in the chat.";
 
 pub struct OpenAiSubscribedProvider {
     state: Entity<State>,
@@ -163,13 +163,13 @@ impl LanguageModelProvider for OpenAiSubscribedProvider {
 
     fn authentication_error_message(&self) -> SharedString {
         "Your ChatGPT subscription session is invalid or has expired. \
-        Sign in again via Settings > AI > LLM Providers to continue."
+        Sign in again in Connections to continue."
             .into()
     }
 
     fn missing_credentials_error_message(&self) -> SharedString {
         "You are not signed in to your ChatGPT account. \
-        Sign in via Settings > AI > LLM Providers to continue."
+        Sign in in Connections to continue."
             .into()
     }
 

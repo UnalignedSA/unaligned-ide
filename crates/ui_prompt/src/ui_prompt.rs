@@ -88,8 +88,14 @@ impl ZedPromptRenderer {
         cx.notify();
     }
 
+    // Actions are laid out right to left (the first one, the primary, sits
+    // rightmost), so "next" (the right arrow) walks towards index 0.
     fn select_next(&mut self, _: &menu::SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
-        self.active_action_id = (self.active_action_id + 1) % self.actions.len();
+        if self.active_action_id > 0 {
+            self.active_action_id -= 1;
+        } else {
+            self.active_action_id = self.actions.len().saturating_sub(1);
+        }
         cx.notify();
     }
 
@@ -99,11 +105,7 @@ impl ZedPromptRenderer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_action_id > 0 {
-            self.active_action_id -= 1;
-        } else {
-            self.active_action_id = self.actions.len().saturating_sub(1);
-        }
+        self.active_action_id = (self.active_action_id + 1) % self.actions.len();
         cx.notify();
     }
 }
@@ -122,33 +124,47 @@ impl Render for ZedPromptRenderer {
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_first))
             .on_action(cx.listener(Self::select_last))
-            .w_80()
-            .p_4()
-            .gap_4()
+            .w(px(440.))
+            .max_w_full()
             .elevation_3(cx)
             .overflow_hidden()
             .font_family(settings.ui_font.family.clone())
-            .child(div().w_full().child(MarkdownElement::new(
-                self.message.clone(),
-                markdown_style(true, window, cx),
-            )))
-            .children(self.detail.clone().map(|detail| {
-                div().w_full().text_xs().child(MarkdownElement::new(
-                    detail,
-                    markdown_style(false, window, cx),
-                ))
-            }))
             .child(
                 v_flex()
-                    .gap_1()
-                    .children(self.actions.iter().enumerate().map(|(ix, action)| {
+                    .w_full()
+                    .p_4()
+                    .gap_2()
+                    .child(div().w_full().child(MarkdownElement::new(
+                        self.message.clone(),
+                        markdown_style(true, window, cx),
+                    )))
+                    .children(self.detail.clone().map(|detail| {
+                        div().w_full().text_xs().child(MarkdownElement::new(
+                            detail,
+                            markdown_style(false, window, cx),
+                        ))
+                    })),
+            )
+            // Footer: actions right aligned under a line, the primary one rightmost.
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_4()
+                    .py_2()
+                    .gap_2()
+                    .flex_wrap()
+                    .justify_end()
+                    .border_t_1()
+                    .border_color(cx.theme().colors().border)
+                    .children(self.actions.iter().enumerate().rev().map(|(ix, action)| {
                         Button::new(ix, action.clone())
-                            .full_width()
+                            .size(ButtonSize::Medium)
                             .style(ButtonStyle::Outlined)
                             .when(ix == self.active_action_id, |s| {
                                 s.style(ButtonStyle::Tinted(TintColor::Accent))
                             })
-                            .tab_index(ix as isize)
+                            // Keep tab order in reading order (left to right).
+                            .tab_index((self.actions.len() - 1 - ix) as isize)
                             .on_click(cx.listener(move |_, _, _window, cx| {
                                 cx.emit(PromptResponse(ix));
                             }))
@@ -163,7 +179,7 @@ impl Render for ZedPromptRenderer {
                 .occlude()
                 .absolute()
                 .inset_0()
-                .bg(gpui::black().opacity(0.2))
+                .bg(ui::scrim(cx))
                 .map(|this| match decorations {
                     Decorations::Server => this,
                     Decorations::Client { tiling } => this

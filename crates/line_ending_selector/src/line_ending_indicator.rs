@@ -3,7 +3,10 @@ use gpui::{App, Entity, Subscription, WeakEntity};
 use language::LineEnding;
 use ui::{Tooltip, prelude::*};
 use workspace::{
-    HideStatusItem, StatusBarSettings, StatusItemView, item::ItemHandle, item::Settings,
+    HideStatusItem, StatusBarSettings, StatusItemView,
+    active_file_name::{status_bar_item, status_bar_item_content, status_bar_text},
+    item::ItemHandle,
+    item::Settings,
 };
 
 use crate::{LineEndingSelector, Toggle};
@@ -38,9 +41,12 @@ impl Render for LineEndingIndicator {
 
         div().when_some(self.line_ending.as_ref(), |el, line_ending| {
             el.child(
-                Button::new("change-line-ending", line_ending.label())
-                    .label_size(LabelSize::Small)
+                status_bar_item("change-line-ending", cx)
+                    .child(
+                        status_bar_item_content().child(status_bar_text(line_ending.label(), cx)),
+                    )
                     .tab_index(0isize)
+                    .aria_label(format!("Line ending: {}", line_ending.label()))
                     .on_click(cx.listener(|this, _, window, cx| {
                         if let Some(editor) = this.active_editor.as_ref() {
                             LineEndingSelector::toggle(editor, window, cx);

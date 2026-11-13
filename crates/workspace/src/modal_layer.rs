@@ -69,6 +69,9 @@ trait ModalViewHandle {
     fn view(&self) -> AnyView;
     fn focus_handle(&self, cx: &App) -> FocusHandle;
     fn subscribe_dismiss(&self, window: &mut Window, cx: &mut Context<ModalLayer>) -> Subscription;
+    // Upstream's request for a heavier backdrop, kept for merges: every modal now gets
+    // the one `ui::scrim`.
+    #[allow(dead_code)]
     fn fade_out_background(&self, cx: &mut App) -> bool;
     fn render_bare(&self, cx: &mut App) -> bool;
 }
@@ -300,11 +303,8 @@ impl Render for ModalLayer {
             .size_full()
             .inset_0()
             .occlude()
-            .when(active_modal.modal.fade_out_background(cx), |this| {
-                let mut background = cx.theme().colors().elevated_surface_background;
-                background.fade_out(0.2);
-                this.bg(background)
-            })
+            // One flat dim over the whole workspace, the same behind every modal.
+            .bg(ui::scrim(cx))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {

@@ -112,32 +112,37 @@ impl Render for Toolbar {
             return div();
         }
 
-        let secondary_items = self.secondary_items().map(|item| item.to_any());
+        let secondary_items = self
+            .secondary_items()
+            .map(|item| item.to_any())
+            .collect::<Vec<_>>();
 
         let has_left_items = self.left_items().count() > 0;
         let has_right_items = self.right_items().count() > 0;
+        let has_primary_row = has_left_items || has_right_items;
+        let has_secondary_items = !secondary_items.is_empty();
 
         v_flex()
             .group("toolbar")
             .relative()
-            .py(DynamicSpacing::Base06.rems(cx))
-            .px(DynamicSpacing::Base08.rems(cx))
-            .when(has_left_items || has_right_items, |this| {
-                this.gap(DynamicSpacing::Base06.rems(cx))
-            })
-            .border_b_1()
-            .border_color(cx.theme().colors().border_variant)
             .bg(cx.theme().colors().toolbar_background)
-            .when(has_left_items || has_right_items, |this| {
+            // The breadcrumb row alone merges with the editor, like VS Code; a
+            // line only appears once a widget (find, search) is stacked under it.
+            .when(has_secondary_items, |this| {
+                this.border_b_1().border_color(cx.theme().colors().border)
+            })
+            .when(has_primary_row, |this| {
                 this.child(
                     h_flex()
                         .items_start()
                         .justify_between()
+                        .px(DynamicSpacing::Base08.rems(cx))
+                        .py_px()
                         .gap(DynamicSpacing::Base08.rems(cx))
                         .when(has_left_items, |this| {
                             this.child(
                                 h_flex()
-                                    .min_h_8()
+                                    .min_h_6()
                                     .flex_auto()
                                     .justify_start()
                                     .overflow_x_hidden()
@@ -147,7 +152,7 @@ impl Render for Toolbar {
                         .when(has_right_items, |this| {
                             this.child(
                                 h_flex()
-                                    .h_8()
+                                    .h_6()
                                     .flex_row_reverse()
                                     .when(has_left_items, |this| this.flex_none())
                                     .justify_end()
@@ -156,7 +161,19 @@ impl Render for Toolbar {
                         }),
                 )
             })
-            .children(secondary_items)
+            .when(has_secondary_items, |this| {
+                this.child(
+                    v_flex()
+                        .px(DynamicSpacing::Base08.rems(cx))
+                        .py(DynamicSpacing::Base06.rems(cx))
+                        .gap(DynamicSpacing::Base06.rems(cx))
+                        .when(has_primary_row, |this| {
+                            this.border_t_1()
+                                .border_color(cx.theme().colors().border_variant)
+                        })
+                        .children(secondary_items),
+                )
+            })
     }
 }
 

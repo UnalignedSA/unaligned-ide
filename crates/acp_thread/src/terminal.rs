@@ -122,7 +122,7 @@ impl LinuxWslSandboxError {
                     .to_string()
             }
             LinuxWslSandboxError::SetuidRejected => {
-                "The only `bwrap` available is setuid-root, which Zed refuses to run. Install \
+                "The only `bwrap` available is setuid-root, which the editor refuses to run. Install \
                  a non-setuid Bubblewrap to let the agent sandbox terminal commands."
                     .to_string()
             }
@@ -135,9 +135,9 @@ impl LinuxWslSandboxError {
         }
     }
 
-    /// The slug of the sandboxing docs section that best explains how to resolve
-    /// this failure, for deep-linking from the UI. Pair with
-    /// `client::zed_urls::sandboxing_docs`.
+    /// The slug of the section of upstream's sandboxing manual that best explains
+    /// how to resolve this failure. The product has no such page, so the UI no
+    /// longer links to it; the slug still travels with the failure.
     pub fn docs_section(&self) -> &'static str {
         match self {
             // Both "no bwrap" and "only a setuid-root bwrap" are resolved by

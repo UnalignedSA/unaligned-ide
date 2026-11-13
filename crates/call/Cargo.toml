@@ -22,6 +22,9 @@ test-support = [
     "util/test-support",
     "workspace/test-support"
 ]
+# Real calls over LiveKit/WebRTC. Off by default: see the feature of the same
+# name in `livekit_client`.
+webrtc = ["audio/webrtc", "livekit_client/webrtc"]
 
 [dependencies]
 anyhow.workspace = true

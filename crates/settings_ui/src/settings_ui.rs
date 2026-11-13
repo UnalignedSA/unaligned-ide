@@ -1,3 +1,4 @@
+mod appearance;
 mod components;
 mod page_data;
 pub mod pages;
@@ -38,25 +39,27 @@ use std::{
 };
 use theme_settings::ThemeSettings;
 use ui::{
-    Banner, ContextMenu, Divider, DropdownMenu, DropdownStyle, IconButtonShape, KeyBinding,
-    KeybindingHint, PopoverMenu, Scrollbars, Switch, Tooltip, TreeViewItem, WithScrollbar,
-    prelude::*,
+    Banner, ContextMenu, Disclosure, Divider, DropdownMenu, DropdownStyle, IconButtonShape,
+    InputShell, InputShellGround, InputShellSize, KeyBinding, KeybindingHint, MarkerSide,
+    PopoverMenu, Scrollbars, Switch, TextTab, TextTabSize, TextTabStrip, Tooltip, WithScrollbar,
+    prelude::*, selected_marker,
 };
 
+use app_actions::{
+    AGENT_SKILLS_SETTINGS_PATH, OpenProjectSettings, OpenSettings, OpenSettingsAt,
+    OpenSettingsAtTarget, OpenSettingsPage,
+};
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use workspace::{
     AppState, MultiWorkspace, OpenOptions, OpenVisible, Workspace, WorkspaceSettings,
     client_side_decorations,
 };
-use zed_actions::{
-    AGENT_SKILLS_SETTINGS_PATH, OpenProjectSettings, OpenSettings, OpenSettingsAt,
-    OpenSettingsAtTarget, OpenSettingsPage,
-};
 
 use crate::components::{
     EnumVariantDropdown, NumberField, NumberFieldMode, NumberFieldType, SettingsInputField,
-    SettingsSectionHeader, font_picker, icon_theme_picker, render_ollama_model_picker,
-    text_field_a11y_state, theme_picker,
+    SettingsSectionHeader, end_theme_preview, font_picker, icon_theme_display_name,
+    icon_theme_picker, render_ollama_model_picker, text_field_a11y_state, theme_picker,
+    theme_preview_active,
 };
 use crate::pages::{
     CustomAgentForm, LlmProviderForm, McpServerForm, render_input_audio_device_dropdown,
@@ -72,7 +75,12 @@ const HEADER_GROUP_TAB_INDEX: isize = 3;
 const CONTENT_CONTAINER_TAB_INDEX: isize = 4;
 const CONTENT_GROUP_TAB_INDEX: isize = 5;
 
+/// The page that holds the theme tiles (see `page_data::appearance_page`).
+pub(crate) const APPEARANCE_PAGE_TITLE: &str = "Appearance";
+
 const SIDEBAR_WIDTH: Pixels = px(226.);
+/// Room kept for the macOS window buttons at the left of the search bar.
+const MACOS_TRAFFIC_LIGHTS_INSET: Pixels = px(84.);
 const CONTENT_MIN_WIDTH: Pixels = px(400.);
 
 actions!(
@@ -456,10 +464,10 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &OpenSettings, cx| {
         open_settings_editor(None, None, None, cx);
     });
-    cx.on_action(|_: &zed_actions::assistant::OpenSkillCreator, cx| {
+    cx.on_action(|_: &app_actions::assistant::OpenSkillCreator, cx| {
         open_skill_creator(pages::SkillCreatorOpenMode::Form, None, cx);
     });
-    cx.on_action(|_: &zed_actions::assistant::CreateSkillFromUrl, cx| {
+    cx.on_action(|_: &app_actions::assistant::CreateSkillFromUrl, cx| {
         let initial_url = pages::skill_url_from_clipboard(cx);
         open_skill_creator(pages::SkillCreatorOpenMode::Url { initial_url }, None, cx);
     });
@@ -503,13 +511,13 @@ pub fn init(cx: &mut App) {
                 open_settings_editor(None, target_worktree_id, window_handle, cx);
             })
             .register_action(
-                |_, _: &zed_actions::assistant::OpenSkillCreator, window, cx| {
+                |_, _: &app_actions::assistant::OpenSkillCreator, window, cx| {
                     let window_handle = window.window_handle().downcast::<MultiWorkspace>();
                     open_skill_creator(pages::SkillCreatorOpenMode::Form, window_handle, cx);
                 },
             )
             .register_action(
-                |_, _: &zed_actions::assistant::CreateSkillFromUrl, window, cx| {
+                |_, _: &app_actions::assistant::CreateSkillFromUrl, window, cx| {
                     let window_handle = window.window_handle().downcast::<MultiWorkspace>();
                     let initial_url = pages::skill_url_from_clipboard(cx);
                     open_skill_creator(
@@ -654,7 +662,49 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::CodeLens>(render_dropdown)
         .add_basic_renderer::<settings::DocumentColorsRenderMode>(render_dropdown)
         .add_basic_renderer::<settings::ThemeSelectionDiscriminants>(render_dropdown)
-        .add_basic_renderer::<settings::ThemeAppearanceMode>(render_dropdown)
+        .add_basic_renderer::<settings::ThemeAppearanceMode>(|field, file, _, title, _, _, cx| {
+            appearance::render_segmented(
+                [
+                    (settings::ThemeAppearanceMode::Light, "Light"),
+                    (settings::ThemeAppearanceMode::Dark, "Dark"),
+                    (settings::ThemeAppearanceMode::System, "System"),
+                ],
+                field,
+                file,
+                title,
+                cx,
+            )
+        })
+        .add_basic_renderer::<settings::CornersSetting>(|field, file, _, title, _, _, cx| {
+            appearance::render_segmented(
+                [
+                    // Four equal segments: "Theme Default" would not fit in one.
+                    (settings::CornersSetting::Theme, "Theme"),
+                    (settings::CornersSetting::Square, "Square"),
+                    (settings::CornersSetting::Soft, "Soft"),
+                    (settings::CornersSetting::Round, "Round"),
+                ],
+                field,
+                file,
+                title,
+                cx,
+            )
+        })
+        .add_basic_renderer::<settings::UiDensity>(|field, file, _, title, _, _, cx| {
+            appearance::render_segmented(
+                [
+                    (settings::UiDensity::Compact, "Compact"),
+                    (settings::UiDensity::Default, "Default"),
+                    (settings::UiDensity::Comfortable, "Comfortable"),
+                ],
+                field,
+                file,
+                title,
+                cx,
+            )
+        })
+        .add_basic_renderer::<settings::AccentSetting>(appearance::render_accent_swatches)
+        .add_renderer::<settings::ThemeSelection>(appearance::render_theme_tiles_item)
         .add_basic_renderer::<settings::ThemeName>(render_theme_picker)
         .add_basic_renderer::<settings::IconThemeSelectionDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::IconThemeName>(render_icon_theme_picker)
@@ -885,7 +935,7 @@ fn open_settings_editor_with(
         let display_id = cx.active_display().map(|display| display.id());
 
         let app_id = ReleaseChannel::global(cx).app_id();
-        let window_decorations = match std::env::var("ZED_WINDOW_DECORATIONS") {
+        let window_decorations = match std::env::var("IDE_WINDOW_DECORATIONS") {
             Ok(val) if val == "server" => gpui::WindowDecorations::Server,
             Ok(val) if val == "client" => gpui::WindowDecorations::Client,
             _ => match WorkspaceSettings::get_global(cx).window_decorations {
@@ -897,9 +947,10 @@ fn open_settings_editor_with(
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Zed — Settings".into()),
+                    title: Some(format!("{} — Settings", branding::PRODUCT_NAME).into()),
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.0), px(12.0))),
+                    // Centred in the search bar, which has the panel header height.
+                    traffic_light_position: Some(point(px(12.0), px(11.0))),
                 }),
                 focus: true,
                 show: true,
@@ -1136,11 +1187,11 @@ impl SettingsPageItem {
         let file = settings_window.current_file.clone();
 
         let apply_padding = |element: Stateful<Div>| -> Stateful<Div> {
-            let element = element.pt_4();
+            let element = element.pt_3();
             if extra_bottom_padding {
-                element.pb_10()
+                element.pb_8()
             } else {
-                element.pb_4()
+                element.pb_3()
             }
         };
 
@@ -1256,7 +1307,7 @@ impl SettingsPageItem {
                                     .size(IconSize::Small)
                                     .color(Color::Muted),
                             )
-                            .style(ButtonStyle::OutlinedGhost)
+                            .style(ButtonStyle::Outlined)
                             .size(ButtonSize::Medium)
                             .on_click({
                                 let sub_page_link = sub_page_link.clone();
@@ -1338,15 +1389,16 @@ impl SettingsPageItem {
                             raw_field
                                 .group("setting-sub-item")
                                 .mx_8()
-                                .p_4()
+                                .px_4()
+                                .py_3()
+                                .border_x_1()
                                 .border_t_1()
                                 .when(is_last_sub_field, |this| this.border_b_1())
                                 .when(is_last_sub_field && extra_bottom_padding, |this| {
                                     this.mb_8()
                                 })
-                                .border_dashed()
-                                .border_color(cx.theme().colors().border_variant)
-                                .bg(cx.theme().colors().element_background.opacity(0.2)),
+                                .border_color(cx.theme().colors().border)
+                                .bg(cx.theme().colors().surface_background),
                         );
                     }
                 }
@@ -1391,7 +1443,7 @@ impl SettingsPageItem {
                                     .size(IconSize::Small)
                                     .color(Color::Muted),
                             )
-                            .style(ButtonStyle::OutlinedGhost)
+                            .style(ButtonStyle::Outlined)
                             .size(ButtonSize::Medium)
                             .on_click({
                                 let on_click = action_link.on_click.clone();
@@ -1426,9 +1478,14 @@ fn render_settings_item_layout(
     // Each control names and describes itself (via the setting title and
     // description), so adding a group with the same label here would make
     // screen readers announce the setting name twice.
+    // A setting changed in the current scope: a thin accent bar in the gutter,
+    // next to its title and description.
+    let is_modified = reset_fn.is_some();
+
     h_flex()
         .id(title)
         .min_w_0()
+        .gap_4()
         .justify_between()
         .child(
             v_flex()
@@ -1436,6 +1493,20 @@ fn render_settings_item_layout(
                 .w_full()
                 .max_w_2_3()
                 .min_w_0()
+                .gap_0p5()
+                .when(is_modified, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .left(px(-12.))
+                            .top_0()
+                            .bottom_0()
+                            .w(px(2.))
+                            // "Changed from the default" is a neutral fact: the accent
+                            // (red in the family) would read as an error.
+                            .bg(cx.theme().colors().border_strong),
+                    )
+                })
                 .child(
                     h_flex()
                         .w_full()
@@ -1563,14 +1634,14 @@ fn render_settings_item_link(
 
     div()
         .absolute()
-        .top(rems_from_px(18_f32))
+        .top(rems_from_px(12_f32))
         .map(|this| {
             if sub_field {
                 this.visible_on_hover("setting-sub-item")
                     .left(rems_from_px(-8.5_f32))
             } else {
                 this.visible_on_hover("setting-item")
-                    .left(rems_from_px(-22.0_f32))
+                    .left(rems_from_px(-32.0_f32))
             }
         })
         .child(
@@ -1582,7 +1653,9 @@ fn render_settings_item_link(
                 .tooltip(Tooltip::text("Copy Link"))
                 .when_some(json_path, |this, path| {
                     this.on_click(cx.listener(move |this, _, _, cx| {
-                        let link = format!("zed://settings/{}", path);
+                        // The copied link is meant for use outside the app, so it
+                        // carries the scheme the product registers with the system.
+                        let link = format!("{}://settings/{}", branding::URL_SCHEME, path);
                         cx.write_to_clipboard(ClipboardItem::new_string(link));
                         this.last_copied_link_path = Some(path);
                         cx.notify();
@@ -1817,6 +1890,9 @@ impl SettingsWindow {
             this.update_matches(cx);
         })
         .detach();
+
+        // A theme tile's preview must not outlive the window that shows the tile.
+        cx.on_release(|_, cx| end_theme_preview(cx)).detach();
 
         let mut ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
         cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
@@ -2840,24 +2916,26 @@ impl SettingsWindow {
     ) -> impl IntoElement {
         static OVERFLOW_LIMIT: usize = 1;
 
-        let file_button =
-            |ix, file: &SettingsUiFile, focus_handle, cx: &mut Context<SettingsWindow>| {
-                Button::new(
-                    ix,
-                    self.display_name(&file)
-                        .expect("Files should always have a name"),
-                )
-                .toggle_state(file == &self.current_file)
-                .selected_style(ButtonStyle::Tinted(ui::TintColor::Accent))
-                .track_focus(focus_handle)
-                .on_click(cx.listener({
-                    let focus_handle = focus_handle.clone();
-                    move |this, _: &gpui::ClickEvent, window, cx| {
-                        this.change_file(ix, window, cx);
-                        focus_handle.focus(window, cx);
-                    }
-                }))
-            };
+        // The scope tabs (User, then one per project): the shared compact text tabs.
+        let file_tab = |ix: usize,
+                        file: &SettingsUiFile,
+                        focus_handle: &FocusHandle,
+                        cx: &mut Context<SettingsWindow>| {
+            TextTab::new(
+                ix,
+                self.display_name(file)
+                    .expect("Files should always have a name"),
+            )
+            .selected(file == &self.current_file)
+            .track_focus(focus_handle)
+            .on_click(cx.listener({
+                let focus_handle = focus_handle.clone();
+                move |this, _: &gpui::ClickEvent, window, cx| {
+                    this.change_file(ix, window, cx);
+                    focus_handle.focus(window, cx);
+                }
+            }))
+        };
 
         let this = cx.entity();
 
@@ -2876,99 +2954,92 @@ impl SettingsWindow {
             .unwrap_or(OVERFLOW_LIMIT);
         let edit_in_json_id = SharedString::new(format!("edit-in-json-{}", selected_file_ix));
 
-        h_flex()
+        let mut strip = TextTabStrip::new("settings-ui-file-tabs").size(TextTabSize::Compact);
+        for (ix, (file, focus_handle)) in self.files.iter().enumerate().take(OVERFLOW_LIMIT) {
+            strip = strip.tab(file_tab(ix, file, focus_handle, cx));
+        }
+        if self.files.len() > OVERFLOW_LIMIT {
+            let (file, focus_handle) = &self.files[selected_file_ix];
+            strip = strip.tab(file_tab(selected_file_ix, file, focus_handle, cx));
+
+            if self.files.len() > OVERFLOW_LIMIT + 1 {
+                strip = strip.child(
+                    DropdownMenu::new(
+                        "more-files",
+                        format!("+{}", self.files.len() - (OVERFLOW_LIMIT + 1)),
+                        ContextMenu::build(window, cx, move |mut menu, _, _| {
+                            for (mut ix, (file, focus_handle)) in
+                                self.files.iter().enumerate().skip(OVERFLOW_LIMIT + 1)
+                            {
+                                let (display_name, focus_handle) = if selected_file_ix == ix {
+                                    ix = OVERFLOW_LIMIT;
+                                    (
+                                        self.display_name(&self.files[ix].0),
+                                        self.files[ix].1.clone(),
+                                    )
+                                } else {
+                                    (self.display_name(&file), focus_handle.clone())
+                                };
+
+                                menu = menu.entry(
+                                    display_name.expect("Files should always have a name"),
+                                    None,
+                                    {
+                                        let this = this.clone();
+                                        move |window, cx| {
+                                            this.update(cx, |this, cx| {
+                                                this.change_file(ix, window, cx);
+                                            });
+                                            focus_handle.focus(window, cx);
+                                        }
+                                    },
+                                );
+                            }
+
+                            menu
+                        }),
+                    )
+                    .style(DropdownStyle::Subtle)
+                    .trigger_tooltip(Tooltip::text("View Other Projects"))
+                    .trigger_icon(IconName::ChevronDown)
+                    .attach(gpui::Anchor::BottomLeft)
+                    .offset(gpui::Point {
+                        x: px(0.0),
+                        y: px(2.0),
+                    })
+                    .tab_index(0),
+                );
+            }
+        }
+        let strip = strip.end_slot(
+            Button::new(edit_in_json_id, "Edit in settings.json")
+                .tab_index(0_isize)
+                .label_size(LabelSize::Small)
+                .start_icon(
+                    Icon::new(IconName::Json)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .style(ButtonStyle::Subtle)
+                .tooltip(Tooltip::for_action_title_in(
+                    "Edit in settings.json",
+                    &OpenCurrentFile,
+                    &self.focus_handle,
+                ))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_current_settings_file(window, cx);
+                })),
+        );
+
+        div()
             .id("settings-ui-files-header")
             .role(Role::Group)
             .aria_label("Settings File")
             .w_full()
-            .gap_1()
-            .justify_between()
             .track_focus(&self.files_focus_handle)
             .tab_group()
             .tab_index(HEADER_GROUP_TAB_INDEX)
-            .child(
-                h_flex()
-                    .gap_1()
-                    .children(
-                        self.files.iter().enumerate().take(OVERFLOW_LIMIT).map(
-                            |(ix, (file, focus_handle))| file_button(ix, file, focus_handle, cx),
-                        ),
-                    )
-                    .when(self.files.len() > OVERFLOW_LIMIT, |div| {
-                        let (file, focus_handle) = &self.files[selected_file_ix];
-
-                        div.child(file_button(selected_file_ix, file, focus_handle, cx))
-                            .when(self.files.len() > OVERFLOW_LIMIT + 1, |div| {
-                                div.child(
-                                    DropdownMenu::new(
-                                        "more-files",
-                                        format!("+{}", self.files.len() - (OVERFLOW_LIMIT + 1)),
-                                        ContextMenu::build(window, cx, move |mut menu, _, _| {
-                                            for (mut ix, (file, focus_handle)) in self
-                                                .files
-                                                .iter()
-                                                .enumerate()
-                                                .skip(OVERFLOW_LIMIT + 1)
-                                            {
-                                                let (display_name, focus_handle) =
-                                                    if selected_file_ix == ix {
-                                                        ix = OVERFLOW_LIMIT;
-                                                        (
-                                                            self.display_name(&self.files[ix].0),
-                                                            self.files[ix].1.clone(),
-                                                        )
-                                                    } else {
-                                                        (
-                                                            self.display_name(&file),
-                                                            focus_handle.clone(),
-                                                        )
-                                                    };
-
-                                                menu = menu.entry(
-                                                    display_name
-                                                        .expect("Files should always have a name"),
-                                                    None,
-                                                    {
-                                                        let this = this.clone();
-                                                        move |window, cx| {
-                                                            this.update(cx, |this, cx| {
-                                                                this.change_file(ix, window, cx);
-                                                            });
-                                                            focus_handle.focus(window, cx);
-                                                        }
-                                                    },
-                                                );
-                                            }
-
-                                            menu
-                                        }),
-                                    )
-                                    .style(DropdownStyle::Subtle)
-                                    .trigger_tooltip(Tooltip::text("View Other Projects"))
-                                    .trigger_icon(IconName::ChevronDown)
-                                    .attach(gpui::Anchor::BottomLeft)
-                                    .offset(gpui::Point {
-                                        x: px(0.0),
-                                        y: px(2.0),
-                                    })
-                                    .tab_index(0),
-                                )
-                            })
-                    }),
-            )
-            .child(
-                Button::new(edit_in_json_id, "Edit in settings.json")
-                    .tab_index(0_isize)
-                    .style(ButtonStyle::OutlinedGhost)
-                    .tooltip(Tooltip::for_action_title_in(
-                        "Edit in settings.json",
-                        &OpenCurrentFile,
-                        &self.focus_handle,
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_current_settings_file(window, cx);
-                    })),
-            )
+            .child(strip)
     }
 
     pub(crate) fn display_name(&self, file: &SettingsUiFile) -> Option<String> {
@@ -3026,59 +3097,83 @@ impl SettingsWindow {
         let (a11y_value, a11y_text_runs) =
             text_field_a11y_state("settings-ui-search", &self.search_bar, window, cx);
 
-        h_flex()
+        let focused = self.search_bar.focus_handle(cx).is_focused(window);
+
+        div()
             .id("settings-ui-search")
             .role(Role::SearchInput)
             .aria_label("Search Settings")
             .aria_value(a11y_value)
             .track_focus(&self.search_bar.focus_handle(cx))
             .a11y_synthetic_children(a11y_text_runs)
-            .py_1()
-            .pl_1p5()
-            .pr_0p5()
-            .h_7()
-            .mb_3()
-            .gap_1p5()
-            .rounded_sm()
-            .bg(cx.theme().colors().editor_background)
-            .border_1()
-            .border_color(cx.theme().colors().border)
-            .child(Icon::new(IconName::MagnifyingGlass).color(Color::Muted))
-            .child(self.search_bar.clone())
-            .when(has_query, |this| {
-                this.child(
-                    IconButton::new("clear-btn", IconName::Close)
-                        .icon_color(Color::Muted)
-                        .icon_size(IconSize::Small)
-                        .tooltip(Tooltip::text("Clear"))
-                        .on_click(cx.listener(|settings_window, _, window, cx| {
-                            settings_window.clear_search(window, cx);
-                        })),
-                )
-            })
+            .flex_1()
+            .min_w_0()
+            .child(
+                // The bar is on the sheet ground, so the field is the raised kind.
+                InputShell::new()
+                    .size(InputShellSize::Small)
+                    .ground(InputShellGround::Raised)
+                    .focused(focused)
+                    .w_full()
+                    .start_slot(
+                        Icon::new(IconName::MagnifyingGlass)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(self.search_bar.clone())
+                    .when(has_query, |this| {
+                        this.end_slot(
+                            IconButton::new("clear-btn", IconName::Close)
+                                .icon_color(Color::Muted)
+                                .icon_size(IconSize::Small)
+                                .aria_label("Clear")
+                                .tooltip(Tooltip::text("Clear"))
+                                .on_click(cx.listener(|settings_window, _, window, cx| {
+                                    settings_window.clear_search(window, cx);
+                                })),
+                        )
+                    }),
+            )
     }
 
-    fn render_nav(
+    /// The bar above the tree and the page: the search field over the whole
+    /// width, as in VS Code's settings editor.
+    fn render_top_bar(
         &self,
         window: &mut Window,
         cx: &mut Context<SettingsWindow>,
     ) -> impl IntoElement {
-        let visible_count = self.visible_navbar_entries().count();
+        let search = self.render_search(window, cx);
+        let line = cx.theme().colors().border;
+        let background = cx.theme().colors().editor_background;
 
-        let focus_keybind_label = if self
-            .navbar_focus_handle
-            .read(cx)
-            .handle
-            .contains_focused(window, cx)
-            || self
-                .visible_navbar_entries()
-                .any(|(_, entry)| entry.focus_handle.is_focused(window))
-        {
-            "Focus Content"
-        } else {
-            "Focus Navbar"
-        };
+        self.with_nav_actions(h_flex(), window, cx)
+            .w_full()
+            .flex_none()
+            // The height of every header of the product, so its line meets the
+            // headers of the main window's panels.
+            .h(ui::metrics::panel_header_height(cx))
+            .px_3()
+            // Leaves room for the traffic lights, which sit in this bar on macOS
+            // only: Windows and Linux draw a platform title bar above it.
+            .when(cfg!(target_os = "macos"), |this| {
+                this.pl(MACOS_TRAFFIC_LIGHTS_INSET)
+            })
+            .border_b_1()
+            .border_color(line)
+            .bg(background)
+            .child(search)
+    }
 
+    /// Key context and navigation actions of the settings tree. The search
+    /// field sits in the top bar, outside the tree's column, and needs the
+    /// same bindings (arrow keys and Tab move into the tree).
+    fn with_nav_actions(
+        &self,
+        element: Div,
+        window: &Window,
+        cx: &mut Context<SettingsWindow>,
+    ) -> Div {
         let mut key_context = KeyContext::new_with_defaults(cx.platform_info().os);
         key_context.add("NavigationMenu");
         key_context.add("menu");
@@ -3086,7 +3181,7 @@ impl SettingsWindow {
             key_context.add("search");
         }
 
-        v_flex()
+        element
             .key_context(key_context)
             .on_action(cx.listener(|this, _: &CollapseNavEntry, window, cx| {
                 let Some(focused_entry) = this.focused_nav_entry(window, cx) else {
@@ -3204,21 +3299,53 @@ impl SettingsWindow {
                     cx,
                 );
             }))
+    }
+
+    fn render_nav(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<SettingsWindow>,
+    ) -> impl IntoElement {
+        let visible_count = self.visible_navbar_entries().count();
+
+        let focus_keybind_label = if self
+            .navbar_focus_handle
+            .read(cx)
+            .handle
+            .contains_focused(window, cx)
+            || self
+                .visible_navbar_entries()
+                .any(|(_, entry)| entry.focus_handle.is_focused(window))
+        {
+            "Focus Settings"
+        } else {
+            "Focus Pages"
+        };
+
+        let colors = cx.theme().colors();
+        let hover_bg = colors.ghost_element_hover;
+        let selected_bg = colors.ghost_element_selected;
+        let focused_border = colors.border_focused;
+        let guide = colors.border;
+        let line = colors.border;
+        let panel_background = colors.panel_background;
+        let hint_background = colors.surface_background.opacity(0.5);
+        let row_height = ui::metrics::row_height(cx);
+
+        self.with_nav_actions(v_flex(), window, cx)
             .w(SIDEBAR_WIDTH)
             .h_full()
-            .p_2p5()
-            .when(cfg!(target_os = "macos"), |this| this.pt_10())
             .flex_none()
             .border_r_1()
-            .border_color(cx.theme().colors().border)
-            .bg(cx.theme().colors().panel_background)
-            .child(self.render_search(window, cx))
+            .border_color(line)
+            .bg(panel_background)
             .child(
                 v_flex()
                     .id("settings-ui-nav")
                     .role(Role::Tree)
                     .aria_label("Settings Navigation")
                     .flex_1()
+                    .py_1()
                     .overflow_hidden()
                     .track_focus(&self.navbar_focus_handle.focus_handle(cx))
                     .tab_group()
@@ -3232,56 +3359,126 @@ impl SettingsWindow {
                                     .skip(range.start.saturating_sub(1))
                                     .take(range.len())
                                     .map(|(entry_index, entry)| {
-                                        TreeViewItem::new(
-                                            ("settings-ui-navbar-entry", entry_index),
-                                            entry.title,
-                                        )
-                                        .track_focus(&entry.focus_handle)
-                                        .root_item(entry.is_root)
-                                        .toggle_state(this.is_navbar_entry_selected(entry_index))
-                                        .when(entry.is_root, |item| {
-                                            item.expanded(entry.expanded || this.has_query)
-                                                .on_toggle(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.toggle_and_focus_navbar_entry(
-                                                            entry_index,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                ))
-                                        })
-                                        .on_click({
-                                            let category = this.pages[entry.page_index].title;
-                                            let subcategory =
-                                                (!entry.is_root).then_some(entry.title);
+                                        let selected = this.is_navbar_entry_selected(entry_index);
+                                        let is_root = entry.is_root;
+                                        let expanded = entry.expanded || this.has_query;
+                                        let expandable = is_root
+                                            && this.navbar_entries[entry_index + 1..]
+                                                .iter()
+                                                .take_while(|next| !next.is_root)
+                                                .count()
+                                                > 1;
+                                        let category = this.pages[entry.page_index].title;
+                                        let subcategory = (!is_root).then_some(entry.title);
+                                        let label = Label::new(entry.title)
+                                            .size(LabelSize::Small)
+                                            .truncate()
+                                            .color(if selected {
+                                                Color::Default
+                                            } else {
+                                                Color::Muted
+                                            });
 
-                                            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                                                if this.toggle_navbar_entry_on_double_click(
+                                        // A dense tree row: the selected one carries the
+                                        // 2px accent marker on its left edge.
+                                        h_flex()
+                                            .id(("settings-ui-navbar-entry", entry_index))
+                                            .role(Role::TreeItem)
+                                            .aria_label(entry.title)
+                                            .aria_selected(selected)
+                                            .aria_level(if is_root { 1 } else { 2 })
+                                            .when(is_root, |this| this.aria_expanded(expanded))
+                                            .track_focus(&entry.focus_handle)
+                                            .relative()
+                                            .w_full()
+                                            .h(row_height)
+                                            .pl_2()
+                                            .pr_2()
+                                            .gap_1()
+                                            .cursor_pointer()
+                                            .border_1()
+                                            .border_color(gpui::transparent_black())
+                                            .focus_visible(|style| {
+                                                style.border_color(focused_border)
+                                            })
+                                            .hover(|style| style.bg(hover_bg))
+                                            .when(selected, |this| {
+                                                this.bg(selected_bg).child(
+                                                    selected_marker(MarkerSide::Left, cx),
+                                                )
+                                            })
+                                            .map(|this| {
+                                                if is_root {
+                                                    // The page name sits on the 12px inset; the
+                                                    // chevron trails, and only where a page has
+                                                    // several sections to unfold.
+                                                    this.pl_3()
+                                                        .justify_between()
+                                                        .child(label)
+                                                        .when(expandable, |this| this.child(
+                                                        Disclosure::new("toggle", expanded)
+                                                            .on_toggle_expanded(Some(Arc::new(
+                                                                cx.listener(
+                                                                    move |this, _, window, cx| {
+                                                                        this.toggle_and_focus_navbar_entry(
+                                                                            entry_index,
+                                                                            window,
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                ),
+                                                            )
+                                                                as Arc<
+                                                                    dyn Fn(
+                                                                        &gpui::ClickEvent,
+                                                                        &mut Window,
+                                                                        &mut App,
+                                                                    ),
+                                                                >))
+                                                            .opened_icon(IconName::ChevronDown)
+                                                            .closed_icon(IconName::ChevronRight),
+                                                    ))
+                                                } else {
+                                                    this.child(
+                                                        h_flex()
+                                                            .h_full()
+                                                            .w(px(20.))
+                                                            .flex_none()
+                                                            .justify_center()
+                                                            .child(
+                                                                div().w_px().h_full().bg(guide),
+                                                            ),
+                                                    )
+                                                    .child(label)
+                                                }
+                                            })
+                                            .on_click(cx.listener(
+                                                move |this, event: &gpui::ClickEvent, window, cx| {
+                                                    if this.toggle_navbar_entry_on_double_click(
                                                         entry_index,
                                                         event,
                                                         window,
                                                         cx,
-                                                    )
-                                                {
-                                                    return;
-                                                }
+                                                    ) {
+                                                        return;
+                                                    }
 
-                                                telemetry::event!(
-                                                    "Settings Navigation Clicked",
-                                                    category = category,
-                                                    subcategory = subcategory
-                                                );
+                                                    telemetry::event!(
+                                                        "Settings Navigation Clicked",
+                                                        category = category,
+                                                        subcategory = subcategory
+                                                    );
 
-                                                this.open_and_scroll_to_navbar_entry(
-                                                    entry_index,
-                                                    None,
-                                                    true,
-                                                    window,
-                                                    cx,
-                                                );
-                                            })
-                                        })
+                                                    this.open_and_scroll_to_navbar_entry(
+                                                        entry_index,
+                                                        None,
+                                                        true,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            ))
+                                            .into_any_element()
                                     })
                                     .collect()
                             }),
@@ -3294,12 +3491,11 @@ impl SettingsWindow {
             .child(
                 h_flex()
                     .w_full()
-                    .h_8()
-                    .p_2()
-                    .pb_0p5()
+                    .h(rems_from_px(24_f32))
+                    .px_2()
                     .flex_shrink_0()
                     .border_t_1()
-                    .border_color(cx.theme().colors().border_variant)
+                    .border_color(line)
                     .child(
                         KeybindingHint::new(
                             KeyBinding::for_action_in(
@@ -3307,7 +3503,7 @@ impl SettingsWindow {
                                 &self.navbar_focus_handle.focus_handle(cx),
                                 cx,
                             ),
-                            cx.theme().colors().surface_background.opacity(0.5),
+                            hint_background,
                         )
                         .suffix(focus_keybind_label),
                     ),
@@ -3627,7 +3823,7 @@ impl SettingsWindow {
                         .when(settings_window.sub_page_stack.is_empty(), |element| {
                             element.when_some(root_nav_label, |element, title| {
                                 element
-                                    .child(Label::new(title).size(LabelSize::Large).mt_2().mb_3())
+                                    .child(Label::new(title).size(LabelSize::Large).mt_4().mb_3())
                             })
                         })
                         .into_any_element();
@@ -3783,7 +3979,7 @@ impl SettingsWindow {
             page_content
                 .when(self.sub_page_stack.is_empty(), |this| {
                     this.when_some(root_nav_label, |this, title| {
-                        this.child(Label::new(title).size(LabelSize::Large).mt_2().mb_3())
+                        this.child(Label::new(title).size(LabelSize::Large).mt_4().mb_3())
                     })
                 })
                 .children(items.clone().into_iter().enumerate().map(
@@ -4121,8 +4317,8 @@ impl SettingsWindow {
                 window.focus_prev(cx);
             }))
             .track_focus(&self.content_focus_handle.focus_handle(cx))
-            .pt_6()
-            .gap_4()
+            .pt_2()
+            .gap_2()
             .flex_1()
             .min_w_0()
             .bg(cx.theme().colors().editor_background)
@@ -4572,7 +4768,7 @@ impl SettingsWindow {
     fn retry_llm_provider_authentication(&self, cx: &mut Context<Self>) {
         if self.sub_page_stack.last().is_some_and(|sub_page| {
             sub_page.link.json_path == Some("llm_providers")
-                && sub_page.link.title.as_ref() == "LLM Providers"
+                && sub_page.link.title.as_ref() == "Models and Subscriptions"
         }) && !DisableAiSettings::get_global(cx).disable_ai
         {
             language_model::LanguageModelRegistry::global(cx)
@@ -4651,6 +4847,13 @@ impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font = theme_settings::setup_ui_font(window, cx);
 
+        // A theme tile shows its theme while the pointer is on it. If the page
+        // changed under a resting pointer (keyboard, search), the tile is gone
+        // and cannot end its own preview: put the saved theme back.
+        if theme_preview_active(cx) && self.current_page().title != APPEARANCE_PAGE_TITLE {
+            cx.defer(end_theme_preview);
+        }
+
         client_side_decorations(
             v_flex()
                 .text_color(cx.theme().colors().text)
@@ -4718,7 +4921,7 @@ impl Render for SettingsWindow {
                             window.focus_prev(cx);
                         })
                         .flex()
-                        .flex_row()
+                        .flex_col()
                         .flex_1()
                         .min_h_0()
                         .font(ui_font)
@@ -4727,8 +4930,17 @@ impl Render for SettingsWindow {
                         .when(!cfg!(target_os = "macos"), |this| {
                             this.border_t_1().border_color(cx.theme().colors().border)
                         })
-                        .child(self.render_nav(window, cx))
-                        .child(self.render_page(window, cx)),
+                        .child(self.render_top_bar(window, cx))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .child(self.render_nav(window, cx))
+                                .child(self.render_page(window, cx)),
+                        ),
                 ),
             window,
             cx,
@@ -5389,19 +5601,22 @@ fn render_icon_theme_picker(
     cx: &mut App,
 ) -> AnyElement {
     let (_, value) = SettingsStore::global(cx).get_value_from_file(file.to_settings(), field.pick);
-    let current_value = value
+    let current_value: SharedString = value
         .cloned()
         .map(|theme_name| theme_name.0.into())
-        .unwrap_or_else(|| cx.theme().name.clone());
+        .unwrap_or_else(|| SharedString::new_static(theme::DEFAULT_ICON_THEME_NAME));
 
     let handle = ui::PopoverMenuHandle::default();
     PopoverMenu::new("icon-theme-picker")
         .trigger(wire_picker_trigger_a11y(
-            render_picker_trigger_button("icon_theme_picker_trigger".into(), current_value.clone())
-                .aria_label(title)
-                .when(!description.is_empty(), |this| {
-                    this.aria_description(description)
-                }),
+            render_picker_trigger_button(
+                "icon_theme_picker_trigger".into(),
+                icon_theme_display_name(&current_value),
+            )
+            .aria_label(title)
+            .when(!description.is_empty(), |this| {
+                this.aria_description(description)
+            }),
             handle.clone(),
         ))
         .menu(move |window, cx| {
@@ -5846,6 +6061,115 @@ pub mod test {
             list_state.logical_scroll_top().offset_in_item,
             resized_height / 4.
         );
+    }
+
+    /// The pages the product shows, what the Appearance page opens on, and the
+    /// wording of every page.
+    #[gpui::test]
+    fn pages_are_the_products_own(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            register_settings(cx);
+            let app_state = AppState::test(cx);
+            AppState::set_global(app_state, cx);
+
+            let pages = page_data::settings_data(cx);
+            let titles = pages.iter().map(|page| page.title).collect::<Vec<_>>();
+            assert_eq!(
+                titles,
+                [
+                    "General",
+                    "Appearance",
+                    "Keymap",
+                    "Editor",
+                    "Languages & Tools",
+                    "Search & Files",
+                    "Window & Layout",
+                    "Panels",
+                    "Debugger",
+                    "Terminal",
+                    "Version Control",
+                    "AI",
+                    "Network",
+                    "Developer",
+                ]
+            );
+
+            let appearance = pages
+                .iter()
+                .find(|page| page.title == APPEARANCE_PAGE_TITLE)
+                .unwrap();
+            let first_rows = appearance
+                .items
+                .iter()
+                .take(15)
+                .map(|item| format!("{item:?}"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                first_rows,
+                [
+                    "SectionHeader(Theme)",
+                    "SettingItem(Theme)",
+                    "SettingItem(Mode)",
+                    "SettingItem(Corners)",
+                    "SettingItem(Accent)",
+                    "SettingItem(Interface Density)",
+                    "DynamicItem(Icon Theme)",
+                    "SectionHeader(Fonts)",
+                    "SettingItem(UI Font)",
+                    "SettingItem(UI Font Size)",
+                    "SettingItem(Editor Font)",
+                    "SettingItem(Editor Font Size)",
+                    "DynamicItem(Line Height)",
+                    "SettingItem(Ligatures)",
+                    "SectionHeader(Fonts and Editor Display)",
+                ]
+            );
+
+            // A row without a value in the default settings shows a "NO DEFAULT"
+            // button in debug builds instead of its control.
+            for item in appearance.items.iter().take(15) {
+                if let SettingsPageItem::SettingItem(item) = item {
+                    let (_, found) = item.field.file_set_in(SettingsUiFile::User, cx);
+                    assert!(found, "{} has no default value", item.title);
+                }
+            }
+
+            for page in pages.iter() {
+                let mut texts: Vec<String> = Vec::new();
+                for item in page.items.iter() {
+                    match item {
+                        SettingsPageItem::SectionHeader(header) => texts.push(header.to_string()),
+                        SettingsPageItem::SettingItem(item) => {
+                            texts.push(item.title.to_string());
+                            texts.push(item.description.to_string());
+                        }
+                        SettingsPageItem::DynamicItem(item) => {
+                            texts.push(item.discriminant.title.to_string());
+                            texts.push(item.discriminant.description.to_string());
+                            for field in item.fields.iter().flatten() {
+                                texts.push(field.title.to_string());
+                                texts.push(field.description.to_string());
+                            }
+                        }
+                        SettingsPageItem::SubPageLink(link) => {
+                            texts.push(link.title.to_string());
+                            texts.extend(link.description.as_ref().map(|d| d.to_string()));
+                        }
+                        SettingsPageItem::ActionLink(link) => {
+                            texts.push(link.title.to_string());
+                            texts.extend(link.description.as_ref().map(|d| d.to_string()));
+                        }
+                    }
+                }
+                for text in texts {
+                    assert!(
+                        !text.contains("Zed") && !text.contains("zed.dev"),
+                        "the {} page names another product: {text:?}",
+                        page.title
+                    );
+                }
+            }
+        });
     }
 
     #[gpui::test]
@@ -7481,7 +7805,7 @@ pub mod test {
         // Dispatch the action the way the command palette does: on the
         // workspace window.
         multi_workspace.update_in(cx, |_multi_workspace, window, cx| {
-            window.dispatch_action(Box::new(zed_actions::assistant::OpenSkillCreator), cx);
+            window.dispatch_action(Box::new(app_actions::assistant::OpenSkillCreator), cx);
         });
 
         cx.run_until_parked();
@@ -7671,7 +7995,7 @@ mod project_settings_update_tests {
         let fs = FakeFs::new(cx.executor());
         let tree = if let Some(settings_content) = initial_settings {
             json!({
-                ".zed": {
+                ".unaligned": {
                     "settings.json": settings_content
                 },
                 "src": { "main.rs": "" }
@@ -7688,7 +8012,7 @@ mod project_settings_update_tests {
             (worktree.read(cx).id(), worktree.downgrade())
         });
 
-        let rel_path: Arc<RelPath> = RelPath::from_unix_str(".zed/settings.json")
+        let rel_path: Arc<RelPath> = RelPath::from_unix_str(".unaligned/settings.json")
             .expect("valid path")
             .into_arc();
         let project_path = ProjectPath {
@@ -7918,7 +8242,7 @@ mod project_settings_update_tests {
 
         let file_content = setup
             .fs
-            .load("/project/.zed/settings.json".as_ref())
+            .load("/project/.unaligned/settings.json".as_ref())
             .await
             .unwrap();
         assert_eq!(
@@ -7951,7 +8275,7 @@ mod project_settings_update_tests {
         setup
             .fs
             .save(
-                "/project/.zed/settings.json".as_ref(),
+                "/project/.unaligned/settings.json".as_ref(),
                 &r#"{ "tab_size": 99 }"#.into(),
                 Default::default(),
             )

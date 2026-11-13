@@ -39,7 +39,7 @@ use std::{
     sync::Arc,
 };
 use theme::ActiveTheme;
-use ui::{ContextMenu, DiffStat, Disclosure, Divider, Tooltip, WithScrollbar, prelude::*};
+use ui::{ContextMenu, Disclosure, Divider, Tooltip, WithScrollbar, prelude::*};
 use util::{ResultExt, paths::PathStyle, rel_path::RelPath, truncate_and_trailoff};
 use workspace::item::TabTooltipContent;
 use workspace::{
@@ -708,7 +708,7 @@ impl CommitView {
                                     "Fetch Missing History"
                                 },
                             )
-                                .style(ButtonStyle::Filled)
+                                .style(ButtonStyle::Outlined)
                                 .disabled(fetch_in_flight)
                                 .tooltip(Tooltip::text(
                                     "Run `git fetch --unshallow` to download the full history, then show this commit's changes.",
@@ -1592,10 +1592,11 @@ impl Render for CommitViewToolbar {
                 this.child(
                     h_flex()
                         .gap_2()
-                        .child(DiffStat::new(
+                        .child(crate::diff_stat_text(
                             "toolbar-diff-stat",
                             additions as usize,
                             deletions as usize,
+                            cx,
                         ))
                         .child(Divider::vertical()),
                 )
@@ -1606,13 +1607,13 @@ impl Render for CommitViewToolbar {
                     .tooltip(move |_, cx| {
                         Tooltip::for_action(
                             "Buffer Search",
-                            &zed_actions::buffer_search::Deploy::find(),
+                            &app_actions::buffer_search::Deploy::find(),
                             cx,
                         )
                     })
                     .on_click(|_, window, cx| {
                         window.dispatch_action(
-                            Box::new(zed_actions::buffer_search::Deploy::find()),
+                            Box::new(app_actions::buffer_search::Deploy::find()),
                             cx,
                         );
                     }),

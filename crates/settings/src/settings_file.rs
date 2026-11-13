@@ -93,6 +93,23 @@ mod tests {
         fs.insert_file(&target_settings_path, b"B".to_vec()).await;
         assert_eq!(rx.next().await.as_deref(), Some("B"));
     }
+
+    /// `assets/settings/default.json` cannot read `branding::APP_ID`, so it
+    /// spells the name of the user's configuration directory. These globs keep
+    /// the user's own settings files out of edit predictions and open them as
+    /// JSON with comments: they must follow the product's identifier.
+    #[test]
+    fn default_settings_name_the_products_configuration_directory() {
+        let defaults = crate::default_settings();
+        let app_id = branding::APP_ID;
+        for glob in [
+            format!("\"/**/{app_id}/settings.json\""),
+            format!("\"/**/{app_id}/keymap.json\""),
+            format!("\"**/{app_id}/{{settings,keymap,tasks,debug}}.json\""),
+        ] {
+            assert!(defaults.contains(&glob), "default.json lacks {glob}");
+        }
+    }
 }
 
 pub const EMPTY_THEME_NAME: &str = "empty-theme";

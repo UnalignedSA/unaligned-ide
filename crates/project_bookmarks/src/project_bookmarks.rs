@@ -259,7 +259,11 @@ impl PickerDelegate for ProjectBookmarksDelegate {
         let (bookmark_label, full_path_label) = self.labels_for_match(bookmark_match);
         let icon = Icon::new(IconName::Bookmark)
             .size(IconSize::Small)
-            .color(Color::Info);
+            .color(if selected {
+                Color::Default
+            } else {
+                Color::Muted
+            });
 
         Some(
             ListItem::new(match_index)

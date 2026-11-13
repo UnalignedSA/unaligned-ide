@@ -49,7 +49,8 @@ impl ZedEditPredictionDelegate {
 
 impl EditPredictionDelegate for ZedEditPredictionDelegate {
     fn name() -> &'static str {
-        "zed-predict"
+        // Matched by name in `EditPredictionSettings::debounce_for_delegate`.
+        "ide-predict"
     }
 
     fn display_name() -> &'static str {

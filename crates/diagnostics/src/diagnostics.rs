@@ -116,6 +116,17 @@ impl Render for ProjectDiagnosticsEditor {
                     .items_center()
                     .text_center()
                     .bg(cx.theme().colors().editor_background)
+                    .child(
+                        Icon::new(IconName::Check)
+                            .size(IconSize::Medium)
+                            .color(Color::Success),
+                    )
+                    .child(
+                        Label::new("PROBLEMS")
+                            .size(LabelSize::XSmall)
+                            .buffer_font(cx)
+                            .color(Color::Muted),
+                    )
                     .child(Label::new(label).color(Color::Muted))
                     .when(self.summary.warning_count > 0, |this| {
                         let plural_suffix = if self.summary.warning_count > 1 {
@@ -128,12 +139,13 @@ impl Render for ProjectDiagnosticsEditor {
                             self.summary.warning_count, plural_suffix
                         );
                         this.child(
-                            Button::new("diagnostics-show-warning-label", label).on_click(
-                                cx.listener(|this, _, window, cx| {
+                            Button::new("diagnostics-show-warning-label", label)
+                                .style(ButtonStyle::Outlined)
+                                .label_size(LabelSize::Small)
+                                .on_click(cx.listener(|this, _, window, cx| {
                                     this.toggle_warnings(&Default::default(), window, cx);
                                     cx.notify();
-                                }),
-                            ),
+                                })),
                         )
                     })
             } else {

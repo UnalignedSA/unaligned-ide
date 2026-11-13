@@ -269,8 +269,9 @@ pub struct SandboxFallbackAuthorizationDetails {
     #[serde(default)]
     pub reason: String,
     /// Slug of the sandboxing docs section that best explains how to fix this
-    /// failure (see [`crate::LinuxWslSandboxError::docs_section`]), rendered as a
-    /// "Learn more" link. `None` when the cause is unknown.
+    /// failure (see [`crate::LinuxWslSandboxError::docs_section`]). Upstream
+    /// rendered it as a "Learn more" link; the product has no such page and
+    /// shows no link. `None` when the cause is unknown.
     #[serde(default)]
     pub docs_section: Option<String>,
 }
@@ -3690,7 +3691,7 @@ pub const TOKEN_USAGE_WARNING_THRESHOLD: f32 = 0.8;
 impl TokenUsage {
     pub fn ratio(&self) -> TokenUsageRatio {
         #[cfg(debug_assertions)]
-        let warning_threshold: f32 = std::env::var("ZED_THREAD_WARNING_THRESHOLD")
+        let warning_threshold: f32 = std::env::var("IDE_THREAD_WARNING_THRESHOLD")
             .unwrap_or(TOKEN_USAGE_WARNING_THRESHOLD.to_string())
             .parse()
             .unwrap();
@@ -3799,6 +3800,8 @@ pub struct AcpThread {
     pending_terminal_output: HashMap<acp_v2::TerminalId, Vec<Vec<u8>>>,
     pending_terminal_exit: HashMap<acp_v2::TerminalId, acp_v1::TerminalExitStatus>,
     had_error: bool,
+    /// Whether the last refusal took the refused prompt out of the transcript.
+    refused_prompt_removed: bool,
     local_execution_error: Option<Arc<anyhow::Error>>,
     /// The user's unsent prompt text, persisted so it can be restored when reloading the thread.
     draft_prompt: Option<Vec<acp_v2::ContentBlock>>,
@@ -4166,6 +4169,7 @@ impl AcpThread {
             pending_terminal_output: HashMap::default(),
             pending_terminal_exit: HashMap::default(),
             had_error: false,
+            refused_prompt_removed: false,
             local_execution_error: None,
             draft_prompt: None,
             draft_prompt_revision: 0,
@@ -4546,6 +4550,12 @@ impl AcpThread {
 
     pub fn had_error(&self) -> bool {
         self.had_error
+    }
+
+    /// After a refusal: whether the refused prompt is gone from the
+    /// transcript, so that only its submission still holds its text.
+    pub fn refused_prompt_removed(&self) -> bool {
+        self.refused_prompt_removed
     }
 
     pub fn local_execution_error(&self) -> Option<&Arc<anyhow::Error>> {
@@ -7956,6 +7966,7 @@ impl AcpThread {
             }
             acp_v2::StopReason::Refusal => {
                 self.had_error = true;
+                self.refused_prompt_removed = false;
                 if is_same_turn {
                     self.cancel_generic_permission_requests(cx);
                 }
@@ -7970,6 +7981,7 @@ impl AcpThread {
                         let range = user_message_index..self.entries.len();
                         if range.start < range.end {
                             self.truncate_entries(user_message_index, cx);
+                            self.refused_prompt_removed = true;
                             cx.emit(AcpThreadEvent::EntriesRemoved(range));
                         }
                     }
@@ -16897,15 +16909,15 @@ mod tests {
         let terminal = thread
             .update(cx, |thread, cx| {
                 thread.create_terminal(
-                    r#"[ "$ZED_ACP_PAIR" = 'quote "$literal" héllo' ] &&
-                       [ "${ZED_ACP_EMPTY+x}" = x ] && [ -z "$ZED_ACP_EMPTY" ] &&
+                    r#"[ "$IDE_ACP_PAIR" = 'quote "$literal" héllo' ] &&
+                       [ "${IDE_ACP_EMPTY+x}" = x ] && [ -z "$IDE_ACP_EMPTY" ] &&
                        [ "$PAGER" = caller-pager ] && [ "$GIT_PAGER" = cat ]"#
                         .into(),
                     Vec::new(),
                     vec![
-                        ("ZED_ACP_PAIR".into(), "overridden".into()),
-                        ("ZED_ACP_PAIR".into(), r#"quote "$literal" héllo"#.into()),
-                        ("ZED_ACP_EMPTY".into(), String::new()),
+                        ("IDE_ACP_PAIR".into(), "overridden".into()),
+                        ("IDE_ACP_PAIR".into(), r#"quote "$literal" héllo"#.into()),
+                        ("IDE_ACP_EMPTY".into(), String::new()),
                         ("PAGER".into(), "caller-pager".into()),
                     ],
                     None,
@@ -21468,7 +21480,7 @@ mod tests {
             "file:///tmp/authorize",
             "data:text/plain,authorize",
             "mailto:user@example.com",
-            "zed://settings",
+            "ide://settings",
         ] {
             let result = thread.update(cx, |thread, cx| {
                 thread.request_elicitation(

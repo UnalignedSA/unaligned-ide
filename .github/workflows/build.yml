@@ -1,0 +1,375 @@
+# Test builds of the product: an AppImage for Linux, a disk image for macOS
+# (Apple Silicon and Intel) and an installer for Windows, to try on a real
+# machine. A run started by a tag also puts the files, as they are, on a draft
+# release named after the tag (the "Releases" page; only people who can write to
+# the repository see a draft). A run started by hand leaves them on the run's
+# page ("Artifacts"), where GitHub wraps each one in a zip. Nothing is signed
+# and nothing is published. See .github/workflows/README.md and
+# docs/unaligned/PACKAGING.md.
+#
+# Hand-written. Upstream's generated workflows and their generator are not in
+# this repository.
+
+name: Build
+
+# Never on a plain push: one full run is several hours of machine time, and
+# macOS minutes are expensive in a private repository.
+#
+#   By hand:  Actions tab, "Build", "Run workflow", and the list of targets.
+#   By a tag: `git tag build-all-1 && git push <remote> build-all-1`. The words
+#             in the tag's name choose the targets: build-linux-2,
+#             build-windows-mac-arm-3, build-all-4.
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "What to build: all, or any of: linux windows mac-arm mac-intel"
+        required: true
+        default: "all"
+  push:
+    tags: ["build-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  CARGO_INCREMENTAL: "0"
+  # A missing licence text in a dependency must not stop a test build. A
+  # release must be built without this variable (docs/unaligned/PACKAGING.md).
+  ALLOW_MISSING_LICENSES: "1"
+  # RUSTFLAGS is left alone on purpose: .cargo/config.toml sets what is needed.
+  # Never define IDE_MINIDUMP_ENDPOINT or IDE_CLIENT_CHECKSUM_SEED in a workflow:
+  # a build that sees the first one turns crash uploads back on. The bundle
+  # scripts refuse to start when either is set.
+
+jobs:
+  # The list of third-party licences the application shows, written once on the
+  # cheapest machine and handed to the macOS and Windows builds. The Linux build
+  # writes its own (script/unaligned/bundle-linux does).
+  licenses:
+    name: Licence list
+    if: >-
+      contains(inputs.targets || github.ref_name, 'all') ||
+      contains(inputs.targets || github.ref_name, 'windows') ||
+      contains(inputs.targets || github.ref_name, 'mac')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install --no-self-update
+          cargo --version
+
+      - name: Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+          cache-targets: false
+
+      - name: Write assets/licenses.md
+        run: script/generate-licenses
+
+      - name: Upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: licenses
+          path: assets/licenses.md
+          if-no-files-found: error
+          retention-days: 3
+
+  linux:
+    name: Linux x86_64
+    if: >-
+      contains(inputs.targets || github.ref_name, 'all') ||
+      contains(inputs.targets || github.ref_name, 'linux')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      # As upstream's Linux jobs; script/linux installs clang.
+      CC: clang
+      CXX: clang++
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+
+      - name: System packages
+        run: ./script/linux
+
+      # appimagetool needs it.
+      - name: The `file` command
+        run: sudo apt-get install -y file
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show
+          cargo --version
+
+      - name: Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+
+      - name: Build and package
+        run: script/unaligned/bundle-linux
+
+      - name: Upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unaligned-ide-linux-x86_64
+          path: |
+            target/release/*-linux-*.AppImage
+            target/release/*-linux-*.tar.gz
+            target/release/SHA256SUMS
+            target/release/install.sh
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Disk space at the end
+        if: ${{ always() }}
+        run: |
+          df -h /
+          du -sh target || true
+
+  macos-arm:
+    name: macOS Apple Silicon
+    needs: licenses
+    if: >-
+      contains(inputs.targets || github.ref_name, 'all') ||
+      contains(inputs.targets || github.ref_name, 'mac-arm')
+    runs-on: macos-15
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Machine
+        run: |
+          uname -m
+          sw_vers
+          xcodebuild -version
+          df -h /
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show
+          cargo --version
+
+      - name: Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+
+      - name: Licence list
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: licenses
+          path: assets
+
+      - name: Build and package
+        run: script/unaligned/bundle-mac aarch64-apple-darwin
+
+      - name: Upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unaligned-ide-macos-apple-silicon
+          path: target/release/*-macos-aarch64.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Disk space at the end
+        if: ${{ always() }}
+        run: |
+          df -h /
+          du -sh target || true
+
+  # Built on an Apple Silicon machine for the Intel target: Apple's tools build
+  # both, and GitHub's Intel machines are being retired.
+  macos-intel:
+    name: macOS Intel
+    needs: licenses
+    if: >-
+      contains(inputs.targets || github.ref_name, 'all') ||
+      contains(inputs.targets || github.ref_name, 'mac-intel')
+    runs-on: macos-15
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Machine
+        run: |
+          uname -m
+          sw_vers
+          xcodebuild -version
+          df -h /
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show
+          cargo --version
+
+      - name: Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+
+      - name: Licence list
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: licenses
+          path: assets
+
+      - name: Build and package
+        run: script/unaligned/bundle-mac x86_64-apple-darwin
+
+      - name: Upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unaligned-ide-macos-intel
+          path: target/release/*-macos-x86_64.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Disk space at the end
+        if: ${{ always() }}
+        run: |
+          df -h /
+          du -sh target || true
+
+  windows:
+    name: Windows x86_64
+    needs: licenses
+    if: >-
+      contains(inputs.targets || github.ref_name, 'all') ||
+      contains(inputs.targets || github.ref_name, 'windows')
+    runs-on: windows-2022
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # One command per step in this job: PowerShell only reports the exit code
+      # of the last command of a step.
+      - name: Git, long paths
+        run: git config --global core.longpaths true
+
+      # The same bytes as on Linux and macOS, whatever the runner's default.
+      - name: Git, no line-ending conversion
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      # Information only: must never stop the job.
+      - name: Disk space at the start
+        continue-on-error: true
+        run: Get-PSDrive -PSProvider FileSystem
+
+      - name: Rust toolchain
+        run: rustup toolchain install --no-self-update
+
+      - name: Show the toolchain
+        continue-on-error: true
+        run: rustup show
+
+      - name: Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+
+      - name: Licence list
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: licenses
+          path: assets
+
+      # GitHub's Windows image has Inno Setup; installed here if a later image drops it.
+      - name: Inno Setup
+        run: if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
+
+      - name: Build and package
+        run: ./script/unaligned/bundle-windows.ps1
+
+      - name: Upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unaligned-ide-windows-x86_64
+          path: target/release/*-windows-x86_64-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Disk space at the end
+        if: ${{ always() }}
+        continue-on-error: true
+        run: Get-PSDrive -PSProvider FileSystem
+
+  # The files of a tag's run, as they are (no zip around them), on a draft
+  # release named after the tag. A draft is seen only by people who can write to
+  # the repository, and is published by hand or not at all. Whatever was built
+  # is attached, even when another system's build failed.
+  draft-release:
+    name: Draft release
+    needs: [linux, macos-arm, macos-intel, windows]
+    if: ${{ !cancelled() && github.ref_type == 'tag' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Download what was built
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: unaligned-ide-*
+          merge-multiple: true
+          path: files
+
+      - name: List
+        run: ls -la files
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          shopt -s nullglob
+          assets=(files/*-setup.exe files/*.dmg files/*.AppImage)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo "Nothing to attach: no build of this run produced a file."
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" --draft --verify-tag \
+              --title "Test build $TAG" \
+              --notes "Unsigned test build made by the Build workflow. Not a release."
+          fi

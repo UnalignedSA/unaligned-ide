@@ -27,6 +27,7 @@ async-compression.workspace = true
 async-pipe = { workspace = true, optional = true }
 async-tar.workspace = true
 async-trait.workspace = true
+branding.workspace = true
 client.workspace = true
 collections.workspace = true
 dap-types.workspace = true

@@ -1,3 +1,4 @@
+// Modified by the Unaligned IDE contributors, 2026: see NOTICE at the repository root.
 use std::{
     collections::HashMap,
     sync::{Arc, OnceLock},
@@ -262,7 +263,7 @@ const SUGGESTIONS_BY_LANGUAGE: &[LanguageAdditionSuggestion] = &[LanguageAdditio
     ],
     title: "Emmet is available for this file",
     description: "Emmet expands abbreviations such as `ul>li*3` into HTML and `m10` into CSS.",
-    docs_url: "https://zed.dev/docs/languages/emmet",
+    docs_url: "https://docs.emmet.io/",
     install_message: "Install Emmet",
 }];
 

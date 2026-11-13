@@ -3930,7 +3930,7 @@ async fn test_remote_diff_prefix_avoids_unnecessary_metadata(
             path!("/remote"),
             json!({
                 "first": {
-                    ".zed": {
+                    ".unaligned": {
                         "settings.json": r#"{"file_scan_exclusions": ["**/a"]}"#,
                     },
                     "a": { "file.rs": "" },
@@ -4041,7 +4041,7 @@ async fn test_remote_diff_prefix_avoids_unnecessary_metadata(
         .unwrap();
     cx.run_until_parked();
     server_fs
-        .touch_path(path!("/remote/first/.zed/settings.json"))
+        .touch_path(path!("/remote/first/.unaligned/settings.json"))
         .await;
     advance_worktree_update_refresh(cx);
     project.read_with(cx, |project, cx| {

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use app_actions::editor::{MoveDown, MoveUp};
 use gpui::Action;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DismissEvent, EventEmitter, FocusHandle,
@@ -18,7 +19,6 @@ use ui::{
 use ui_input::ErasedEditorEvent;
 use util::ResultExt;
 use workspace::ModalView;
-use zed_actions::editor::{MoveDown, MoveUp};
 
 mod footer;
 mod head;
@@ -29,6 +29,7 @@ pub mod popover_menu;
 mod preview;
 mod render;
 mod shape;
+mod surface;
 
 use crate::shape::RelativeHeight;
 use crate::shape::RelativeWidth;
@@ -40,6 +41,10 @@ pub use preview::Preview;
 pub use preview::PreviewBackend;
 pub use preview::PreviewSource;
 pub use preview::Update as PreviewUpdate;
+pub use surface::{
+    FOOTER_HEIGHT, PickerEmptyAction, QUERY_ROW_HEIGHT, footer, footer_button, footer_key_cap,
+    query_row,
+};
 pub use ui_input::ErasedEditor;
 
 pub const DEFAULT_MODAL_WIDTH: Rems = Rems(34.0);
@@ -222,6 +227,15 @@ pub trait PickerDelegate: Sized + 'static {
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str>;
     fn no_matches_text(&self, _window: &mut Window, _cx: &mut App) -> Option<SharedString> {
         Some("No matches".into())
+    }
+    /// One optional action offered under [`Self::no_matches_text`], as a row
+    /// of the empty state (for example "More Themes…").
+    fn no_matches_action(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Picker<Self>>,
+    ) -> Option<PickerEmptyAction> {
+        None
     }
     fn update_matches(
         &mut self,
@@ -1380,12 +1394,26 @@ impl<D: PickerDelegate> Picker<D> {
             multi_select_active && selectable && item_with_checkbox.is_none();
         let focus_handle = self.focus_handle(cx);
 
+        // The selected row's ground runs edge to edge while the row's content
+        // sits on the picker's 12px inset: the picker paints the ground, with
+        // the token `ListItem` uses, so the two never show as two shades.
+        let is_selected = selectable && ix == self.delegate.selected_index();
+
         div()
             .id(("item", ix))
-            .when(selectable, |this| this.cursor_pointer())
-            .when(use_fallback_indicator, |this| {
-                this.hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
+            .px(rems_from_px(surface::ROW_GUTTER))
+            .when(is_selected, |this| {
+                this.bg(cx.theme().colors().ghost_element_selected)
             })
+            // Under the pointer `ListItem` shows its hover ground, also on the
+            // selected row: the gutters follow it.
+            .when(selectable, |this| {
+                this.cursor_pointer()
+                    .hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
+            })
+            // The fallback indicator's row is always selectable, so it already has the
+            // hover ground above: a second `.hover` on the same element panics in debug
+            // builds ("hover style already set").
             .when(multi_select_active && selectable, |this| {
                 this.tooltip(Tooltip::element(move |_window, cx| {
                     h_flex()
@@ -1485,7 +1513,7 @@ impl<D: PickerDelegate> Picker<D> {
                 self.delegate.separators_after_indices().contains(&ix),
                 |picker| {
                     picker
-                        .border_color(cx.theme().colors().border_variant)
+                        .border_color(cx.theme().colors().border)
                         .border_b_1()
                         .py(px(-1.0))
                 },

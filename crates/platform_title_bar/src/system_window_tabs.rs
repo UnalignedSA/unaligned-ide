@@ -64,7 +64,10 @@ impl SystemWindowTabs {
             was_use_system_window_tabs = use_system_window_tabs;
 
             let tabbing_identifier = if use_system_window_tabs {
-                Some(String::from("zed"))
+                // The same identifier as the one windows are created with
+                // (`build_window_options`), or old and new windows would not
+                // share a tab group.
+                Some(String::from(branding::APP_ID))
             } else {
                 None
             };
@@ -484,7 +487,7 @@ impl Render for SystemWindowTabs {
                             .icon_color(Color::Muted)
                             .on_click(|_event, window, cx| {
                                 window.dispatch_action(
-                                    Box::new(zed_actions::OpenRecent {
+                                    Box::new(app_actions::OpenRecent {
                                         create_new_window: Some(true),
                                     }),
                                     cx,
