@@ -1756,8 +1756,10 @@
   // Default: false
   "disable_ai": false,
   // Check once a day whether a newer version has been released.
-  // A newer version is announced, never downloaded or installed.
-  "auto_update": false,
+  // The check is an anonymous request to the product's releases on GitHub.
+  // A newer version is announced; it is downloaded and installed only when
+  // you click to update.
+  "auto_update": true,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
   // Possible values:

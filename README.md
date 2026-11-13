@@ -7,7 +7,7 @@
 **The open-source code editor made for coding with AI.**<br>
 Fast, private, and connected to the model you choose.
 
-[![Version](https://img.shields.io/badge/version-0.1.0-E5322D?style=flat-square&labelColor=0D0C0B)](https://github.com/UnalignedSA/unaligned-ide/releases)
+[![Version](https://img.shields.io/badge/version-0.1.1-E5322D?style=flat-square&labelColor=0D0C0B)](https://github.com/UnalignedSA/unaligned-ide/releases)
 [![Licence](https://img.shields.io/badge/licence-GPL--3.0--or--later-E9E7E3?style=flat-square&labelColor=0D0C0B)](LICENSE-GPL)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20·%20macOS%20·%20Linux-E9E7E3?style=flat-square&labelColor=0D0C0B)](#download)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-E9E7E3?style=flat-square&labelColor=0D0C0B)](#build-from-source)
@@ -111,8 +111,15 @@ The builds are not signed yet, so each system asks before the first start. On ma
 xattr -dr com.apple.quarantine "/Applications/Unaligned IDE.app"
 ```
 
-> [!IMPORTANT]
-> These links point to the latest published release. Until version 0.1.0 is published they answer "Not Found": build from source in the meantime.
+### Updates
+
+From version 0.1.1 on, the application asks GitHub once a day whether a newer version has been released, and shows **Update Available** in the title bar when there is one. A click downloads the new version, checks it and installs it; **Restart to Update** then starts it. Nothing is downloaded before that click.
+
+- A release is announced only when its list of files is signed with the project's update key, and the download is installed only when it has the exact size and SHA-256 that list gives. A release that someone else managed to publish is ignored.
+- It works for the builds of this page: the Windows installer, the macOS application once it is in a folder such as Applications, the Linux AppImage. A build from source, or a copy started straight from the disk image, shows a link to the release page instead.
+- `"auto_update": false` in the settings turns the daily check off. Help → Check for Updates still works.
+
+Version 0.1.0 has no update check: install a newer version by hand once. How it works and how a release is signed: [`docs/unaligned/UPDATES.md`](docs/unaligned/UPDATES.md).
 
 ## Connect a model
 
@@ -143,7 +150,7 @@ More connections can be added later from the chat's "…" menu, "Connections…"
 - The sign-ins of the subscriptions are upstream's code and were not tried one by one here.
 - Remote development (SSH, WSL, containers) needs a server build this project does not publish yet.
 - A project's own settings, tasks and debug scenarios are read from `.unaligned/`. A `.zed/` folder is not read.
-- Nothing is signed: no Windows certificate and no Apple notarisation yet.
+- Nothing is signed for the operating system: no Windows certificate and no Apple notarisation yet. Updates are signed with the project's own key, which the application checks itself.
 
 </details>
 
@@ -198,7 +205,7 @@ The application is the cargo package `ide`; its binary is `unaligned-ide`.
 | macOS | `script/unaligned/bundle-mac [aarch64-apple-darwin \| x86_64-apple-darwin]` | `target/release/unaligned-ide-macos-<arch>.dmg` (the application and a link to Applications) |
 | Windows | `script/unaligned/bundle-windows.ps1` (needs Inno Setup 6) | `target\release\unaligned-ide-windows-x86_64-setup.exe` (an installer for the current user) |
 
-The **Build** workflow (`.github/workflows/build.yml`) runs the same scripts on GitHub's machines. A version tag such as `v0.1.0` builds every platform and drafts the release; a tag such as `build-linux-windows-2` builds the platforms it names as a test. Details and the rules for a real release: [`docs/unaligned/PACKAGING.md`](docs/unaligned/PACKAGING.md).
+The **Build** workflow (`.github/workflows/build.yml`) runs the same scripts on GitHub's machines. A version tag such as `v0.1.1` builds every platform, signs the list of files for the updater and drafts the release; a tag such as `build-linux-windows-2` builds the platforms it names as a test. Details and the rules for a real release: [`docs/unaligned/PACKAGING.md`](docs/unaligned/PACKAGING.md).
 
 ## Privacy
 
@@ -208,7 +215,8 @@ What the application contacts, and when:
 - `localhost`, to look for local models (Ollama, LM Studio, llama.cpp);
 - the public registry of external agents, when you set one up;
 - Zed's extension registry, for language extensions;
-- GitHub, npm and nodejs.org, when a language server has to be downloaded for a file you opened.
+- GitHub, npm and nodejs.org, when a language server has to be downloaded for a file you opened;
+- GitHub, once a day, to ask whether a newer version has been released: a request without any identifier, and two small files of the release when there is one, to check its signature (`"auto_update": false` turns it off). The new version itself is downloaded from GitHub only when you click to update.
 
 This is measured, not only stated: [`docs/unaligned/NETWORK.md`](docs/unaligned/NETWORK.md) lists the hosts seen in each scenario, and `script/unaligned/netcheck` runs the measurement again on your own build.
 

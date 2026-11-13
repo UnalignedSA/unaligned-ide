@@ -288,7 +288,7 @@ Not written. `check.yml`'s guard step already allows a file of that name. Notes 
 - Windows job: Inno Setup 6 present (as the step of `build.yml` does), `script/unaligned/bundle-windows.ps1` with `assets\licenses.md` in place, then upload the `-setup.exe`.
 - macOS, if it is released: `script/unaligned/bundle-mac <target>` with `assets/licenses.md` in place, then upload the `.dmg`.
 - The job `draft-release` of `build.yml` shows one way to attach files to a release with `gh` and the job permission `contents: write`. It attaches only the installer, the disk images and the AppImage: a real release must also carry the archive, `SHA256SUMS` and `install.sh`, or the install command above and the checksum have nothing to read.
-- Fail early when the tag is not `v<version of the ide package>` (rule 1) or when `RELEASES_REPOSITORY` is empty.
+- Fail early when the tag is not `v<version of the ide package>` (rule 1) or when `RELEASES_REPOSITORY` is empty. (`build.yml` has the tag check since 2026-11-13, and signs the list of files for the updater: `docs/unaligned/UPDATES.md`.)
 - A final job creates the release and merges the per-platform `SHA256SUMS` into one file (today only `bundle-linux` writes one).
 
 ## Candidates for removal after the first real link

@@ -3,7 +3,7 @@
 //!
 //! Upstream's parts are gone with its updater: the notes downloaded from its
 //! own site and shown in a tab, the "updated to …" notification that followed
-//! an in-place install (this app installs nothing), and its announcements.
+//! an in-place install, and its announcements.
 
 use std::any::TypeId;
 

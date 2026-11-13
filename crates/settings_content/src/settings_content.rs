@@ -215,9 +215,10 @@ pub struct SettingsContent {
     pub audio: Option<AudioSettingsContent>,
 
     /// Whether to check once a day whether a newer version has been released.
-    /// A newer version is announced, never downloaded or installed.
+    /// A newer version is announced; it is downloaded and installed only when
+    /// the user clicks to update.
     ///
-    /// Default: false
+    /// Default: true
     pub auto_update: Option<bool>,
 
     /// The base keymap makes the default key bindings follow another editor's.

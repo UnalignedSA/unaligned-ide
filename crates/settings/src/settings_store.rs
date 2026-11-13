@@ -1890,11 +1890,11 @@ mod tests {
         store.register_setting::<ItemSettings>();
         store.register_setting::<DefaultLanguageSettings>();
 
-        // Unaligned default: auto_update off. The user file turns it on below, so the
-        // test still shows that a user value replaces the default.
+        // The default: the daily update check is on. The user file below says
+        // the same, so that the folder's `false` further down is seen ignored.
         assert_eq!(
             store.get::<AutoUpdateSetting>(None),
-            &AutoUpdateSetting { auto_update: false }
+            &AutoUpdateSetting { auto_update: true }
         );
         assert_eq!(
             store.get::<ItemSettings>(None).close_position,

@@ -71,6 +71,10 @@ brand! {
     /// Where users report problems. Empty while there is no tracker: use
     /// [`issues_url`].
     ISSUES_URL;
+    /// The public keys an update must be signed with before the application
+    /// installs it: Ed25519 keys in base64, separated by commas. Empty: the
+    /// application announces new versions and installs none.
+    UPDATE_PUBLIC_KEYS;
     /// The address of the product's OAuth client metadata document. Empty
     /// while the product's site publishes none: use
     /// [`oauth_client_metadata_url`].

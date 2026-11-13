@@ -74,3 +74,13 @@ Root: HKA; Subkey: "Software\Classes\{#UrlScheme}\shell\open\command"; ValueType
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; An update the editor started itself (crates/auto_update/src/install.rs runs
+; Setup with /SILENT /update=true once the editor has quit): the new version is
+; started again without a question.
+Filename: "{app}\{#AppExeName}"; Flags: nowait; Check: IsUpdate
+
+[Code]
+function IsUpdate(): Boolean;
+begin
+  Result := ExpandConstant('{param:update|false}') = 'true';
+end;

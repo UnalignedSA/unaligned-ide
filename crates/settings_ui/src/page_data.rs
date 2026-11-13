@@ -426,7 +426,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("Updates"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Check for Updates",
-                description: "Check once a day whether a newer version has been released. A newer version is announced, never downloaded or installed.",
+                description: "Check once a day whether a newer version has been released. A newer version is announced; it is downloaded and installed only when you click to update.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("auto_update"),

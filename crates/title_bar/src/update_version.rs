@@ -12,8 +12,11 @@ use ui::{UpdateButton, prelude::*};
 const UP_TO_DATE_DISPLAY_DURATION: Duration = Duration::from_secs(4);
 
 /// The title bar's word on updates: a check in progress, its failure, "up to
-/// date" for a moment, or a quiet button that opens the page of a newer
-/// release. Nothing here downloads or installs: the app never does.
+/// date" for a moment, or a quiet button for a newer release. A click on that
+/// button installs the release when this copy can be updated in place, and
+/// opens the release's page otherwise; the button then follows the download,
+/// the installation, and offers the restart. Nothing is downloaded before
+/// that click.
 pub struct UpdateVersion {
     status: AutoUpdateStatus,
     available_update: Option<AvailableUpdate>,
@@ -81,19 +84,41 @@ impl UpdateVersion {
         self._up_to_date_timer = None;
     }
 
-    /// Steps through the states the button can show, without any check:
-    /// checking, update available, check failed, nothing.
+    /// Steps through the states the button can show, without any check or
+    /// download: checking, update available, downloading, installing, restart
+    /// to update, update failed, check failed, nothing.
     pub fn update_simulation(&mut self, cx: &mut Context<Self>) {
+        let version = Version::new(1, 99, 0);
         let (status, available_update) = match (&self.status, &self.available_update) {
             (AutoUpdateStatus::Idle, None) => (AutoUpdateStatus::Checking, None),
             (AutoUpdateStatus::Checking, _) => (
                 AutoUpdateStatus::Idle,
                 Some(AvailableUpdate {
-                    version: Version::new(1, 99, 0),
+                    version,
                     url: branding::WEBSITE_URL.to_string(),
+                    package: None,
                 }),
             ),
             (AutoUpdateStatus::Idle, Some(_)) => (
+                AutoUpdateStatus::Downloading {
+                    version,
+                    progress: Some(0.42),
+                },
+                None,
+            ),
+            (AutoUpdateStatus::Downloading { .. }, _) => {
+                (AutoUpdateStatus::Installing { version }, None)
+            }
+            (AutoUpdateStatus::Installing { .. }, _) => {
+                (AutoUpdateStatus::Updated { version }, None)
+            }
+            (AutoUpdateStatus::Updated { .. }, _) => (
+                AutoUpdateStatus::InstallFailed {
+                    error: Arc::new(anyhow!("The download was interrupted")),
+                },
+                None,
+            ),
+            (AutoUpdateStatus::InstallFailed { .. }, _) => (
                 AutoUpdateStatus::Errored {
                     error: Arc::new(anyhow!("Network timeout")),
                 },
@@ -125,6 +150,18 @@ impl UpdateVersion {
         cx.notify()
     }
 
+    /// Puts a failed installation away: the updater is idle again, and the
+    /// release it could not install is offered as before.
+    fn dismiss_failure(&mut self, cx: &mut Context<Self>) {
+        if let Some(auto_updater) = AutoUpdater::get(cx) {
+            auto_updater.update(cx, |auto_updater, cx| {
+                auto_updater.dismiss(cx);
+            });
+        }
+        self.status = AutoUpdateStatus::Idle;
+        cx.notify()
+    }
+
     fn dismiss_available_update(&mut self, cx: &mut Context<Self>) {
         self.available_update = None;
         if let Some(auto_updater) = AutoUpdater::get(cx) {
@@ -140,8 +177,13 @@ impl UpdateVersion {
     }
 
     fn available_tooltip_message(update: &AvailableUpdate) -> String {
+        let action = if update.can_be_installed() {
+            "Click to download and install it."
+        } else {
+            "Open its release page."
+        };
         format!(
-            "{} {} is available. Open its release page.",
+            "{} {} is available. {action}",
             branding::PRODUCT_NAME,
             update.version
         )
@@ -173,21 +215,69 @@ impl Render for UpdateVersion {
                     .on_dismiss(cx.listener(|this, _, _window, cx| this.dismiss(cx)))
                     .into_any_element();
             }
-            // `Downloading`, `Installing` and `Updated` are never produced.
+            AutoUpdateStatus::Downloading { version, progress } => {
+                return UpdateButton::downloading(*progress)
+                    .tooltip(UpdateButton::downloading_tooltip_message(
+                        version, *progress,
+                    ))
+                    .into_any_element();
+            }
+            AutoUpdateStatus::Installing { version } => {
+                return UpdateButton::installing(UpdateButton::version_tooltip_message(version))
+                    .into_any_element();
+            }
+            AutoUpdateStatus::Updated { version } if !self.is_dismissed() => {
+                return UpdateButton::updated(UpdateButton::version_tooltip_message(version))
+                    .on_click(|_, _, cx| workspace::reload(cx))
+                    .on_dismiss(cx.listener(|this, _, _window, cx| this.dismiss(cx)))
+                    .into_any_element();
+            }
+            // Nothing was replaced. The release's page is the other way to
+            // the new version; dismissing brings "Update Available" back for
+            // another try.
+            AutoUpdateStatus::InstallFailed { error } if !self.is_dismissed() => {
+                let url = self
+                    .available_update
+                    .as_ref()
+                    .map(|update| update.url.clone());
+                let tooltip = match &url {
+                    Some(_) => format!("{error:#}. Click to open the release page."),
+                    None => format!("{error:#}"),
+                };
+                return UpdateButton::errored(tooltip)
+                    .on_click(move |_, window, cx| match &url {
+                        Some(url) => cx.open_url(url),
+                        None => window.dispatch_action(Box::new(workspace::OpenLog), cx),
+                    })
+                    .on_dismiss(cx.listener(|this, _, _window, cx| this.dismiss_failure(cx)))
+                    .into_any_element();
+            }
+            // A restart that was put off: the button stays out of the way.
+            AutoUpdateStatus::Updated { .. } => return Empty.into_any_element(),
             _ => {}
         }
 
         // The terminal state of a check that found a newer release: an
-        // outlined button, like every other state here, that opens the
-        // release's page. The accent is not used.
+        // outlined button, like every other state here. It installs the
+        // release when this copy can be updated in place, and opens the
+        // release's page otherwise. The accent is not used.
         let Some(update) = &self.available_update else {
             return Empty.into_any_element();
         };
-        let url = update.url.clone();
-        UpdateButton::new(IconName::ArrowUpRight, "Update Available")
+        let button = if update.can_be_installed() {
+            UpdateButton::new(IconName::Download, "Update Available").on_click(|_, _, cx| {
+                if let Some(auto_updater) = AutoUpdater::get(cx) {
+                    auto_updater.update(cx, |auto_updater, cx| auto_updater.install_update(cx));
+                }
+            })
+        } else {
+            let url = update.url.clone();
+            UpdateButton::new(IconName::ArrowUpRight, "Update Available")
+                .on_click(move |_, _, cx| cx.open_url(&url))
+        };
+        button
             .tooltip(Self::available_tooltip_message(update))
             .with_dismiss()
-            .on_click(move |_, _, cx| cx.open_url(&url))
             .on_dismiss(cx.listener(|this, _, _window, cx| this.dismiss_available_update(cx)))
             .into_any_element()
     }
@@ -207,6 +297,7 @@ mod tests {
         let update = AvailableUpdate {
             version: Version::new(1, 2, 3),
             url: "https://example.com/releases/tag/v1.2.3".to_string(),
+            package: None,
         };
         assert_eq!(
             UpdateVersion::available_tooltip_message(&update),
