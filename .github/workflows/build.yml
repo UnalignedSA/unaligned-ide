@@ -185,6 +185,11 @@ jobs:
           df -h /
           du -sh target || true
 
+  # Both macOS targets are built on GitHub's Intel machines (macos-15-intel):
+  # on 2026-11-13 the Apple Silicon ones (macos-15) never picked the jobs up,
+  # three attempts in a row. Apple's tools build either target on either
+  # machine. An Intel machine cannot run the Apple Silicon build, so
+  # bundle-mac skips its last check there (asking the command its version).
   macos-arm:
     name: macOS Apple Silicon
     needs: licenses
@@ -192,7 +197,7 @@ jobs:
       contains(inputs.targets || github.ref_name, 'all') ||
       contains(inputs.targets || github.ref_name, 'mac-arm') ||
       (github.ref_type == 'tag' && startsWith(github.ref_name, 'v'))
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 300
     steps:
       - name: Checkout
@@ -274,8 +279,6 @@ jobs:
           df -h /
           du -sh target || true
 
-  # Built on an Apple Silicon machine for the Intel target: Apple's tools build
-  # both, and GitHub's Intel machines are being retired.
   macos-intel:
     name: macOS Intel
     needs: licenses
@@ -283,7 +286,7 @@ jobs:
       contains(inputs.targets || github.ref_name, 'all') ||
       contains(inputs.targets || github.ref_name, 'mac-intel') ||
       (github.ref_type == 'tag' && startsWith(github.ref_name, 'v'))
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 300
     steps:
       - name: Checkout
