@@ -221,6 +221,6 @@ Learned in wave 3 (added at gate 3):
 
 1. Only windows of instances started by `shot`. Never capture the whole screen, never capture or stop the owner's instance (`pgrep -f target/debug/unaligned-ide` shows it: leave it alone). `shot` stops only the process it started.
 2. Always the harness's own data directory: never start the app by hand without `--user-data-dir`.
-3. Never commit PNGs or anything under `.work/` (it is git-ignored). Refer to a picture by its path in your report.
+3. Never commit anything under `.work/` (it is git-ignored). The only pictures in the repository are the README's, in `.github/readme/`: copies of shots taken with `--fake-api` on the sample project.
 4. No real API key in an instance that is photographed: use `--fake-api`.
 5. Look at the picture. A shot that succeeded only proves a window was drawn, not that it shows what the scene name says.

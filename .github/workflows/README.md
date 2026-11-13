@@ -1,6 +1,6 @@
 # Workflows
 
-Two workflows live here: `check.yml` ("Check") and `build.yml` ("Build", test builds to download: see the end of this page). A `release.yml` for `v*` tags is planned and not written (`docs/unaligned/PACKAGING.md`). Nothing else belongs in this directory.
+Two workflows live here: `check.yml` ("Check") and `build.yml` ("Build", test builds to download: see the end of this page). There is no separate `release.yml`: since 2026-11-13 a version tag (`v0.1.0`) starts `build.yml` for every target and drafts the release (never run yet). Nothing else belongs in this directory.
 
 Not run since the 2026-11-13 rename: `check.yml` (the same commands pass in the Docker checks on the development Mac: `check-linux` and `check-windows` for `-p ide` and `-p cli`). For `build.yml`, the tag `build-linux-windows-2` was pushed on 2026-11-13, after the rename, to start its Linux and Windows jobs; the result of that run was not known when this was written. The commands of both now name the package `ide` (`cargo check -p ide`), the Windows job reads its resources from `crates/ide/resources/windows`, and the three bundle scripts that `build.yml` runs stage the files under new names (`docs/unaligned/PACKAGING.md`, "File names inside the packages") and write new kinds of packages (an installer, disk images, an AppImage: see the end of this page).
 
@@ -93,7 +93,7 @@ About `draft-release`:
 
 - It is the only job that can write to the repository: `permissions: contents: write` on that job, for `gh release create`. The workflow's own permission stays `contents: read`, and the only secret used is the run's own `GITHUB_TOKEN`.
 - It waits for the four build jobs and runs even when one of them failed or was not asked for: whatever was built is attached. It fails when no build produced a file. A cancelled run makes no release.
-- The release is titled "Test build <tag>". When a release named after the tag exists already, the files are uploaded to it and replace those of the same name.
+- The release is titled "Test build <tag>", or "Unaligned IDE <version>" for a version tag (`v0.1.0`). It is always a draft: publishing it is done by hand on the "Releases" page, and the README's download links (`releases/latest/download/…`) only see a published release that is not marked as a pre-release. When a release named after the tag exists already, the files are uploaded to it and replace those of the same name.
 - A draft is seen only by people who can write to the repository. It is published by hand or not at all.
 - The archive, `SHA256SUMS` and `install.sh` are not attached: they stay in the Linux artifact.
 - A run started by hand makes no release. It only leaves artifacts.
@@ -101,6 +101,7 @@ About `draft-release`:
 How to start it:
 
 - By hand: Actions tab, "Build", "Run workflow". The field takes `all` or any of `linux windows mac-arm mac-intel`.
+- By a version tag, `git tag v0.1.0 && git push <remote> v0.1.0` (the version of `crates/ide/Cargo.toml`): every target is built. Added on 2026-11-13 and never run yet.
 - By a tag whose name starts with `build-`; the words in the name choose the targets: `git tag build-all-1 && git push <remote> build-all-1`, `build-linux-2`, `build-windows-mac-arm-3`. These tags are only triggers. Deleting such a tag afterwards does not delete its draft release: delete the draft on the "Releases" page too.
 
 Cost, for a private repository (rates read on GitHub's pricing page on 2026-11-12: Linux $0.006, Windows $0.010, macOS $0.062 per minute; durations are estimates, nothing was measured): the macOS jobs are by far the most expensive, about ten times a Linux minute. One full run can use more than a free plan's monthly minutes. A public repository pays nothing for these machines and gets larger ones for Linux and Windows. `draft-release` adds a few Linux minutes to a run started by a tag: it downloads and uploads files and compiles nothing. `script/unaligned/bundle-mac --runtime-shaders` builds the macOS application and its disk image on the development Mac for free.

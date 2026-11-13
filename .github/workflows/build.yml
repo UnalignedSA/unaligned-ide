@@ -19,6 +19,11 @@ name: Build
 #   By a tag: `git tag build-all-1 && git push <remote> build-all-1`. The words
 #             in the tag's name choose the targets: build-linux-2,
 #             build-windows-mac-arm-3, build-all-4.
+#   A release: a version tag, `git tag v0.1.0 && git push <remote> v0.1.0`
+#             (the version of crates/ide/Cargo.toml). It builds every target
+#             and drafts the release "Unaligned IDE 0.1.0"; publishing the
+#             draft is done by hand, and makes it the "latest" release the
+#             README's download links point to.
 on:
   workflow_dispatch:
     inputs:
@@ -27,7 +32,7 @@ on:
         required: true
         default: "all"
   push:
-    tags: ["build-*"]
+    tags: ["build-*", "v*"]
 
 permissions:
   contents: read
@@ -57,7 +62,8 @@ jobs:
     if: >-
       contains(inputs.targets || github.ref_name, 'all') ||
       contains(inputs.targets || github.ref_name, 'windows') ||
-      contains(inputs.targets || github.ref_name, 'mac')
+      contains(inputs.targets || github.ref_name, 'mac') ||
+      (github.ref_type == 'tag' && startsWith(github.ref_name, 'v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -92,7 +98,8 @@ jobs:
     name: Linux x86_64
     if: >-
       contains(inputs.targets || github.ref_name, 'all') ||
-      contains(inputs.targets || github.ref_name, 'linux')
+      contains(inputs.targets || github.ref_name, 'linux') ||
+      (github.ref_type == 'tag' && startsWith(github.ref_name, 'v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     env:
@@ -155,7 +162,8 @@ jobs:
     needs: licenses
     if: >-
       contains(inputs.targets || github.ref_name, 'all') ||
-      contains(inputs.targets || github.ref_name, 'mac-arm')
+      contains(inputs.targets || github.ref_name, 'mac-arm') ||
+      (github.ref_type == 'tag' && startsWith(github.ref_name, 'v'))
     runs-on: macos-15
     timeout-minutes: 300
     steps:
@@ -212,7 +220,8 @@ jobs:
     needs: licenses
     if: >-
       contains(inputs.targets || github.ref_name, 'all') ||
-      contains(inputs.targets || github.ref_name, 'mac-intel')
+      contains(inputs.targets || github.ref_name, 'mac-intel') ||
+      (github.ref_type == 'tag' && startsWith(github.ref_name, 'v'))
     runs-on: macos-15
     timeout-minutes: 300
     steps:
@@ -267,7 +276,8 @@ jobs:
     needs: licenses
     if: >-
       contains(inputs.targets || github.ref_name, 'all') ||
-      contains(inputs.targets || github.ref_name, 'windows')
+      contains(inputs.targets || github.ref_name, 'windows') ||
+      (github.ref_type == 'tag' && startsWith(github.ref_name, 'v'))
     runs-on: windows-2022
     timeout-minutes: 300
     defaults:
@@ -369,7 +379,14 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${assets[@]}" --clobber
           else
+            # A version tag (v0.1.0) is a release to publish; any other tag is a test.
+            if [[ "$TAG" == v* ]]; then
+              title="Unaligned IDE ${TAG#v}"
+              notes="Unsigned builds for Windows, macOS and Linux. The README says how to start each of them the first time."
+            else
+              title="Test build $TAG"
+              notes="Unsigned test build made by the Build workflow. Not a release."
+            fi
             gh release create "$TAG" "${assets[@]}" --draft --verify-tag \
-              --title "Test build $TAG" \
-              --notes "Unsigned test build made by the Build workflow. Not a release."
+              --title "$title" --notes "$notes"
           fi
