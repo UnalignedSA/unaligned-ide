@@ -145,85 +145,17 @@ fn static_appearance(selection: &ThemeSelection, cx: &App) -> Option<Appearance>
 }
 
 impl Onboarding {
-    /// The theme selection the user has chosen: what the settings say, or said
-    /// before a tile started previewing.
+    /// The theme selection the user has chosen: what the settings say. A tile
+    /// shows its theme in miniature; the application changes theme on a click
+    /// only. (It used to follow the pointer and the focus too, and a preview
+    /// that was never ended stayed on screen until the next settings reload.)
     fn chosen_theme_selection(&self, cx: &App) -> ThemeSelection {
-        match &self.theme_before_preview {
-            Some(settings) => settings.theme.clone(),
-            None => ThemeSettings::get_global(cx).theme.clone(),
-        }
+        ThemeSettings::get_global(cx).theme.clone()
     }
 
     fn family_theme(index: usize, cx: &App) -> Option<Arc<Theme>> {
         let name = FAMILY_THEMES.get(index)?;
         ThemeRegistry::global(cx).get(name).ok()
-    }
-
-    /// Subscribes to the tiles' focus, once: a tile reached with the keyboard
-    /// previews its theme as a hovered one does.
-    pub(crate) fn observe_theme_tile_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.theme_tile_focus_subscriptions.is_empty() {
-            return;
-        }
-        for handle in self.theme_tile_focus_handles.clone() {
-            self.theme_tile_focus_subscriptions.push(cx.on_focus(
-                &handle,
-                window,
-                |this, window, cx| this.sync_theme_preview(window, cx),
-            ));
-            self.theme_tile_focus_subscriptions.push(cx.on_blur(
-                &handle,
-                window,
-                |this, window, cx| this.sync_theme_preview(window, cx),
-            ));
-        }
-    }
-
-    /// Shows the theme of the hovered tile, else of the focused one, without
-    /// writing anything; with neither, gives back the chosen theme.
-    pub(crate) fn sync_theme_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let target = self
-            .hovered_theme_tile
-            .or_else(|| {
-                self.theme_tile_focus_handles
-                    .iter()
-                    .position(|handle| handle.is_focused(window))
-            })
-            .and_then(|index| Self::family_theme(index, cx));
-
-        let Some(theme) = target else {
-            self.end_theme_preview(cx);
-            return;
-        };
-
-        let original = match &self.theme_before_preview {
-            Some(original) => original.clone(),
-            None => {
-                let original = ThemeSettings::get_global(cx).clone();
-                self.theme_before_preview = Some(original.clone());
-                original
-            }
-        };
-        let mut previewed = original.clone();
-        previewed.theme = selection_after_pick(
-            &original.theme,
-            static_appearance(&original.theme, cx),
-            &theme.name,
-            theme.appearance(),
-            *SystemAppearance::global(cx),
-        );
-        if ThemeSettings::get_global(cx).theme != previewed.theme {
-            // In memory only, as the theme selector does while one moves in its list.
-            SettingsStore::update_global(cx, |store, _| store.override_global(previewed));
-        }
-        cx.notify();
-    }
-
-    /// Gives back the theme that was chosen before a preview, if one is running.
-    pub(crate) fn end_theme_preview(&mut self, cx: &mut App) {
-        if let Some(original) = self.theme_before_preview.take() {
-            SettingsStore::update_global(cx, |store, _| store.override_global(original));
-        }
     }
 
     /// Keeps the theme of a tile: written to the settings file.
@@ -248,10 +180,9 @@ impl Onboarding {
         self.keep_theme_selection(selection, cx);
     }
 
-    /// What is on screen from now on is the choice, not a preview: it is shown at
-    /// once, and the settings file follows a moment later with the same selection.
+    /// The choice is shown at once, and the settings file follows a moment later
+    /// with the same selection.
     fn keep_theme_selection(&mut self, selection: ThemeSelection, cx: &mut Context<Self>) {
-        self.theme_before_preview = None;
         let mut settings = ThemeSettings::get_global(cx).clone();
         if settings.theme != selection {
             settings.theme = selection.clone();
@@ -264,7 +195,6 @@ impl Onboarding {
     fn focus_theme_tile(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(handle) = self.theme_tile_focus_handles.get(index) {
             window.focus(handle, cx);
-            self.sync_theme_preview(window, cx);
         }
     }
 
@@ -401,14 +331,6 @@ impl Onboarding {
                         style.box_shadow = Some(focus_ring);
                         style
                     })
-                    .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                        if *hovered {
-                            this.hovered_theme_tile = Some(index);
-                        } else if this.hovered_theme_tile == Some(index) {
-                            this.hovered_theme_tile = None;
-                        }
-                        this.sync_theme_preview(window, cx);
-                    }))
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_theme(index, cx)))
                     .on_action(
                         cx.listener(move |this, _: &menu::Confirm, _, cx| {

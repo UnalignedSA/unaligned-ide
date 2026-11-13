@@ -1,12 +1,11 @@
 //! The theme tiles of the Appearance page: a miniature editor drawn from a
-//! [`Theme`], the name under it, a live preview while the pointer is on it.
+//! [`Theme`], the name under it. A click picks the theme; nothing changes
+//! while the pointer is only passing over a tile.
 
 use std::sync::Arc;
 
-use gpui::{App, Global, Hsla, Role, SharedString, Window};
-use settings::Settings as _;
-use theme::{GlobalTheme, Theme, ThemeRegistry};
-use theme_settings::ThemeSettings;
+use gpui::{App, Hsla, Role, SharedString, Window};
+use theme::{Theme, ThemeRegistry};
 use ui::{SectionLabel, prelude::*};
 
 const TILE_WIDTH: Pixels = px(160.);
@@ -27,49 +26,6 @@ const FAMILY_ORDER: &[&str] = &[
 /// The other bundled families, in the order they are presented. Themes that
 /// belong to none of them (installed extensions) follow, by name.
 const BUNDLED_PREFIXES: &[&str] = &["One ", "Ayu ", "Gruvbox "];
-
-/// The theme a tile is showing on the whole app while the pointer is on it.
-#[derive(Default)]
-struct ThemeTilePreview(Option<SharedString>);
-
-impl Global for ThemeTilePreview {}
-
-/// Whether a tile's preview is replacing the saved theme right now.
-pub fn theme_preview_active(cx: &App) -> bool {
-    cx.try_global::<ThemeTilePreview>()
-        .is_some_and(|preview| preview.0.is_some())
-}
-
-/// Puts the saved theme back if a tile's preview replaced it.
-pub fn end_theme_preview(cx: &mut App) {
-    if theme_preview_active(cx) {
-        cx.set_global(ThemeTilePreview(None));
-        theme_settings::reload_theme(cx);
-    }
-}
-
-fn begin_theme_preview(name: &SharedString, cx: &mut App) {
-    let Ok(theme) = ThemeRegistry::global(cx).get(name) else {
-        return;
-    };
-    // Same overrides as the saved theme gets (corners, accent, per-theme
-    // overrides), so the preview is what a click would give.
-    let theme = ThemeSettings::get_global(cx).apply_theme_overrides(theme);
-    cx.set_global(ThemeTilePreview(Some(name.clone())));
-    GlobalTheme::update_theme(cx, theme);
-    cx.refresh_windows();
-}
-
-fn end_theme_preview_of(name: &SharedString, cx: &mut App) {
-    // Moving from one tile to the next may deliver "entered B" before
-    // "left A": only the tile that owns the preview may end it.
-    let owns_preview = cx
-        .try_global::<ThemeTilePreview>()
-        .is_some_and(|preview| preview.0.as_ref() == Some(name));
-    if owns_preview {
-        end_theme_preview(cx);
-    }
-}
 
 /// The names of the registry split in two: the built-in family, then the rest.
 pub(crate) fn grouped_theme_names(
@@ -313,16 +269,6 @@ pub fn render_theme_grid(
                             .truncate(),
                     ),
                 )
-                .on_hover({
-                    let name = name.clone();
-                    move |hovered, _window, cx| {
-                        if *hovered {
-                            begin_theme_preview(&name, cx);
-                        } else {
-                            end_theme_preview_of(&name, cx);
-                        }
-                    }
-                })
                 .on_click(move |_, window, cx| {
                     on_select(name.clone(), window, cx);
                 }),

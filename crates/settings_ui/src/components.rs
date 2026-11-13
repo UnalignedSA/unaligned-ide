@@ -16,4 +16,4 @@ pub use number_field::*;
 pub use ollama_model_picker::render_ollama_model_picker;
 pub use section_items::*;
 pub use theme_picker::theme_picker;
-pub use theme_tile::{end_theme_preview, render_theme_grid, theme_preview_active};
+pub use theme_tile::render_theme_grid;

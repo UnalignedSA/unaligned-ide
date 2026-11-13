@@ -57,9 +57,8 @@ use workspace::{
 
 use crate::components::{
     EnumVariantDropdown, NumberField, NumberFieldMode, NumberFieldType, SettingsInputField,
-    SettingsSectionHeader, end_theme_preview, font_picker, icon_theme_display_name,
+    SettingsSectionHeader, font_picker, icon_theme_display_name,
     icon_theme_picker, render_ollama_model_picker, text_field_a11y_state, theme_picker,
-    theme_preview_active,
 };
 use crate::pages::{
     CustomAgentForm, LlmProviderForm, McpServerForm, render_input_audio_device_dropdown,
@@ -1890,9 +1889,6 @@ impl SettingsWindow {
             this.update_matches(cx);
         })
         .detach();
-
-        // A theme tile's preview must not outlive the window that shows the tile.
-        cx.on_release(|_, cx| end_theme_preview(cx)).detach();
 
         let mut ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
         cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
@@ -4846,13 +4842,6 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font = theme_settings::setup_ui_font(window, cx);
-
-        // A theme tile shows its theme while the pointer is on it. If the page
-        // changed under a resting pointer (keyboard, search), the tile is gone
-        // and cannot end its own preview: put the saved theme back.
-        if theme_preview_active(cx) && self.current_page().title != APPEARANCE_PAGE_TITLE {
-            cx.defer(end_theme_preview);
-        }
 
         client_side_decorations(
             v_flex()

@@ -485,7 +485,7 @@ fn appearance_page() -> SettingsPage {
             SettingsPageItem::SettingItem(SettingItem {
                 files: USER,
                 title: "Theme",
-                description: "Point at a theme to try it on the whole window, click to keep it. Light and dark mode each remember their own theme.",
+                description: "Click a theme to use it. Light and dark mode each remember their own theme.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("theme"),

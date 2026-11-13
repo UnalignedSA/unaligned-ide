@@ -11,7 +11,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{SettingsStore, VsCodeSettingsSource};
 use std::sync::Arc;
-use theme_settings::ThemeSettings;
 use ui::{
     DISPLAY_FONT, KeyBinding, ParentElement as _, StatefulInteractiveElement, WithScrollbar as _,
     prelude::*, rems_from_px,
@@ -233,12 +232,6 @@ struct Onboarding {
     scroll_handle: ScrollHandle,
     /// One focus handle per theme tile, in the order of `basics_page::FAMILY_THEMES`.
     theme_tile_focus_handles: Vec<FocusHandle>,
-    hovered_theme_tile: Option<usize>,
-    /// The theme settings as they were before a tile started showing its theme.
-    /// `Some` while a preview is on screen.
-    theme_before_preview: Option<ThemeSettings>,
-    /// Created at the first render: focus subscriptions need the window.
-    theme_tile_focus_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -257,14 +250,9 @@ impl Onboarding {
                 .iter()
                 .map(|_| cx.focus_handle())
                 .collect(),
-            hovered_theme_tile: None,
-            theme_before_preview: None,
-            theme_tile_focus_subscriptions: Vec::new(),
             _subscriptions: vec![
                 cx.observe_global::<SettingsStore>(|_, cx| cx.notify()),
                 cx.observe_global::<AiConnection>(|_, cx| cx.notify()),
-                // A page closed in the middle of a preview gives the theme back.
-                cx.on_release(|this, cx| this.end_theme_preview(cx)),
             ],
         }
     }
@@ -355,8 +343,6 @@ fn brand_mark(cx: &App) -> impl IntoElement {
 
 impl Render for Onboarding {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.observe_theme_tile_focus(window, cx);
-
         // The page is one tab group (see the root element below): its own focus
         // handle sits at index 1 of the group and the controls follow it.
         let mut tab_index = 1;
@@ -391,15 +377,11 @@ impl Render for Onboarding {
             .tab_stop(false)
             .size_full()
             .bg(cx.theme().colors().editor_background)
-            // The preview follows the focus at once, without waiting for the frame
-            // that reports the focus change.
-            .on_action(cx.listener(|this, _: &menu::SelectNext, window, cx| {
+            .on_action(cx.listener(|_, _: &menu::SelectNext, window, cx| {
                 window.focus_next(cx);
-                this.sync_theme_preview(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &menu::SelectPrevious, window, cx| {
+            .on_action(cx.listener(|_, _: &menu::SelectPrevious, window, cx| {
                 window.focus_prev(cx);
-                this.sync_theme_preview(window, cx);
             }))
             .vertical_scrollbar_for(&self.scroll_handle, window, cx)
             .child(
@@ -486,9 +468,6 @@ fn go_to_welcome_page(workspace: &mut Workspace, window: &mut Window, cx: &mut C
     }) else {
         return;
     };
-
-    // A theme that was only being looked at is not kept.
-    onboarding.update(cx, |onboarding, cx| onboarding.end_theme_preview(cx));
 
     let weak_workspace = workspace.weak_handle();
     pane.update(cx, |pane, cx| {
