@@ -261,7 +261,7 @@ Recommended: the container, for the wider floor. In a container the job runs as 
 Until 2026-11-13 upstream's packaging, install and release scripts were kept in the tree and made to refuse. They are now deleted, with the templates they read: `script/bundle-*`, `script/install.sh`, `script/install-linux`, `script/uninstall.sh`, the upload, bump and trigger scripts, `script/flatpak/`, `script/snap-*`, `nix/` and the flake files, and in `crates/ide/resources/` the Flatpak and Snap templates, `zed.desktop.in` and the Inno Setup installer files.
 
 - A merge of upstream brings these files back as "deleted by us, modified by them", or as new files without a conflict. Keep them deleted: each one acts under Zed's identity (names, application ids, URLs, storage buckets).
-- Upstream's workflow generator (`cargo xtask workflows`) was deleted on 2026-11-13, so nothing writes its workflow files back into `.github/workflows/`. Should a merge bring some: `script/unaligned/check-branding` scans `.github/**` and fails on them, and the step "Only the fork's workflows" of `check.yml` fails on any file other than `check.yml`, `build.yml`, `release.yml` and `README.md`.
+- Upstream's workflow generator (`cargo xtask workflows`) was deleted on 2026-11-13, so nothing writes its workflow files back into `.github/workflows/`. Should a merge bring some: `script/unaligned/check-branding` scans `.github/**` and fails on them, and the step "Only the fork's workflows" of `check.yml` fails on any file other than `check.yml`, `build.yml`, `retry-macos.yml`, `release.yml` and `README.md`.
 
 ## GPL obligations
 

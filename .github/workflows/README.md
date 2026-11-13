@@ -1,6 +1,6 @@
 # Workflows
 
-Two workflows live here: `check.yml` ("Check") and `build.yml` ("Build", test builds to download: see the end of this page). There is no separate `release.yml`: since 2026-11-13 a version tag (`v0.1.0`) starts `build.yml` for every target and drafts the release (never run yet). Nothing else belongs in this directory.
+Three workflows live here: `check.yml` ("Check"), `build.yml` ("Build", test builds to download: see the end of this page) and `retry-macos.yml` ("Retry macOS", which starts the macOS jobs of a build again when GitHub gave them no machine: last section). There is no separate `release.yml`: since 2026-11-13 a version tag (`v0.1.0`) starts `build.yml` for every target and drafts the release (never run yet). Nothing else belongs in this directory.
 
 Not run since the 2026-11-13 rename: `check.yml` (the same commands pass in the Docker checks on the development Mac: `check-linux` and `check-windows` for `-p ide` and `-p cli`). For `build.yml`, the tag `build-linux-windows-2` was pushed on 2026-11-13, after the rename, to start its Linux and Windows jobs; the result of that run was not known when this was written. The commands of both now name the package `ide` (`cargo check -p ide`), the Windows job reads its resources from `crates/ide/resources/windows`, and the three bundle scripts that `build.yml` runs stage the files under new names (`docs/unaligned/PACKAGING.md`, "File names inside the packages") and write new kinds of packages (an installer, disk images, an AppImage: see the end of this page).
 
@@ -55,7 +55,7 @@ The Linux job deletes the preinstalled Android, .NET and Haskell toolchains befo
 Upstream keeps 46 generated workflows here (triage bots, deployments, release management). They need its paid runners and its credentials; 23 of them carry no owner guard and would start in any repository that has them. All of them were deleted, together with upstream's issue and pull-request templates, funding file, dependency-bot configuration and workflow-linter configurations.
 
 - The generator that wrote them (`cargo xtask workflows`) was deleted too, on 2026-11-13.
-- A merge from upstream reports those files as "deleted by us, modified by them": keep them deleted. A workflow upstream *added* since the last merge arrives without a conflict; the step `Only the fork's workflows` fails when any file other than `check.yml`, `build.yml`, `release.yml` and this page is present. To add a workflow of your own, add its name to that step.
+- A merge from upstream reports those files as "deleted by us, modified by them": keep them deleted. A workflow upstream *added* since the last merge arrives without a conflict; the step `Only the fork's workflows` fails when any file other than `check.yml`, `build.yml`, `retry-macos.yml`, `release.yml` and this page is present. To add a workflow of your own, add its name to that step.
 - Before a merge, upstream's commit goes through `script/unaligned/rename-upstream-names` (its header says how), so that both sides use the same names.
 - Never define `IDE_MINIDUMP_ENDPOINT` or `IDE_CLIENT_CHECKSUM_SEED` in a workflow: a build that sees the first one sends crash reports again.
 
@@ -121,3 +121,20 @@ Trying the downloads:
 - Linux: `chmod +x unaligned-ide-linux-x86_64.AppImage`, then start it. The archive and `install.sh` are only in the run's artifact: unpack the archive and run `unaligned-ide.app/bin/unaligned-ide`, or use `install.sh`.
 
 Known gaps of these builds: licence list not checked for completeness; no bundled `git` on macOS (the system's is used); the two macOS jobs run on GitHub's Intel machines (`macos-15-intel`) since 2026-11-13, when the Apple Silicon ones (`macos-15`) left the jobs waiting until GitHub cancelled them, three times in a row: a build on the Intel machines had never been run when this was written, and the Apple Silicon build cannot be started on them, so that job does not ask the packaged command its version; the Windows installer has never been compiled or run, and the AppImage was only ever packed from a stand-in application (`docs/unaligned/PACKAGING.md`, "Executed and not executed").
+
+## `retry-macos.yml`: when GitHub has no Mac
+
+Since 2026-11-02 GitHub's macOS machines leave jobs waiting and cancel them after fifteen minutes, on and off, with the annotation "The job was not acquired by Runner of type hosted even after multiple attempts" (`actions/runner` issue 4833, community discussions 211885 and 212069; other projects report it on the Apple Silicon and on the Intel machines alike, and GitHub's status page showed nothing on 2026-11-13). The two macOS jobs of the 0.1.1 build were cancelled that way again and again that day, on `macos-15` and then on `macos-15-intel`. Nothing in the build is wrong then; the only cure is to ask again.
+
+"Retry macOS" does the asking. It starts each time a "Build" run ends, and does something only when all of this holds:
+
+- the run ended as failed (a run somebody cancelled is left alone);
+- at least one job whose name starts with "macOS" was cancelled before its first step;
+- no job failed for a reason of its own (a real build error is never retried);
+- the run is below its twelfth attempt.
+
+It then waits twenty minutes and runs `gh run rerun <run> --failed`: the macOS jobs start again, and after them `draft-release`, which writes and signs `update.json` again from all the files the run has. The Linux and Windows files of the first attempt are kept. Its only permission is `actions: write`; it reads no secret and checks out no code.
+
+To stop it: cancel the "Retry macOS" run while it waits, or disable the workflow (Actions tab, "Retry macOS", "…", "Disable workflow").
+
+Not run when this was written: the condition was tried by hand on the job lists of the three "Build" runs of 2026-11-13 (two with macOS jobs that never started, one that succeeded), the rest never. In particular, whether a re-run started by this workflow starts this workflow again when it ends was not observed; if it does not, one "Re-run failed jobs" by hand gives one more attempt each time.

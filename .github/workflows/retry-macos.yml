@@ -1,0 +1,64 @@
+# Starts the macOS jobs of a "Build" run again when GitHub never gave them a
+# machine. Since 2026-11-02 GitHub's macOS machines, Apple Silicon and Intel,
+# leave jobs waiting and cancel them after fifteen minutes, on and off ("The job
+# was not acquired by Runner of type hosted even after multiple attempts").
+# Nothing in the build is wrong then, and the only cure is to ask again.
+#
+# It asks again only when that is the whole story: the run failed, at least one
+# macOS job was cancelled before its first step, and no job failed for a reason
+# of its own. A real build error is never retried, nor is a run somebody
+# cancelled. It waits twenty minutes before asking, and gives up after the
+# twelfth attempt of the run (about seven hours).
+#
+# To stop it: cancel the "Retry macOS" run while it waits, or disable this
+# workflow (Actions tab, "Retry macOS", "...", "Disable workflow").
+#
+# Hand-written. See .github/workflows/README.md.
+
+name: Retry macOS
+
+on:
+  workflow_run:
+    workflows: ["Build"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  retry:
+    name: Ask for the macOS machines again
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.run_attempt < 12
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      # To start the jobs of a run again; nothing else.
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN: ${{ github.event.workflow_run.id }}
+      ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+    steps:
+      - name: Was it only the machines?
+        id: look
+        run: |
+          jobs="$(gh api "repos/$GH_REPO/actions/runs/$RUN/attempts/$ATTEMPT/jobs?per_page=100")"
+          never_started="$(jq '[.jobs[] | select((.name | startswith("macOS")) and .conclusion == "cancelled" and (.steps | length) == 0)] | length' <<<"$jobs")"
+          failed="$(jq -r '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")' <<<"$jobs")"
+          echo "Attempt $ATTEMPT of run $RUN: $never_started macOS job(s) never got a machine; failed jobs: ${failed:-none}."
+          if [[ "$never_started" -gt 0 && -z "$failed" ]]; then
+            echo "retry=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Nothing to retry."
+          fi
+
+      - name: Wait twenty minutes
+        if: steps.look.outputs.retry == 'true'
+        run: sleep 1200
+
+      - name: Ask again
+        if: steps.look.outputs.retry == 'true'
+        run: gh run rerun "$RUN" --failed

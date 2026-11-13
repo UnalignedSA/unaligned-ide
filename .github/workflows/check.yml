@@ -107,7 +107,7 @@ jobs:
       - name: Only the fork's workflows
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: |
-          unexpected="$(find .github/workflows -mindepth 1 ! -name check.yml ! -name build.yml ! -name release.yml ! -name README.md)"
+          unexpected="$(find .github/workflows -mindepth 1 ! -name check.yml ! -name build.yml ! -name retry-macos.yml ! -name release.yml ! -name README.md)"
           if [ -n "$unexpected" ]; then
             echo "::error::Unexpected file in .github/workflows (did a merge from upstream bring its automation back?)"
             echo "$unexpected"
