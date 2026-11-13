@@ -35,6 +35,10 @@ So someone who can publish or alter releases in the repository, but does not hol
 
 A build without a key (`UPDATE_PUBLIC_KEYS` empty, as in a fork that has not made one) cannot check anything: it announces the latest release as it is, with a link to its page, and installs nothing.
 
+## Saved keys across an update (macOS)
+
+The macOS keychain gives a saved API key back only to the application that stored it, recognised by its signature. From 0.1.1 on, the builds made on GitHub are signed with the product's own self-signed certificate, so every version is the same application to the keychain and an update does not ask for the keys again. Coming from 0.1.0, or from a local build (signed ad hoc), the keys are asked for once. Details and limits: "The product's certificate" in `docs/unaligned/PACKAGING.md`.
+
 ## When a copy announces without installing
 
 The release is signed, and the button opens its page instead of installing, when:

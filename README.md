@@ -150,7 +150,7 @@ More connections can be added later from the chat's "…" menu, "Connections…"
 - The sign-ins of the subscriptions are upstream's code and were not tried one by one here.
 - Remote development (SSH, WSL, containers) needs a server build this project does not publish yet.
 - A project's own settings, tasks and debug scenarios are read from `.unaligned/`. A `.zed/` folder is not read.
-- Nothing is signed for the operating system: no Windows certificate and no Apple notarisation yet. Updates are signed with the project's own key, which the application checks itself.
+- Nothing is signed for the operating system: no Windows certificate and no Apple notarisation yet. Updates are signed with the project's own key, which the application checks itself. On macOS the application carries the project's own (self-signed) certificate, only so that the keychain gives saved keys back after an update.
 
 </details>
 

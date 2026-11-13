@@ -46,6 +46,10 @@ brand! {
     PROJECT_DIR;
     /// Who publishes the app: installer metadata, copyright lines.
     PUBLISHER;
+    /// The SHA-1 of the self-signed certificate the macOS application is
+    /// signed with, or empty. Read by the packaging script, which refuses to
+    /// sign a release with any other.
+    MACOS_SIGNING_CERTIFICATE_SHA1;
     /// The identifier of the Windows installation (Inno Setup's `AppId`).
     /// Read by the packaging script; never change it after a release.
     WINDOWS_INSTALLER_GUID;

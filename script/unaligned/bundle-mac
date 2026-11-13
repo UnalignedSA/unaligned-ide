@@ -9,8 +9,10 @@
 #   target/release/<APP_ID>-macos-<arch>.dmg        a disk image: the application
 #                                                   and a link to /Applications
 #
-# The application is signed "ad hoc" only: no developer identity, no
-# notarisation. macOS refuses to open such an application when it was
+# The application is signed with the product's own self-signed certificate
+# when MACOS_SIGNING_IDENTITY names it (the Build workflow does), "ad hoc"
+# otherwise. Either way there is no Apple developer identity and no
+# notarisation: macOS refuses to open such an application when it was
 # downloaded, until the download mark is removed from the installed copy:
 #
 #   xattr -dr com.apple.quarantine "/Applications/<PRODUCT_NAME>.app"
@@ -294,9 +296,40 @@ EOF
 } >"$contents/Info.plist"
 plutil -lint "$contents/Info.plist" >/dev/null || fail "the Info.plist that was written is not valid"
 
-# Ad hoc: a signature with no identity. Apple Silicon runs nothing unsigned.
-codesign --force --deep --entitlements crates/ide/resources/app.entitlements --sign - "$app_path"
+# The signature. With MACOS_SIGNING_IDENTITY: the product's own certificate
+# (self-signed; see MACOS_SIGNING_CERTIFICATE_SHA1 in the brand file), found in
+# the keychain MACOS_SIGNING_KEYCHAIN names, or in the default ones. Without
+# it, ad hoc: a signature with no identity, enough for Apple Silicon to run
+# the application, but one the keychain forgets at the next build.
+sign_options=(--force --deep --entitlements crates/ide/resources/app.entitlements)
+if [[ -n "${MACOS_SIGNING_IDENTITY:-}" ]]; then
+    # No timestamp: it would ask a server of Apple's, for a certificate Apple does not know.
+    sign_options+=(--timestamp=none --sign "$MACOS_SIGNING_IDENTITY")
+    if [[ -n "${MACOS_SIGNING_KEYCHAIN:-}" ]]; then
+        sign_options+=(--keychain "$MACOS_SIGNING_KEYCHAIN")
+    fi
+else
+    sign_options+=(--sign -)
+    if [[ -n "${MACOS_SIGNING_CERTIFICATE_SHA1:-}" ]]; then
+        echo "${0##*/}: warning: signed ad hoc, not with the product's certificate (MACOS_SIGNING_IDENTITY is not set): fine for a local build, not for a release. The keys a user saved with a released build will not be readable by this one." >&2
+    fi
+fi
+codesign "${sign_options[@]}" "$app_path"
 codesign --verify --deep --strict "$app_path" || fail "the signature of the application does not verify"
+
+# What macOS will know the application by. With the certificate it must be the
+# brand file's and no other: a build signed with another certificate would be
+# cut off from the keys saved by every earlier release.
+requirement="$(codesign -d -r- "$app_path" 2>&1 | sed -n 's/^designated => //p')"
+echo "Signed as: $requirement"
+if [[ -n "${MACOS_SIGNING_IDENTITY:-}" ]]; then
+    [[ -n "${MACOS_SIGNING_CERTIFICATE_SHA1:-}" ]] || fail "MACOS_SIGNING_CERTIFICATE_SHA1 is empty in $brand_file: it must name the certificate releases are signed with"
+    # codesign writes "leaf" or "root" for a certificate that is both.
+    expected="identifier \"${REVERSE_DNS_ID}\" and certificate (leaf|root) = H\"${MACOS_SIGNING_CERTIFICATE_SHA1}\""
+    if ! [[ "$requirement" =~ ^${expected}$ ]]; then
+        fail "the application is not signed with the certificate of $brand_file (expected: $expected)"
+    fi
+fi
 
 # The command answers under the product's name, and names the application it
 # found beside itself. Only when it can run here: an Intel build runs on Apple

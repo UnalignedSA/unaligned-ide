@@ -116,7 +116,7 @@ Where the files are:
 
 Trying the downloads:
 
-- macOS: open the `.dmg`, drag the application onto the Applications link, then run `xattr -dr com.apple.quarantine "/Applications/Unaligned IDE.app"` before the first start: the application is signed ad hoc only, and macOS refuses a downloaded one otherwise.
+- macOS: open the `.dmg`, drag the application onto the Applications link, then run `xattr -dr com.apple.quarantine "/Applications/Unaligned IDE.app"` before the first start: the application is not signed by an Apple developer identity (only by the product's own certificate, for the keychain: `docs/unaligned/PACKAGING.md`), and macOS refuses a downloaded one otherwise.
 - Windows: start `unaligned-ide-windows-x86_64-setup.exe`; SmartScreen asks once ("More info", "Run anyway"). The installer asks for no administrator rights and adds a Start-menu entry.
 - Linux: `chmod +x unaligned-ide-linux-x86_64.AppImage`, then start it. The archive and `install.sh` are only in the run's artifact: unpack the archive and run `unaligned-ide.app/bin/unaligned-ide`, or use `install.sh`.
 
