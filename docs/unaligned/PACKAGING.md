@@ -367,7 +367,7 @@ Executed, on the development Mac only:
 
 Not executed:
 
-- **The `remote-server` job on GitHub**, on either machine. `ubuntu-24.04-arm` was read in GitHub's list of runners on 2026-11-14, not used. The x86_64 build was never made anywhere.
+- **The `remote-server` job on GitHub**, on either machine. `ubuntu-24.04-arm` was read in GitHub's list of runners on 2026-11-14, not used. The x86_64 server was built once, on the development Mac, by cross-compilation (`cargo zigbuild`, zig 0.17.1, the release profile of `.cargo/bundle-config.toml`, dev channel): 101 MB once debug information is removed, static, and it started and gave its version in an emulated x86_64 container. `bundle-remote-server` itself was never run for x86_64, and in a Linux container limited to 5.5 GB the cross-build of the `project` crate was killed for memory even with one job.
 - **A release build of the application** downloading from GitHub itself: the trial used a development build and the stand-in. The stable channel was not used because the owner's installed copy was running (a second stable copy refuses to start).
 - A Windows or Linux application as the client, WSL, dev containers, a host that asks for a password, a host without `gunzip`.
 - The AI agent editing files or running commands on a host with a real model.
