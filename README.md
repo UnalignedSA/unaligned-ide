@@ -7,7 +7,7 @@
 **The open-source code editor made for coding with AI.**<br>
 Fast, private, and connected to the model you choose.
 
-[![Version](https://img.shields.io/badge/version-0.1.2-E5322D?style=flat-square&labelColor=0D0C0B)](https://github.com/UnalignedSA/unaligned-ide/releases)
+[![Version](https://img.shields.io/badge/version-0.1.3-E5322D?style=flat-square&labelColor=0D0C0B)](https://github.com/UnalignedSA/unaligned-ide/releases)
 [![Licence](https://img.shields.io/badge/licence-GPL--3.0--or--later-E9E7E3?style=flat-square&labelColor=0D0C0B)](LICENSE-GPL)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20·%20macOS%20·%20Linux-E9E7E3?style=flat-square&labelColor=0D0C0B)](#download)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-E9E7E3?style=flat-square&labelColor=0D0C0B)](#build-from-source)
@@ -31,7 +31,7 @@ Unaligned IDE is a free code editor built around one idea: coding with AI should
 It is a fork of the [Zed](https://github.com/zed-industries/zed) editor. [Unaligned](https://unaligned.pw), a privacy-first, pay-as-you-go AI API, is the featured provider and never the only one.
 
 > [!NOTE]
-> **Pre-release (0.1.2).** The editor is developed and run on macOS. The Windows and Linux packages are new and have not been tried on many machines yet: see [Status](#status). "Unaligned IDE" is a working name.
+> **Pre-release (0.1.3).** The editor is developed and run on macOS. The Windows and Linux packages are new and have not been tried on many machines yet: see [Status](#status). "Unaligned IDE" is a working name.
 
 ## Features
 
