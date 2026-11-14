@@ -286,6 +286,8 @@ def take(scene, args):
                 arguments.append(path if os.path.isabs(path) else str(project_dir / path))
         elif scene.get("open"):
             raise ShotError("files to open need a project")
+        # Anything else the application takes on its command line, as it is: an ssh:// address.
+        arguments.extend(scene.get("arg", []))
 
         settings = merge(BASE_SETTINGS, scene.get("settings", {}))
         environment = {key: value for key, value in os.environ.items() if not SECRET_ENV.search(key)}
@@ -437,6 +439,7 @@ def main():
     parser.add_argument("--settings", metavar="JSON|@FILE", help="merged into the instance's settings.json before launch")
     parser.add_argument("--keymap", metavar="JSON|@FILE", help="written as the instance's keymap.json")
     parser.add_argument("--project", metavar="DIR|sample|none", help="project to open (default: the generated sample; none = no project)")
+    parser.add_argument("--arg", action="append", metavar="VALUE", help="extra command-line argument for the instance, after the project: an ssh://user@host:port/path address, for example (repeatable)")
     parser.add_argument("--settle", type=float, metavar="SECONDS", help="wait before the first step (default 2.5)")
     parser.add_argument("--wait", type=float, metavar="SECONDS", help="wait after the last step, before the capture (default 1)")
     parser.add_argument("--timeout", type=float, metavar="SECONDS", help="how long the window may take to appear (default 60)")
@@ -488,7 +491,7 @@ def main():
             scene["keymap"] = json_option(args.keymap)
     except (ValueError, OSError) as error:
         parser.error(f"invalid JSON option: {error}")
-    for key in ("open", "size", "position", "project", "settle", "wait", "timeout", "window", "backend", "binary", "env", "out", "retina", "keep", "fake_api", "fake_api_key", "no_capture"):
+    for key in ("open", "arg", "size", "position", "project", "settle", "wait", "timeout", "window", "backend", "binary", "env", "out", "retina", "keep", "fake_api", "fake_api_key", "no_capture"):
         value = getattr(args, key)
         if value is not None:
             scene[key] = value

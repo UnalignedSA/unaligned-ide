@@ -134,6 +134,7 @@ script/unaligned/rename-upstream-names	.*	the rename tool must spell every upstr
 script/unaligned/install.sh	"\$APP_ID" = "zed"	guard text of the install script
 script/unaligned/make-icons	zed_(logo|x_copilot|agent|predict)|ai_zed	asset file names kept from upstream: embedded in the binary, never shown
 script/unaligned/bundle-linux	== "zed"|grep -q -i -w 'zed'|installs them as zed\.png	guard text of the bundle script, and its note on upstream's icon file name
+script/unaligned/bundle-remote-server	must not be \\"zed\\"|zed-remote-server\|	guard text of the remote server's build script: it refuses upstream's names
 script/unaligned/bundle-mac	`get_zed_cli_path`	names the Rust function that finds the command (an identifier, not renamed)
 crates/gpui/src/text_system.rs	font\("\.Zed(Mono|Sans)"\)	internal alias of a bundled font, resolved by GPUI before any font is looked up; Apache-2.0 crate
 crates/editor/src/editor.rs	MINIMAP_FONT_FAMILY: SharedString = SharedString::new_static\("\.ZedMono"\)	internal alias of a bundled font, resolved by GPUI before any font is looked up

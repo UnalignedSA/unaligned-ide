@@ -28,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       targets:
-        description: "What to build: all, or any of: linux windows mac-arm mac-intel"
+        description: "What to build: all, or any of: linux windows mac-arm mac-intel remote-server"
         required: true
         default: "all"
   push:
@@ -184,6 +184,86 @@ jobs:
         run: |
           df -h /
           du -sh target || true
+
+  # The remote server: the program the application uploads to a host (SSH, WSL,
+  # a container) to work there. One static executable per architecture, each
+  # built on a machine of that architecture, and listed in the release's signed
+  # update.json like the installers: the application uploads no other file
+  # (docs/unaligned/REMOTE.md).
+  remote-server:
+    name: Remote server Linux ${{ matrix.arch }}
+    if: >-
+      contains(inputs.targets || github.ref_name, 'all') ||
+      contains(inputs.targets || github.ref_name, 'remote-server') ||
+      (github.ref_type == 'tag' && startsWith(github.ref_name, 'v'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            machine: ubuntu-24.04
+          - arch: aarch64
+            machine: ubuntu-24.04-arm
+    runs-on: ${{ matrix.machine }}
+    timeout-minutes: 180
+    env:
+      # As the Linux job; the C parts built for musl use musl-gcc, which
+      # script/unaligned/bundle-remote-server sets for that target alone.
+      CC: clang
+      CXX: clang++
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      # A server of another version than its tag's would be listed in the
+      # release of a version whose application never asks for it.
+      - name: The tag is the version
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/ide/Cargo.toml | head -n 1)"
+          if [[ "$TAG" != "v$version" ]]; then
+            echo "::error::The tag is $TAG, but crates/ide/Cargo.toml says version $version. Set the version, commit, and tag that commit v<version>."
+            exit 1
+          fi
+
+      - name: Machine
+        run: |
+          uname -a
+          df -h /
+
+      - name: System packages
+        run: ./script/linux
+
+      # bundle-remote-server asks it whether the executable is static.
+      - name: The `file` command
+        run: sudo apt-get install -y file
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show
+          cargo --version
+
+      - name: Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+
+      - name: Build and package
+        run: script/unaligned/bundle-remote-server
+
+      - name: Upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unaligned-ide-remote-server-linux-${{ matrix.arch }}
+          path: target/release/*-remote-server-linux-*.gz
+          if-no-files-found: error
+          retention-days: 14
 
   # Both macOS targets are built on GitHub's Intel machines (macos-15-intel):
   # on 2026-11-13 the Apple Silicon ones (macos-15) never picked the jobs up,
@@ -464,7 +544,7 @@ jobs:
   # is attached, even when another system's build failed.
   draft-release:
     name: Draft release
-    needs: [linux, macos-arm, macos-intel, windows]
+    needs: [linux, remote-server, macos-arm, macos-intel, windows]
     if: ${{ !cancelled() && github.ref_type == 'tag' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -486,8 +566,9 @@ jobs:
       - name: List
         run: ls -la files
 
-      # What lets an installed copy update itself (docs/unaligned/UPDATES.md):
-      # update.json lists the installers with their sizes and SHA-256, and
+      # What lets an installed copy update itself (docs/unaligned/UPDATES.md)
+      # and work on a remote host (docs/unaligned/REMOTE.md): update.json lists
+      # the installers and the remote servers with their sizes and SHA-256, and
       # update.json.sig signs it with the product's update key.
       - name: List of the files
         if: startsWith(github.ref_name, 'v')
@@ -501,13 +582,21 @@ jobs:
             exit 0
           fi
           brand() { sed -n "s/^$1=\"\(.*\)\"$/\1/p" crates/branding/brand.env; }
+          # The remote servers go in the same signed list: the application
+          # uploads to a host only a file this list describes.
+          servers=(files/*-remote-server-*.gz)
+          for arch in x86_64 aarch64; do
+            if [[ ! -f "files/$(brand APP_ID)-remote-server-linux-$arch.gz" ]]; then
+              echo "::warning::No remote server was built for Linux $arch: this release cannot open projects on such a host (SSH, WSL, containers). A published version is never rebuilt: publish this draft only if that is accepted."
+            fi
+          done
 
           rustup toolchain install --no-self-update
           cargo build --locked --release -p update_manifest
           cp target/release/update-manifest "$RUNNER_TEMP/update-manifest"
 
           "$RUNNER_TEMP/update-manifest" make --product "$(brand APP_ID)" --version "${TAG#v}" \
-            --out files/update.json "${installers[@]}"
+            --out files/update.json "${installers[@]}" "${servers[@]}"
 
       # The key is the repository secret UPDATE_SIGNING_KEY. It is given to
       # this step alone, which runs the program built above and nothing else:
@@ -551,7 +640,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           shopt -s nullglob
-          assets=(files/*-setup.exe files/*.dmg files/*.AppImage files/update.json files/update.json.sig)
+          assets=(files/*-setup.exe files/*.dmg files/*.AppImage files/*-remote-server-*.gz files/update.json files/update.json.sig)
           if [[ ${#assets[@]} -eq 0 ]]; then
             echo "Nothing to attach: no build of this run produced a file."
             exit 1

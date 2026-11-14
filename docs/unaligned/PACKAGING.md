@@ -19,7 +19,7 @@ Read "Executed and not executed" at the end before trusting any of it.
 ## Three rules that come before the first release
 
 1. **Tag `v<version of the ide package>`.** The `ide` package is at 0.1.0 (`crates/ide/Cargo.toml`; ruling G5). The update check compares the running version with the newest release tag, and the release-notes link is `…/releases/tag/v<running version>`: a release whose tag is not exactly the version with a leading `v` would never be announced, and its notes link would be dead. `branding::UPSTREAM_VERSION` keeps 1.30.0 for the credit line.
-2. **Remote development needs server builds the product does not publish.** Outside a development build, opening an SSH, WSL or container project works only when a matching server binary is already on the host; otherwise it fails with "Unaligned IDE does not publish remote server builds yet, so there is none to download for <os> <arch>" (ruling G6: accepted for now). To restore it: build `remote_server` in the release job (a separate cargo invocation for the musl target, then `gzip`, as upstream's Linux bundle script did), publish it as a release asset, and return its address from `get_remote_server_release_url` in `crates/auto_update`. This is the first follow-up after a working release. `bundle-linux` here does not build it.
+2. **Remote development needs the remote server of the release.** Opening an SSH, WSL or container project uploads a program to the host, and the application takes it from its own version's release, checked against the signed `update.json` (`docs/unaligned/REMOTE.md`). A release without `<APP_ID>-remote-server-linux-<arch>.gz` in its signed list cannot open remote projects, and a published version is never rebuilt: look at the `remote-server` jobs before publishing a draft. Versions up to 0.1.1 have no server (ruling G6 at the time). `script/unaligned/bundle-remote-server` builds it; `bundle-linux` does not.
 3. **Never set `IDE_MINIDUMP_ENDPOINT` or `IDE_CLIENT_CHECKSUM_SEED`** in a bundle script, a workflow or the shell that runs one. Both are read at compile time (and again at run time): a build that sees the first one uploads crash reports to that address; the second signs telemetry requests. The three bundle scripts refuse to start when either is present in the environment. A future `release.yml` must never define them.
 
 ## File names inside the packages
@@ -117,7 +117,7 @@ Known limits, none of them looked at:
 
 ### Differences from upstream's script, on purpose
 
-- No symbol upload, no debug companions (`debug = false`), no remote server, no Flatpak switch.
+- No symbol upload, no debug companions (`debug = false`), no Flatpak switch. The remote server has a script of its own (`bundle-remote-server`).
 - The AppImage is an addition of this fork.
 - The release link flags upstream adds for size (`-C link-arg=-Wl,--icf=safe` with an explicit `lld`) are left out: they add a hard dependency on a recent `lld`. A candidate once a release works.
 - The desktop template uses `@NAME@` placeholders filled by the script itself instead of `envsubst`.
@@ -250,7 +250,7 @@ Recommended: the container, for the wider floor. In a container the job runs as 
 
 ## What is not shipped
 
-- Remote server binaries (rule 2).
+- Remote servers for macOS and Windows hosts: a release carries the Linux ones only, x86_64 and aarch64 (rule 2, `REMOTE.md`).
 - A zip of the Windows folder or of the macOS application (until 2026-11-13 the only Windows and macOS packages).
 - Flatpak, Snap, Nix, `.deb`, `.rpm`.
 - Linux aarch64: the script handles it (names follow `uname -m`), but no build machine is planned.
@@ -354,6 +354,23 @@ Not done:
 - The `x86_64` checksums were read from GitHub's listing of the two releases. The `x86_64` files were not downloaded or checked here; the first `x86_64` run of the script is their first test.
 - Starting the image the normal way (mounted, without `--appimage-extract-and-run`).
 - The application's own "restart" inside an AppImage.
+
+### The remote server (2026-11-14)
+
+Executed, on the development Mac only:
+
+- `script/unaligned/bundle-remote-server`, in a Linux container of the Mac's architecture (aarch64; the image of the Docker checks plus the `file` package; the tree copied without `.git`): the build, its four checks (static, starts, says the version, carries no upstream server name) and the package. Result: 35.7 MB compressed, 93 MB on the host. With three compile jobs and 5 GB of memory the compiler of the `project` crate was killed; with one job it passed. GitHub's machines have 16 GB.
+- A whole connection with that file. A development build of the application (preview channel, `IDE_BUILD_REMOTE_SERVER=never`, the test set-up of `UPDATES.md` with a key made for the trial), a local stand-in for GitHub serving the file, `update.json` and its signature, and an SSH host in a container on `127.0.0.1`: the application asked for the list, its signature and the server, uploaded it, the server started on the host, the project opened, a file was edited and saved (read back on the host), and a command typed in the terminal ran on the host. A second connection downloaded nothing.
+- The same with one bit of the served file changed: "is not the file the signed manifest describes", nothing kept on the Mac, nothing on the host.
+- The tests of `auto_update` (52), among them: a replaced server, a replaced and re-signed list, a list of another version, no signature, a kept file changed on disk.
+- An independent reading of the change for security; its five points (leftover partial downloads, reading the file back after a download, two windows at once on Windows, the warning for one missing architecture, the target directory) are in the code.
+
+Not executed:
+
+- **The `remote-server` job on GitHub**, on either machine. `ubuntu-24.04-arm` was read in GitHub's list of runners on 2026-11-14, not used. The x86_64 build was never made anywhere.
+- **A release build of the application** downloading from GitHub itself: the trial used a development build and the stand-in. The stable channel was not used because the owner's installed copy was running (a second stable copy refuses to start).
+- A Windows or Linux application as the client, WSL, dev containers, a host that asks for a password, a host without `gunzip`.
+- The AI agent editing files or running commands on a host with a real model.
 
 ### GitHub: `build.yml`
 

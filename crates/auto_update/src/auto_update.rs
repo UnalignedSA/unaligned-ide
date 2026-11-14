@@ -32,6 +32,7 @@ use std::{env, fmt, path::PathBuf, sync::Arc, time::Duration};
 use workspace::Workspace;
 
 mod install;
+mod remote_server;
 
 pub use install::UpdatePackage;
 use install::{Installation, Restart};
@@ -216,6 +217,7 @@ pub struct AutoUpdater {
     installation: Option<Installation>,
     /// A folder of the application's own for downloaded installers.
     download_dir: PathBuf,
+    remote_servers_dir: PathBuf,
     test_origin: Option<String>,
     client: Arc<Client>,
     pending_poll: Option<Task<Option<()>>>,
@@ -248,6 +250,8 @@ pub(crate) struct UpdaterConfig {
     pub(crate) public_keys: Vec<String>,
     pub(crate) installation: Option<Installation>,
     pub(crate) download_dir: PathBuf,
+    /// Where checked remote servers are kept (see [`remote_server`]).
+    pub(crate) remote_servers_dir: PathBuf,
     /// A stand-in for GitHub, for trying the updater: see [`test_setup`].
     /// Always `None` in a release build.
     pub(crate) test_origin: Option<String>,
@@ -260,6 +264,7 @@ impl UpdaterConfig {
             public_keys: configured_public_keys(),
             installation: Installation::detect(cx.app_path().ok().as_deref()),
             download_dir: paths::temp_dir().join("updates"),
+            remote_servers_dir: paths::remote_servers_dir().clone(),
             test_origin: None,
         };
         if let Some((origin, public_key)) = test_setup() {
@@ -626,6 +631,7 @@ impl AutoUpdater {
             public_keys: config.public_keys,
             installation: config.installation,
             download_dir: config.download_dir,
+            remote_servers_dir: config.remote_servers_dir,
             test_origin: config.test_origin,
             client,
             pending_poll: None,
@@ -966,29 +972,76 @@ impl AutoUpdater {
         true
     }
 
-    /// Remote server builds are not published for this product, so there is
-    /// nothing to download: this always fails, without any request. A remote
-    /// project therefore opens only where a matching server is already on the
-    /// host, or from a development build, which compiles its own.
+    /// Downloads to this machine the remote server of `version` (the running
+    /// application's) for a host's `os` and `arch`, and returns its path. The
+    /// file comes from this product's release of that version and is kept
+    /// only when it is the one the release's signed manifest describes: see
+    /// [`remote_server`]. A build without a releases repository or without an
+    /// update key downloads nothing, because it could check nothing.
     ///
     /// Upstream fetched its own `zed-remote-server` here; that binary must
     /// never be uploaded to a user's host by this application.
     pub async fn download_remote_server_release(
         _release_channel: ReleaseChannel,
-        _version: Option<Version>,
+        version: Option<Version>,
         os: &str,
         arch: &str,
-        _set_status: impl Fn(&str, &mut AsyncApp) + Send + 'static,
-        _cx: &mut AsyncApp,
+        set_status: impl Fn(&str, &mut AsyncApp) + Send + 'static,
+        cx: &mut AsyncApp,
     ) -> Result<PathBuf> {
-        anyhow::bail!(
-            "{} does not publish remote server builds yet, so there is none to download for {os} {arch}",
-            branding::PRODUCT_NAME
-        )
+        let version = version.with_context(|| {
+            format!(
+                "this build of {} has no released version, so there is no remote server to download for it",
+                branding::PRODUCT_NAME
+            )
+        })?;
+        let source = cx
+            .update(|cx| Self::get(cx).map(|updater| updater.read(cx).remote_server_source()))
+            .context("the updater is not running")??;
+
+        let mut progress_cx = cx.clone();
+        let mut last_percent = None;
+        remote_server::download(&source, &version, os, arch, |fraction| {
+            let percent = (fraction * 100.) as u32;
+            if last_percent != Some(percent) {
+                last_percent = Some(percent);
+                set_status(
+                    &format!("Downloading remote development server ({percent}%)"),
+                    &mut progress_cx,
+                );
+            }
+        })
+        .await
     }
 
-    /// Always `Ok(None)`: there is no address a remote host could download a
-    /// server from (see [`Self::download_remote_server_release`]).
+    fn remote_server_source(&self) -> Result<remote_server::Source> {
+        let repository = self.releases_repository.clone().with_context(|| {
+            format!(
+                "this build of {} has no releases repository, so it has no remote server to download",
+                branding::PRODUCT_NAME
+            )
+        })?;
+        anyhow::ensure!(
+            !self.public_keys.is_empty(),
+            "this build of {} holds no update key: it could not check a remote server, so it downloads none",
+            branding::PRODUCT_NAME
+        );
+        Ok(remote_server::Source {
+            http: self.client.http_client(),
+            origin: self
+                .test_origin
+                .clone()
+                .unwrap_or_else(|| install::RELEASE_FILES_ORIGIN.to_string()),
+            repository,
+            public_keys: self.public_keys.clone(),
+            cache_dir: self.remote_servers_dir.clone(),
+        })
+    }
+
+    /// Always `Ok(None)`: a host is never given an address to download a
+    /// server from. It could not check what it receives; the application
+    /// downloads, checks and uploads (see
+    /// [`Self::download_remote_server_release`]).
     pub async fn get_remote_server_release_url(
         _channel: ReleaseChannel,
         _version: Option<Version>,
@@ -1242,6 +1295,7 @@ mod tests {
             public_keys: Vec::new(),
             installation: None,
             download_dir: PathBuf::from("/nonexistent/never-written"),
+            remote_servers_dir: PathBuf::from("/nonexistent/never-written"),
             test_origin: None,
         }
     }
@@ -1762,7 +1816,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_no_remote_server_is_ever_downloaded(cx: &mut TestAppContext) {
+    async fn test_a_build_without_a_key_downloads_no_remote_server(cx: &mut TestAppContext) {
         let github = FakeGitHub::new(200, release("v0.100.1"));
         init_test_updater(&github, ReleaseChannel::Stable, Some(REPOSITORY), false, cx);
         let mut cx = cx.to_async();
@@ -1789,9 +1843,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("does not publish remote server builds"),
+            error.to_string().contains("holds no update key"),
             "{error:#}"
         );
         assert_eq!(github.requests(), Vec::<String>::new());
@@ -1920,6 +1972,7 @@ mod tests {
                 installed: installed.clone(),
             }),
             download_dir: download_dir.path().join("updates"),
+            remote_servers_dir: download_dir.path().join("remote_servers"),
             test_origin: None,
         };
         let updater = cx.update(|cx| {
@@ -2276,6 +2329,357 @@ mod tests {
         assert!(!update.can_be_installed());
         assert_eq!(build.github.requests(), check_requests("v0.100.1"));
         build.installed = Arc::new(Mutex::new(Vec::new()));
+    }
+
+    // --- the remote server -----------------------------------------------------
+
+    const REMOTE_SERVER: &[u8] = b"the remote server of version 0.100.0, gzipped";
+
+    fn remote_server_name() -> String {
+        remote_server::file_name("linux", "x86_64")
+    }
+
+    impl Installable {
+        /// The release of the running version: its manifest lists an
+        /// installer and `described` as the Linux remote server; the release
+        /// serves `served` under that name.
+        fn publish_remote_server(
+            &self,
+            described: &[u8],
+            served: &[u8],
+            signing_key: Option<&str>,
+        ) {
+            self.publish_remote_server_as("v0.100.0", "0.100.0", described, served, signing_key);
+        }
+
+        /// The same for a release `tag` whose manifest says `manifest_version`.
+        fn publish_remote_server_as(
+            &self,
+            tag: &str,
+            manifest_version: &str,
+            described: &[u8],
+            served: &[u8],
+            signing_key: Option<&str>,
+        ) {
+            let entry = |name: String, content: &[u8]| update_manifest::ManifestFile {
+                name,
+                size: content.len() as u64,
+                sha256: update_manifest::hex(&<sha2::Sha256 as sha2::Digest>::digest(content)),
+            };
+            let manifest = update_manifest::Manifest {
+                product: branding::APP_ID.to_string(),
+                version: manifest_version.to_string(),
+                files: vec![
+                    entry(installer_name(), INSTALLER),
+                    entry(remote_server_name(), described),
+                ],
+            }
+            .to_json()
+            .unwrap();
+            let signature = update_manifest::sign(
+                manifest.as_bytes(),
+                signing_key.unwrap_or(&self.private_key),
+            )
+            .unwrap();
+            self.github
+                .serve(download_url(tag, "update.json"), manifest);
+            self.github
+                .serve(download_url(tag, "update.json.sig"), signature);
+            self.github
+                .serve(download_url(tag, &remote_server_name()), served);
+        }
+
+        fn remote_servers_dir(&self) -> PathBuf {
+            self._download_dir.path().join("remote_servers")
+        }
+
+        /// The files kept in the folder of remote servers, partial downloads
+        /// included.
+        fn kept_remote_servers(&self) -> Vec<String> {
+            let Ok(entries) = std::fs::read_dir(self.remote_servers_dir()) else {
+                return Vec::new();
+            };
+            let mut names: Vec<String> = entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    async fn download_remote_server(
+        os: &str,
+        arch: &str,
+        cx: &mut TestAppContext,
+    ) -> Result<PathBuf> {
+        let mut cx = cx.to_async();
+        AutoUpdater::download_remote_server_release(
+            ReleaseChannel::Stable,
+            Some(installed()),
+            os,
+            arch,
+            |_, _| {},
+            &mut cx,
+        )
+        .await
+    }
+
+    fn remote_server_requests() -> Vec<String> {
+        vec![
+            download_url("v0.100.0", "update.json"),
+            download_url("v0.100.0", "update.json.sig"),
+            download_url("v0.100.0", &remote_server_name()),
+        ]
+    }
+
+    #[gpui::test]
+    async fn test_the_remote_server_of_the_running_version_is_downloaded_and_kept(
+        cx: &mut TestAppContext,
+    ) {
+        let build = init_installable(false, cx);
+        build.publish_remote_server(REMOTE_SERVER, REMOTE_SERVER, None);
+
+        let path = download_remote_server("linux", "x86_64", cx).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), REMOTE_SERVER);
+        assert_eq!(path.parent().unwrap(), build.remote_servers_dir());
+        // The release of the running version, never the list of releases.
+        assert_eq!(build.github.requests(), remote_server_requests());
+
+        // A second host: the signed list is asked again, the kept file is
+        // checked against it and not downloaded again.
+        let again = download_remote_server("linux", "x86_64", cx).await.unwrap();
+        assert_eq!(again, path);
+        let mut requests = remote_server_requests();
+        requests.extend([
+            download_url("v0.100.0", "update.json"),
+            download_url("v0.100.0", "update.json.sig"),
+        ]);
+        assert_eq!(build.github.requests(), requests);
+        assert_eq!(build.kept_remote_servers().len(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_a_kept_remote_server_that_was_changed_is_downloaded_again(
+        cx: &mut TestAppContext,
+    ) {
+        let build = init_installable(false, cx);
+        build.publish_remote_server(REMOTE_SERVER, REMOTE_SERVER, None);
+        let path = download_remote_server("linux", "x86_64", cx).await.unwrap();
+
+        // Same size, other content.
+        let mut changed = REMOTE_SERVER.to_vec();
+        changed[0] ^= 1;
+        std::fs::write(&path, &changed).unwrap();
+        // And the server of an earlier version, left by that version.
+        let old = build.remote_servers_dir().join(format!(
+            "{}-remote-server-linux-x86_64-0.99.0.gz",
+            branding::APP_ID
+        ));
+        std::fs::write(&old, b"old").unwrap();
+
+        let again = download_remote_server("linux", "x86_64", cx).await.unwrap();
+        assert_eq!(again, path);
+        assert_eq!(std::fs::read(&path).unwrap(), REMOTE_SERVER);
+        assert_eq!(build.github.requests().len(), 6);
+        assert_eq!(build.kept_remote_servers().len(), 1);
+    }
+
+    /// What someone who can change the files of a release, but does not hold
+    /// the key, can put up: none of it reaches a host.
+    #[gpui::test]
+    async fn test_a_remote_server_the_key_did_not_sign_is_not_kept(cx: &mut TestAppContext) {
+        let build = init_installable(false, cx);
+
+        // The file was replaced: the signed list describes another one.
+        build.publish_remote_server(
+            REMOTE_SERVER,
+            b"another program, longer than the one the signed list describes",
+            None,
+        );
+        let error = download_remote_server("linux", "x86_64", cx)
+            .await
+            .unwrap_err();
+        assert!(install::is_rejection(&error), "{error:#}");
+        assert_eq!(build.kept_remote_servers(), Vec::<String>::new());
+
+        // A shorter one is an error too (it may be a download cut short, so
+        // it is not held against the release).
+        build.publish_remote_server(REMOTE_SERVER, b"a shorter program", None);
+        assert!(download_remote_server("linux", "x86_64", cx).await.is_err());
+        assert_eq!(build.kept_remote_servers(), Vec::<String>::new());
+
+        // The same size, one bit changed.
+        let mut changed = REMOTE_SERVER.to_vec();
+        changed[3] ^= 0x40;
+        build.publish_remote_server(REMOTE_SERVER, &changed, None);
+        let error = download_remote_server("linux", "x86_64", cx)
+            .await
+            .unwrap_err();
+        assert!(install::is_rejection(&error), "{error:#}");
+        assert_eq!(build.kept_remote_servers(), Vec::<String>::new());
+
+        // The list was replaced too, signed with another key.
+        let other_key = update_manifest::generate_private_key().unwrap();
+        build.publish_remote_server(REMOTE_SERVER, REMOTE_SERVER, Some(&other_key));
+        let before = build.github.requests().len();
+        let error = download_remote_server("linux", "x86_64", cx)
+            .await
+            .unwrap_err();
+        assert!(install::is_rejection(&error), "{error:#}");
+        // The list and its signature were read, the file was not asked for.
+        assert_eq!(build.github.requests().len(), before + 2);
+        assert_eq!(build.kept_remote_servers(), Vec::<String>::new());
+
+        // No signature at all.
+        build.publish_remote_server(REMOTE_SERVER, REMOTE_SERVER, None);
+        build
+            .github
+            .files
+            .lock()
+            .remove(&download_url("v0.100.0", "update.json.sig"));
+        assert!(download_remote_server("linux", "x86_64", cx).await.is_err());
+        assert_eq!(build.kept_remote_servers(), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn test_the_signed_list_of_another_version_gives_no_remote_server(
+        cx: &mut TestAppContext,
+    ) {
+        let build = init_installable(false, cx);
+        // The genuine, signed files of 0.100.1, its remote server included,
+        // served as those of 0.100.0: everything matches but the version.
+        build.publish_remote_server_as("v0.100.0", "0.100.1", REMOTE_SERVER, REMOTE_SERVER, None);
+
+        let error = download_remote_server("linux", "x86_64", cx)
+            .await
+            .unwrap_err();
+        assert!(install::is_rejection(&error), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("is for version 0.100.1, not 0.100.0"),
+            "{error:#}"
+        );
+        // The list and its signature were read, the server was not asked for.
+        assert_eq!(build.github.requests().len(), 2);
+        assert_eq!(build.kept_remote_servers(), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn test_what_a_build_adds_to_its_version_does_not_change_the_release_asked(
+        cx: &mut TestAppContext,
+    ) {
+        let build = init_installable(false, cx);
+        build.publish_remote_server(REMOTE_SERVER, REMOTE_SERVER, None);
+
+        let mut async_cx = cx.to_async();
+        let path = AutoUpdater::download_remote_server_release(
+            ReleaseChannel::Stable,
+            Some(Version::parse("0.100.0+abcdef0").unwrap()),
+            "linux",
+            "x86_64",
+            |_, _| {},
+            &mut async_cx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), REMOTE_SERVER);
+        assert_eq!(build.github.requests(), remote_server_requests());
+    }
+
+    #[gpui::test]
+    async fn test_a_build_without_a_version_or_a_repository_asks_for_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        // A build with a key and a repository, but no released version.
+        let build = init_installable(false, cx);
+        build.publish_remote_server(REMOTE_SERVER, REMOTE_SERVER, None);
+        let mut async_cx = cx.to_async();
+        let error = AutoUpdater::download_remote_server_release(
+            ReleaseChannel::Nightly,
+            None,
+            "linux",
+            "x86_64",
+            |_, _| {},
+            &mut async_cx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("has no released version"),
+            "{error:#}"
+        );
+        assert_eq!(build.github.requests(), Vec::<String>::new());
+
+        // A build without a releases repository.
+        build.updater.update(cx, |updater, _| {
+            updater.releases_repository = None;
+        });
+        let error = download_remote_server("linux", "x86_64", cx)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("has no releases repository"),
+            "{error:#}"
+        );
+        assert_eq!(build.github.requests(), Vec::<String>::new());
+        assert_eq!(build.kept_remote_servers(), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn test_a_download_that_fails_leaves_nothing_and_old_leftovers_are_swept(
+        cx: &mut TestAppContext,
+    ) {
+        let build = init_installable(false, cx);
+        build.publish_remote_server(REMOTE_SERVER, REMOTE_SERVER, None);
+        // The list is there, the server is not: the download fails.
+        build
+            .github
+            .files
+            .lock()
+            .remove(&download_url("v0.100.0", &remote_server_name()));
+        assert!(download_remote_server("linux", "x86_64", cx).await.is_err());
+        assert_eq!(build.kept_remote_servers(), Vec::<String>::new());
+
+        // Two unfinished downloads left by a run that was killed: one from
+        // yesterday, one that may still be another window's.
+        let old = build.remote_servers_dir().join(".old.1-0.part");
+        let recent = build.remote_servers_dir().join(".recent.2-0.part");
+        std::fs::write(&old, b"half").unwrap();
+        std::fs::write(&recent, b"half").unwrap();
+        let yesterday = std::time::SystemTime::now() - Duration::from_secs(24 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(yesterday)
+            .unwrap();
+
+        build.publish_remote_server(REMOTE_SERVER, REMOTE_SERVER, None);
+        let path = download_remote_server("linux", "x86_64", cx).await.unwrap();
+        let mut kept = vec![
+            ".recent.2-0.part".to_string(),
+            path.file_name().unwrap().to_string_lossy().into_owned(),
+        ];
+        kept.sort();
+        assert_eq!(build.kept_remote_servers(), kept);
+    }
+
+    #[gpui::test]
+    async fn test_a_host_system_without_a_remote_server_is_told_so(cx: &mut TestAppContext) {
+        let build = init_installable(false, cx);
+        build.publish_remote_server(REMOTE_SERVER, REMOTE_SERVER, None);
+
+        let error = download_remote_server("macos", "aarch64", cx)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("has no remote server for macos aarch64"),
+            "{error:#}"
+        );
+        // Only the list and its signature were asked for.
+        assert_eq!(build.github.requests().len(), 2);
+        assert_eq!(build.kept_remote_servers(), Vec::<String>::new());
     }
 
     #[test]

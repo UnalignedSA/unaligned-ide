@@ -6,7 +6,7 @@ How an installed copy learns that a newer version exists, how it installs it, an
 
 1. **The check.** Once a day, and when the user picks Help → Check for Updates, the application asks `https://api.github.com/repos/<RELEASES_REPOSITORY>/releases` for the latest published release (drafts and pre-releases do not count). It is an anonymous request, with no identifier. The setting `"auto_update": false` turns the daily check off; the menu entry still works. A development build never checks by itself.
 2. **Is it ours?** When that release's version is higher than the running one, the application downloads two small files of the release from `https://github.com/<RELEASES_REPOSITORY>/releases/download/<tag>/`:
-   - `update.json`, the manifest: the product, the version, and for each installer its name, its size and its SHA-256;
+   - `update.json`, the manifest: the product, the version, and for each installer its name, its size and its SHA-256 (the remote servers of the release are listed there too: `REMOTE.md`);
    - `update.json.sig`, an Ed25519 signature of the manifest.
 
    The release is announced only when the manifest is signed with the product's update key and is this product's and that version's. **A release without a valid signature is ignored**: no button, no link. Help → Check for Updates says why.
@@ -56,7 +56,7 @@ Everything runs on GitHub (`.github/workflows/build.yml`):
 
 1. Set the new version in `crates/ide/Cargo.toml` (and the badge at the top of `README.md`), build once locally so that `Cargo.lock` follows, commit.
 2. Tag that commit `v<version>` and push the branch and the tag. The workflow refuses a tag that is not the version of `crates/ide/Cargo.toml`: an application whose version is lower than its own release's would announce that release to itself for ever.
-3. The workflow builds the four installers. Its last job then writes `update.json` from them, signs it with the repository secret `UPDATE_SIGNING_KEY`, checks the signature against the public key of that very commit and the files against the manifest, and attaches everything to a draft release.
+3. The workflow builds the four installers and the two remote servers (`REMOTE.md`). Its last job then writes `update.json` from them, signs it with the repository secret `UPDATE_SIGNING_KEY`, checks the signature against the public key of that very commit and the files against the manifest, and attaches everything to a draft release.
 4. Publish the draft, as the latest release. Installed copies see it within a day.
 
 Rules:

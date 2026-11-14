@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+#
+# Builds the remote server: the program the application uploads to a host (an
+# SSH host, a WSL distribution, a container) to work there. One executable,
+# linked statically against musl so that it runs on any Linux of its
+# architecture, whatever the host's C library, with the optimisation of a
+# release (.cargo/bundle-config.toml, the same as the application's). Built for
+# the architecture of the Linux machine this runs on; it writes
+#
+#   <cargo's target directory>/release/<APP_ID>-remote-server-linux-<arch>.gz
+#
+# which is the name the application asks its release for
+# (crates/auto_update/src/remote_server.rs). The file has to be in the
+# release's signed list (update.json): the application uploads nothing else.
+# See docs/unaligned/REMOTE.md.
+
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+brand_file="crates/branding/brand.env"
+channel_file="crates/ide/RELEASE_CHANNEL"
+
+fail() {
+    echo "${0##*/}: $*" >&2
+    exit 1
+}
+
+if [[ $# -gt 0 ]]; then
+    case $1 in
+        -h | --help)
+            sed -n '3,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+fi
+
+# --- Preconditions -----------------------------------------------------------
+
+[[ "$(uname -s)" == "Linux" ]] || fail "the remote server is built on Linux; this system is $(uname -s)"
+
+if [[ -n "${RUSTFLAGS+x}" || -n "${CARGO_ENCODED_RUSTFLAGS+x}" ]]; then
+    fail "unset RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS: they replace the flags of .cargo/config.toml and .cargo/bundle-config.toml (the static linking among them)"
+fi
+# A build that sees the first variable sends crash reports to that address; the
+# second one signs telemetry requests. Neither belongs in this product.
+for forbidden in IDE_MINIDUMP_ENDPOINT IDE_CLIENT_CHECKSUM_SEED; do
+    if [[ -n "${!forbidden+x}" ]]; then
+        fail "$forbidden is set in the environment: unset it, a release must never be built with it"
+    fi
+done
+
+for tool in cargo rustc jq gzip musl-gcc file; do
+    command -v "$tool" >/dev/null 2>&1 || fail "$tool not found (script/linux installs the build dependencies; musl-gcc is in musl-tools)"
+done
+if command -v llvm-objcopy >/dev/null 2>&1; then
+    objcopy="llvm-objcopy"
+elif command -v objcopy >/dev/null 2>&1; then
+    objcopy="objcopy"
+else
+    fail "neither llvm-objcopy nor objcopy found (script/linux installs llvm)"
+fi
+
+APP_ID="$(sed -n 's/^APP_ID="\(.*\)"$/\1/p' "$brand_file")"
+[[ "$APP_ID" =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "APP_ID of $brand_file must be lowercase letters, digits and dashes"
+[[ "$APP_ID" != "zed" ]] || fail "APP_ID must not be \"zed\""
+
+arch="$(uname -m)"
+case $arch in
+    x86_64 | aarch64) ;;
+    *) fail "no remote server is built for $arch (x86_64 and aarch64 only)" ;;
+esac
+target="${arch}-unknown-linux-musl"
+# Where cargo will really write, whatever sets it (CARGO_TARGET_DIR, a cargo
+# configuration file): an executable left elsewhere by an older build must
+# never be the one packaged.
+target_dir="$(cargo metadata --no-deps --format-version=1 | jq --raw-output .target_directory)"
+[[ -n "$target_dir" && "$target_dir" != "null" ]] || fail "could not read the target directory from cargo metadata"
+built="${target_dir}/${target}/release/remote-server"
+out_dir="${target_dir}/release"
+out="${out_dir}/${APP_ID}-remote-server-linux-${arch}.gz"
+
+version="$(script/get-crate-version ide)"
+[[ -n "$version" ]] || fail "could not read the version of the ide package"
+
+# --- Cleanup (temporary files, and the release channel file) -----------------
+
+temp_dir="$(mktemp -d)"
+channel_backup=""
+
+cleanup() {
+    local status=$?
+    if [[ -n "$channel_backup" && -f "$channel_backup" ]]; then
+        # -p keeps the modification time, so development builds are not invalidated.
+        cp -p "$channel_backup" "$channel_file"
+        echo "Restored $channel_file to '$(tr -d '\n' <"$channel_file")'."
+    fi
+    rm -rf "$temp_dir"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+# --- Build -------------------------------------------------------------------
+
+if command -v rustup >/dev/null 2>&1; then
+    rustup target add "$target"
+fi
+
+export RELEASE_VERSION="$version"
+
+# The server must be of the channel of the application that uploads it: build
+# as `stable`, then put the file back (see cleanup).
+if [[ "$(tr -d '[:space:]' <"$channel_file")" != "stable" ]]; then
+    cp -p "$channel_file" "$temp_dir/RELEASE_CHANNEL.backup"
+    channel_backup="$temp_dir/RELEASE_CHANNEL.backup"
+    echo "stable" >"$channel_file"
+fi
+
+# The C parts of the dependencies are compiled against musl as well.
+export "CC_${target//-/_}"=musl-gcc
+
+# An invocation of its own, as upstream: the features other packages turn on
+# must not reach this binary. No debug information: nothing collects it.
+cargo --config .cargo/bundle-config.toml --config 'profile.release.debug=false' \
+    build --release --locked --target "$target" --package remote_server
+
+[[ -x "$built" ]] || fail "$built not found after the build"
+
+# --- Checks ------------------------------------------------------------------
+
+# Static, or it runs only where the build machine's libraries are.
+described="$(file -b "$built")"
+case $described in
+    *"statically linked"* | *"static-pie linked"*) ;;
+    *) fail "$built is not statically linked: $described" ;;
+esac
+
+"$objcopy" --strip-debug --discard-all "$built" "$temp_dir/remote-server"
+chmod 755 "$temp_dir/remote-server"
+
+# The stripped file is the one that ships: it must start, and say the version
+# the application will look for on a host.
+said="$("$temp_dir/remote-server" version)"
+[[ "$said" == "$version" ]] || fail "the built server says version '$said', the application is $version"
+
+# Upstream's name must not be what a host sees in its process list or folders.
+if grep -a -q -E 'zed-remote-server|\.zed_server' "$temp_dir/remote-server"; then
+    fail "the built server still carries upstream's remote server names"
+fi
+
+# --- Package -----------------------------------------------------------------
+
+mkdir -p "$out_dir"
+# -n: no name and no time in the archive, so the same binary gives the same file.
+gzip -n --best --stdout "$temp_dir/remote-server" >"$temp_dir/out.gz"
+gzip -t "$temp_dir/out.gz"
+mv "$temp_dir/out.gz" "$out"
+
+echo "Remote server $version for linux $arch:"
+ls -l "$out"
+sha256sum "$out" 2>/dev/null || true

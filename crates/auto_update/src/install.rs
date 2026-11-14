@@ -83,7 +83,7 @@ impl fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
-fn rejected(reason: impl Into<String>) -> anyhow::Error {
+pub(crate) fn rejected(reason: impl Into<String>) -> anyhow::Error {
     Rejected(reason.into()).into()
 }
 
@@ -311,7 +311,7 @@ pub(crate) const RELEASE_FILES_ORIGIN: &str = "https://github.com";
 /// The address of a file of a release. Built from the repository and the tag,
 /// not taken from GitHub's answer: nothing but this product's own release
 /// files is ever requested.
-fn release_file_url(origin: &str, repository: &str, tag: &str, name: &str) -> String {
+pub(crate) fn release_file_url(origin: &str, repository: &str, tag: &str, name: &str) -> String {
     format!("{origin}/{repository}/releases/download/{tag}/{name}")
 }
 
@@ -400,7 +400,7 @@ async fn fetch_small(http: &Arc<dyn HttpClient>, url: &str, limit: usize) -> Res
 /// Downloads a manifest and its signature, checks the signature, and checks
 /// that the manifest is this product's and exactly `version`'s. Nothing of a
 /// release may be trusted before this returns `Ok`.
-async fn signed_manifest(
+pub(crate) async fn signed_manifest(
     http: &Arc<dyn HttpClient>,
     manifest_url: &str,
     signature_url: &str,

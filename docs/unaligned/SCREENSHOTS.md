@@ -47,6 +47,7 @@ Options (`script/unaligned/shot --help`):
 | `--open PATH[:LINE[:COL]]` | File to open, relative to the project. Repeatable. Files open in parallel, so the tab order and the active tab can vary: add `pane::ActivateItem N` (from 0) when it matters. |
 | `--settings JSON` or `@file` | Merged into the instance's `settings.json` before launch (theme, dock positions, fonts, anything). |
 | `--keymap JSON` or `@file` | Written as the instance's `keymap.json`. |
+| `--arg VALUE` | An extra command-line argument for the instance, after the project: an `ssh://user@host:port/path` address with `--project none`, for a remote project. Repeatable. |
 | `--project DIR` / `none` | Another folder to open (it is copied, never modified), or no project at all. Default: the sample project. |
 | `--size WxH`, `--position X,Y` | Window size and position in points. Default 1440x900 at 40,40. |
 | `--settle S`, `--wait S` | Seconds to wait before the first step (default 2.5) and after the last one (default 1). Raise `--wait` for slow content. |
