@@ -348,12 +348,13 @@ impl Render for TitleBar {
                     .when_some(
                         self.application_menu.clone().filter(|_| !show_menus),
                         |title_bar, menu| {
-                            // Hide the project/branch items to make room when the
-                            // menu bar is expanded -- except in accessible mode,
-                            // where the menu bar is always expanded but those
-                            // controls must still remain reachable.
-                            render_project_items &= !menu
-                                .update(cx, |menu, cx| menu.all_menus_shown(cx))
+                            // The project's name and branch give their place
+                            // to the menus written out by name (the command
+                            // centre and the status bar show both) -- except
+                            // in accessible mode, where the menus are always
+                            // written out but those controls must still
+                            // remain reachable.
+                            render_project_items &= !menu.read(cx).shows_menus_by_name(window, cx)
                                 || cx.accessible_mode();
                             title_bar.child(menu)
                         },

@@ -1,4 +1,18 @@
-use gpui::{Action, Entity, OwnedMenu, OwnedMenuItem, Subscription, actions};
+//! The application's menus inside the window, where the system has no menu
+//! bar of its own (Windows, Linux): the product's mark, the first menus by
+//! name, and a "…" that holds the others, as editors on those systems do.
+//!
+//! ```text
+//! [mark]  File  Edit  Selection  View  Go  Run  …
+//! ```
+//!
+//! The mark opens the product's own menu (About, Settings, Quit). How many
+//! menus are written out follows the width of the window: a narrow window
+//! keeps the first ones and moves the rest under "…", down to the mark and
+//! "…" alone. With the setting `title_bar.show_menus`, or in accessible mode,
+//! every menu is written out.
+
+use gpui::{Action, Entity, OwnedMenu, OwnedMenuItem, Pixels, Subscription, actions, px};
 use project::DisableAiSettings;
 use settings::{Settings, SettingsStore};
 use workspace::AccessibleMode;
@@ -7,7 +21,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use smallvec::SmallVec;
-use ui::{ContextMenu, PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*};
+use ui::{ButtonLike, ContextMenu, PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*};
 
 use platform_title_bar::TitleBarSettings;
 
@@ -51,9 +65,27 @@ struct MenuEntry {
 }
 
 pub struct ApplicationMenu {
+    /// Every menu, the product's own first.
     entries: SmallVec<[MenuEntry; 8]>,
+    /// The "…" that holds the menus the bar has no room to write out.
+    overflow: PopoverMenuHandle<ContextMenu>,
     pending_menu_open: Option<String>,
     _settings_subscription: Subscription,
+}
+
+/// How many menus are written out after the mark in a window this wide. The
+/// menus are, in order: File, Edit, Selection, View, Go, Run, then the ones
+/// that are used least.
+fn menus_written_out(window_width: Pixels) -> usize {
+    if window_width >= px(1100.) {
+        6
+    } else if window_width >= px(900.) {
+        4
+    } else if window_width >= px(700.) {
+        2
+    } else {
+        0
+    }
 }
 
 impl ApplicationMenu {
@@ -80,9 +112,47 @@ impl ApplicationMenu {
 
         Self {
             entries,
+            overflow: PopoverMenuHandle::default(),
             pending_menu_open: None,
             _settings_subscription: settings_subscription,
         }
+    }
+
+    /// How many menus follow the mark by name; the others are under "…".
+    fn written_out(&self, window: &Window, cx: &App) -> usize {
+        let menus = self.entries.len().saturating_sub(1);
+        if show_menus(cx) || cx.accessible_mode() {
+            return menus;
+        }
+        let written_out = menus_written_out(window.viewport_size().width).min(menus);
+        // A "…" for one menu would take the room of that menu.
+        if written_out + 1 == menus {
+            menus
+        } else {
+            written_out
+        }
+    }
+
+    /// The handles of what the bar shows, left to right: the mark, the menus
+    /// written out, and "…" when there is one.
+    fn shown_handles(&self, written_out: usize) -> Vec<PopoverMenuHandle<ContextMenu>> {
+        let mut handles: Vec<_> = self
+            .entries
+            .iter()
+            .take(written_out + 1)
+            .map(|entry| entry.handle.clone())
+            .collect();
+        if self.entries.len() > written_out + 1 {
+            handles.push(self.overflow.clone());
+        }
+        handles
+    }
+
+    /// Whether menus are written out in the title bar, which then has no room
+    /// for the project's name and branch beside them (the command centre and
+    /// the status bar show both).
+    pub fn shows_menus_by_name(&self, window: &Window, cx: &App) -> bool {
+        self.written_out(window, cx) > 0
     }
 
     fn build_entries(menus: Vec<OwnedMenu>) -> SmallVec<[MenuEntry; 8]> {
@@ -129,6 +199,47 @@ impl ApplicationMenu {
         cleaned
     }
 
+    /// Adds the items of a menu to `menu`. A sub-menu of the application's
+    /// menus is written flat, as before.
+    fn add_items(menu: ContextMenu, items: Vec<OwnedMenuItem>) -> ContextMenu {
+        Self::sanitize_menu_items(items)
+            .into_iter()
+            .fold(menu, |menu, item| match item {
+                OwnedMenuItem::Separator => menu.separator(),
+                OwnedMenuItem::Action {
+                    name,
+                    action,
+                    checked,
+                    disabled,
+                    ..
+                } => menu.action_checked_with_disabled(name, action, checked, disabled),
+                OwnedMenuItem::Submenu(submenu) => {
+                    submenu
+                        .items
+                        .into_iter()
+                        .fold(menu, |menu, item| match item {
+                            OwnedMenuItem::Separator => menu.separator(),
+                            OwnedMenuItem::Action {
+                                name,
+                                action,
+                                checked,
+                                disabled,
+                                ..
+                            } => menu.action_checked_with_disabled(name, action, checked, disabled),
+                            OwnedMenuItem::Submenu(_) => menu,
+                            OwnedMenuItem::SystemMenu(_) => {
+                                // A system menu doesn't make sense in this context, so ignore it
+                                menu
+                            }
+                        })
+                }
+                OwnedMenuItem::SystemMenu(_) => {
+                    // A system menu doesn't make sense in this context, so ignore it
+                    menu
+                }
+            })
+    }
+
     fn build_menu_from_items(
         entry: MenuEntry,
         window: &mut Window,
@@ -137,49 +248,58 @@ impl ApplicationMenu {
         ContextMenu::build(window, cx, |menu, window, cx| {
             // Grab current focus handle so menu can shown items in context with the focused element
             let menu = menu.when_some(window.focused(cx), |menu, focused| menu.context(focused));
-            let sanitized_items = Self::sanitize_menu_items(entry.menu.items);
-
-            sanitized_items
-                .into_iter()
-                .fold(menu, |menu, item| match item {
-                    OwnedMenuItem::Separator => menu.separator(),
-                    OwnedMenuItem::Action {
-                        name,
-                        action,
-                        checked,
-                        disabled,
-                        ..
-                    } => menu.action_checked_with_disabled(name, action, checked, disabled),
-                    OwnedMenuItem::Submenu(submenu) => {
-                        submenu
-                            .items
-                            .into_iter()
-                            .fold(menu, |menu, item| match item {
-                                OwnedMenuItem::Separator => menu.separator(),
-                                OwnedMenuItem::Action {
-                                    name,
-                                    action,
-                                    checked,
-                                    disabled,
-                                    ..
-                                } => menu
-                                    .action_checked_with_disabled(name, action, checked, disabled),
-                                OwnedMenuItem::Submenu(_) => menu,
-                                OwnedMenuItem::SystemMenu(_) => {
-                                    // A system menu doesn't make sense in this context, so ignore it
-                                    menu
-                                }
-                            })
-                    }
-                    OwnedMenuItem::SystemMenu(_) => {
-                        // A system menu doesn't make sense in this context, so ignore it
-                        menu
-                    }
-                })
+            Self::add_items(menu, entry.menu.items)
         })
     }
 
-    fn render_application_menu(&self, entry: &MenuEntry) -> impl IntoElement {
+    /// The menu under "…": each menu that is not written out, as a sub-menu.
+    fn build_overflow_menu(
+        entries: Vec<MenuEntry>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<ContextMenu> {
+        ContextMenu::build(window, cx, |menu, window, cx| {
+            let focused = window.focused(cx);
+            let menu = menu.when_some(focused.clone(), |menu, focused| menu.context(focused));
+            entries.into_iter().fold(menu, |menu, entry| {
+                let focused = focused.clone();
+                let items = entry.menu.items.clone();
+                menu.submenu(entry.menu.name, move |menu, _, _| {
+                    let menu =
+                        menu.when_some(focused.clone(), |menu, focused| menu.context(focused));
+                    Self::add_items(menu, items.clone())
+                })
+            })
+        })
+    }
+
+    /// Opens this menu when the pointer comes over it while another menu of
+    /// the bar is open (or always, with `open_menus_on_hover`).
+    fn switch_on_hover(
+        current: PopoverMenuHandle<ContextMenu>,
+        all: Vec<PopoverMenuHandle<ContextMenu>>,
+    ) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
+        move |hover_enter, window, cx| {
+            if *hover_enter
+                && !current.is_deployed()
+                && (open_menus_on_hover(cx) || all.iter().any(|handle| handle.is_deployed()))
+            {
+                all.iter().for_each(|handle| handle.hide(cx));
+
+                // We need to defer this so that this menu handle can take focus from the previous menu
+                let handle = current.clone();
+                window.defer(cx, move |window, cx| handle.show(window, cx));
+            }
+        }
+    }
+
+    /// The product's mark, which opens the product's own menu.
+    fn render_application_menu(
+        &self,
+        entry: &MenuEntry,
+        all_handles: Vec<PopoverMenuHandle<ContextMenu>>,
+        cx: &App,
+    ) -> impl IntoElement {
         let handle = entry.handle.clone();
 
         let menu_name = entry.menu.name.clone();
@@ -195,31 +315,27 @@ impl ApplicationMenu {
                         Self::build_menu_from_items(entry.clone(), window, cx).into()
                     })
                     .trigger_with_tooltip(
-                        IconButton::new(
-                            SharedString::from(format!("{}-menu-trigger", menu_name)),
-                            ui::IconName::Menu,
-                        )
-                        .style(ButtonStyle::Subtle)
-                        .icon_size(IconSize::Small)
-                        .tab_index(0isize)
-                        .aria_label(format!("{} Menu", branding::PRODUCT_NAME)),
+                        ButtonLike::new(SharedString::from(format!("{}-menu-trigger", menu_name)))
+                            .style(ButtonStyle::Subtle)
+                            .tab_index(0isize)
+                            .aria_label(format!("{} Menu", branding::PRODUCT_NAME))
+                            .child(div().px_1().child(brand_mark(cx))),
                         Tooltip::text(format!("{} Menu", branding::PRODUCT_NAME)),
                     )
-                    .with_handle(handle),
+                    .with_handle(handle.clone()),
             )
+            .on_hover(Self::switch_on_hover(handle, all_handles))
     }
 
-    fn render_standard_menu(&self, entry: &MenuEntry) -> impl IntoElement {
+    fn render_standard_menu(
+        &self,
+        entry: &MenuEntry,
+        all_handles: Vec<PopoverMenuHandle<ContextMenu>>,
+    ) -> impl IntoElement {
         let current_handle = entry.handle.clone();
 
         let menu_name = entry.menu.name.clone();
         let entry = entry.clone();
-
-        let all_handles: Vec<_> = self
-            .entries
-            .iter()
-            .map(|entry| entry.handle.clone())
-            .collect();
 
         div()
             .id(format!("{}-menu-item", menu_name))
@@ -240,19 +356,35 @@ impl ApplicationMenu {
                     )
                     .with_handle(current_handle.clone()),
             )
-            .on_hover(move |hover_enter, window, cx| {
-                if *hover_enter
-                    && !current_handle.is_deployed()
-                    && (open_menus_on_hover(cx)
-                        || all_handles.iter().any(|handle| handle.is_deployed()))
-                {
-                    all_handles.iter().for_each(|h| h.hide(cx));
+            .on_hover(Self::switch_on_hover(current_handle, all_handles))
+    }
 
-                    // We need to defer this so that this menu handle can take focus from the previous menu
-                    let handle = current_handle.clone();
-                    window.defer(cx, move |window, cx| handle.show(window, cx));
-                }
-            })
+    /// "…": the menus the bar has no room to write out.
+    fn render_overflow_menu(
+        &self,
+        entries: Vec<MenuEntry>,
+        all_handles: Vec<PopoverMenuHandle<ContextMenu>>,
+    ) -> impl IntoElement {
+        let handle = self.overflow.clone();
+        div()
+            .id("more-menus-item")
+            .occlude()
+            .child(
+                PopoverMenu::new("more-menus-popover")
+                    .menu(move |window, cx| {
+                        Self::build_overflow_menu(entries.clone(), window, cx).into()
+                    })
+                    .trigger_with_tooltip(
+                        IconButton::new("more-menus-trigger", ui::IconName::Ellipsis)
+                            .style(ButtonStyle::Subtle)
+                            .icon_size(IconSize::Small)
+                            .tab_index(0isize)
+                            .aria_label("More Menus"),
+                        Tooltip::text("More Menus"),
+                    )
+                    .with_handle(handle.clone()),
+            )
+            .on_hover(Self::switch_on_hover(handle, all_handles))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -277,10 +409,8 @@ impl ApplicationMenu {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current_index = self
-            .entries
-            .iter()
-            .position(|entry| entry.handle.is_deployed());
+        let handles = self.shown_handles(self.written_out(window, cx));
+        let current_index = handles.iter().position(|handle| handle.is_deployed());
         let Some(current_index) = current_index else {
             // No menu is open, so there is nothing to switch between. Let the
             // arrow key continue to the title bar's toolbar navigation so it
@@ -294,13 +424,13 @@ impl ApplicationMenu {
         let next_index = match direction {
             ActivateDirection::Left => {
                 if current_index == 0 {
-                    self.entries.len() - 1
+                    handles.len() - 1
                 } else {
                     current_index - 1
                 }
             }
             ActivateDirection::Right => {
-                if current_index == self.entries.len() - 1 {
+                if current_index == handles.len() - 1 {
                     0
                 } else {
                     current_index + 1
@@ -308,24 +438,15 @@ impl ApplicationMenu {
             }
         };
 
-        self.entries[current_index].handle.hide(cx);
+        handles[current_index].hide(cx);
 
         // We need to defer this so that this menu handle can take focus from the previous menu
-        let next_handle = self.entries[next_index].handle.clone();
+        let next_handle = handles[next_index].clone();
         cx.defer_in(window, move |_, window, cx| next_handle.show(window, cx));
-    }
-
-    pub fn all_menus_shown(&self, cx: &mut Context<Self>) -> bool {
-        show_menus(cx)
-            || self.entries.iter().any(|entry| entry.handle.is_deployed())
-            || self.pending_menu_open.is_some()
-            // In accessible mode, keep the full menu bar expanded so every menu
-            // is individually reachable and labeled for assistive technology.
-            || cx.accessible_mode()
     }
 }
 
-pub(crate) fn show_menus(cx: &mut App) -> bool {
+pub(crate) fn show_menus(cx: &App) -> bool {
     TitleBarSettings::get_global(cx).show_menus
         && (cfg!(not(target_os = "macos")) || option_env!("IDE_USE_CROSS_PLATFORM_MENU").is_some())
 }
@@ -334,52 +455,88 @@ pub(crate) fn open_menus_on_hover(cx: &mut App) -> bool {
     TitleBarSettings::get_global(cx).open_menus_on_hover
 }
 
+/// The product's mark at the size of a title bar icon: two overlapping
+/// squares, the neutral one behind, the red one in front. The same drawing as
+/// the welcome page's (`workspace::welcome`), which is private to that crate.
+fn brand_mark(cx: &App) -> Div {
+    // The logo's own red, in every theme: the one fixed colour allowed outside the theme tokens.
+    const BRAND_RED: u32 = 0xe5322d;
+    // In the logo each square is 41/68 of the mark's side.
+    let side = rems_from_px(14_f32);
+    let square = rems_from_px(8.5_f32);
+
+    div()
+        .relative()
+        .flex_none()
+        .size(side)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size(square)
+                // The text colour, so the square shows on light and dark grounds.
+                .bg(cx.theme().colors().text),
+        )
+        .child(
+            div()
+                .absolute()
+                .bottom_0()
+                .right_0()
+                .size(square)
+                .bg(gpui::rgb(BRAND_RED)),
+        )
+}
+
 impl Render for ApplicationMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let all_menus_shown = self.all_menus_shown(cx);
+        let written_out = self.written_out(window, cx);
+        let handles = self.shown_handles(written_out);
 
-        if let Some(pending_menu_open) = self.pending_menu_open.take()
-            && let Some(entry) = self
+        // A key binding asked for a menu by its name: the one written out,
+        // or "…" when the menu is under it.
+        if let Some(pending_menu_open) = self.pending_menu_open.take() {
+            let index = self
                 .entries
                 .iter()
-                .find(|entry| entry.menu.name == pending_menu_open && !entry.handle.is_deployed())
-        {
-            let handle_to_show = entry.handle.clone();
-            let handles_to_hide: Vec<_> = self
-                .entries
-                .iter()
-                .filter(|e| e.menu.name != pending_menu_open && e.handle.is_deployed())
-                .map(|e| e.handle.clone())
-                .collect();
-
-            if handles_to_hide.is_empty() {
-                // We need to wait for the next frame to show all menus first,
-                // before we can handle show/hide operations
-                window.on_next_frame(move |window, cx| {
-                    handles_to_hide.iter().for_each(|handle| handle.hide(cx));
-                    window.defer(cx, move |window, cx| handle_to_show.show(window, cx));
-                });
-            } else {
-                // Since menus are already shown, we can directly handle show/hide operations
-                handles_to_hide.iter().for_each(|handle| handle.hide(cx));
+                .position(|entry| entry.menu.name == pending_menu_open);
+            let handle_to_show = index.map(|index| {
+                if index <= written_out {
+                    self.entries[index].handle.clone()
+                } else {
+                    self.overflow.clone()
+                }
+            });
+            if let Some(handle_to_show) = handle_to_show.filter(|handle| !handle.is_deployed()) {
+                handles
+                    .iter()
+                    .filter(|handle| handle.is_deployed())
+                    .for_each(|handle| handle.hide(cx));
                 cx.defer_in(window, move |_, window, cx| handle_to_show.show(window, cx));
             }
         }
+
+        let under_more: Vec<MenuEntry> =
+            self.entries.iter().skip(written_out + 1).cloned().collect();
 
         div()
             .key_context("ApplicationMenu")
             .flex()
             .flex_row()
-            .gap_x_1()
-            .when(!all_menus_shown && !self.entries.is_empty(), |this| {
-                this.child(self.render_application_menu(&self.entries[0]))
+            .items_center()
+            .gap_x_0p5()
+            .when_some(self.entries.first(), |this, entry| {
+                this.child(self.render_application_menu(entry, handles.clone(), cx))
             })
-            .when(all_menus_shown, |this| {
-                this.children(
-                    self.entries
-                        .iter()
-                        .map(|entry| self.render_standard_menu(entry)),
-                )
+            .children(
+                self.entries
+                    .iter()
+                    .skip(1)
+                    .take(written_out)
+                    .map(|entry| self.render_standard_menu(entry, handles.clone())),
+            )
+            .when(!under_more.is_empty(), |this| {
+                this.child(self.render_overflow_menu(under_more, handles.clone()))
             })
     }
 }
