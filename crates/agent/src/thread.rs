@@ -3166,6 +3166,8 @@ impl Thread {
 
             log::debug!("Calling model.stream_completion, attempt {}", attempt);
 
+            let mut request = request;
+            replace_images_model_cannot_read(&model, &mut request);
             let events = match provider {
                 Ok(provider) => provider.stream_completion(&model, request, cx).await,
                 Err(error) => Err(error),
@@ -3513,6 +3515,8 @@ impl Thread {
         }
 
         log::debug!("Running compaction");
+        let mut request = request;
+        replace_images_model_cannot_read(&model, &mut request);
         let compaction_id = acp_thread::ContextCompactionId(Uuid::new_v4().to_string().into());
         event_stream.send_context_compaction(
             compaction_id.clone(),
@@ -4272,6 +4276,7 @@ impl Thread {
             cache: false,
             reasoning_details: None,
         });
+        replace_images_model_cannot_read(&model, &mut request);
 
         let task = cx
             .spawn(async move |this, cx| {
@@ -5527,11 +5532,45 @@ pub fn build_thread_title_request(
     request
 }
 
+/// What stands for an image in a request to a model that reads none.
+const IMAGE_PLACEHOLDER: &str = "[image]";
+
+/// Replaces every image of `request` with a short note when `model` reads no
+/// images. Titles, summaries and compaction go to a small helper model that
+/// is often blind, with the chat's whole history: an API that refuses an
+/// image sent to a blind model would otherwise fail each of those requests
+/// as soon as the chat holds one picture. The same goes for a chat whose
+/// model was changed to a blind one after a picture was sent.
+pub fn replace_images_model_cannot_read(model: &LanguageModel, request: &mut LanguageModelRequest) {
+    if model.supports_images() {
+        return;
+    }
+    for message in &mut request.messages {
+        for content in &mut message.content {
+            match content {
+                MessageContent::Image(_) => {
+                    *content = MessageContent::Text(IMAGE_PLACEHOLDER.to_string());
+                }
+                MessageContent::ToolResult(result) => {
+                    for part in &mut result.content {
+                        if matches!(part, LanguageModelToolResultContent::Image(_)) {
+                            *part =
+                                LanguageModelToolResultContent::Text(Arc::from(IMAGE_PLACEHOLDER));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 pub async fn stream_thread_title(
     model: LanguageModel,
-    request: LanguageModelRequest,
+    mut request: LanguageModelRequest,
     cx: &AsyncApp,
 ) -> Result<String> {
+    replace_images_model_cannot_read(&model, &mut request);
     let mut title = String::new();
     let provider =
         cx.update(|cx| LanguageModelRegistry::read_global(cx).provider_for_model(&model))?;
@@ -8230,6 +8269,60 @@ mod tests {
                 SUMMARIZE_THREAD_PROMPT.to_string(),
             ]
         );
+    }
+
+    #[gpui::test]
+    async fn test_images_are_replaced_for_a_model_that_reads_none(cx: &mut TestAppContext) {
+        let (_thread, _event_stream, fake) = setup_thread_for_test(cx).await;
+        let image = LanguageModelImage {
+            source: "image".into(),
+        };
+        let request = || LanguageModelRequest {
+            messages: vec![LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![
+                    MessageContent::Text("look".to_string()),
+                    MessageContent::Image(image.clone()),
+                    MessageContent::ToolResult(LanguageModelToolResult {
+                        tool_use_id: LanguageModelToolUseId::from("tool".to_string()),
+                        tool_name: "screenshot".into(),
+                        is_error: false,
+                        content: vec![
+                            LanguageModelToolResultContent::Text("shot".into()),
+                            LanguageModelToolResultContent::Image(image.clone()),
+                        ],
+                        output: None,
+                    }),
+                ],
+                cache: false,
+                reasoning_details: None,
+            }],
+            ..Default::default()
+        };
+
+        let mut blind = request();
+        replace_images_model_cannot_read(&fake.model("blind"), &mut blind);
+        let content = &blind.messages[0].content;
+        assert_eq!(content[0], MessageContent::Text("look".to_string()));
+        assert_eq!(
+            content[1],
+            MessageContent::Text(IMAGE_PLACEHOLDER.to_string())
+        );
+        let MessageContent::ToolResult(result) = &content[2] else {
+            panic!("the tool result is kept");
+        };
+        assert_eq!(
+            result.content,
+            vec![
+                LanguageModelToolResultContent::Text("shot".into()),
+                LanguageModelToolResultContent::Text(IMAGE_PLACEHOLDER.into()),
+            ]
+        );
+
+        fake.update_model("seeing", |model| model.supports_images = true);
+        let mut seeing = request();
+        replace_images_model_cannot_read(&fake.model("seeing"), &mut seeing);
+        assert_eq!(seeing, request(), "a model that reads images gets them");
     }
 
     /// The tokens at which `thread` starts to compact: the smallest context
