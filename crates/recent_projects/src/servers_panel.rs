@@ -6,17 +6,22 @@
 //! [`ServerForm`](crate::server_form::ServerForm), where a server is described
 //! in a few fields instead of an `ssh` command line.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::Result;
 use db::kvp::KeyValueStore;
 use fs::Fs;
 use futures::StreamExt as _;
 use gpui::{
-    Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, ParentElement, Pixels, PromptLevel, Render, SharedString, Styled, Subscription,
-    Task, WeakEntity, Window, actions, px,
+    Action, AnyElement, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, ParentElement, Pixels, PromptLevel, Render, SharedString, Styled,
+    Subscription, Task, WeakEntity, Window, actions, px,
 };
+use project::{DirectoryItem, Project};
 use remote::{RemoteConnectionOptions, SshConnectionOptions};
 use settings::{
     RemoteProject, Settings as _, SettingsStore, SshConnection, update_settings_file,
@@ -25,16 +30,14 @@ use settings::{
 use ui::{IconButton, ListItem, PanelHeader, SectionLabel, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
-    MultiWorkspace, OpenOptions, Workspace,
+    MultiWorkspace, OpenOptions, OpenVisible, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
+    notifications::DetachAndPromptErr as _,
 };
 
 use crate::{
-    RemoteServerProjects, RemoteSettings, default_open_in_new_window, open_remote_project,
-    remote_servers::{ServerIndex, SshServerIndex},
-    server_form::ServerForm,
-    server_store,
-    ssh_config::parse_ssh_config_hosts,
+    RemoteSettings, default_open_in_new_window, open_remote_project, server_form::ServerForm,
+    server_store, ssh_config::parse_ssh_config_hosts,
 };
 
 actions!(
@@ -63,13 +66,41 @@ pub fn init(cx: &mut App) {
 
 pub struct ServersPanel {
     workspace: WeakEntity<Workspace>,
+    /// The project of the window. Kept here because the panel is asked
+    /// questions (does it start open?) while its workspace is being updated,
+    /// when the workspace cannot be read.
+    project: Entity<Project>,
     focus_handle: FocusHandle,
     position: DockPosition,
     /// The hosts named in the person's `~/.ssh/config`, kept up to date.
     config_hosts: Vec<String>,
+    /// The files of the server this window is on, when it is on one.
+    browser: Option<Browser>,
     _settings_changed: Subscription,
     _config_watch: Task<()>,
 }
+
+/// What is known of a folder of the server.
+enum Listing {
+    Loading,
+    /// Its entries, folders first, with their whole paths.
+    Loaded(Vec<DirectoryItem>),
+    Failed(SharedString),
+}
+
+/// The files of a server, read one folder at a time, when a folder is
+/// opened: a server's disk is never walked as a whole. It starts from two
+/// places, the user's home folder and the root.
+#[derive(Default)]
+struct Browser {
+    home: Option<PathBuf>,
+    expanded: HashSet<PathBuf>,
+    listings: HashMap<PathBuf, Listing>,
+}
+
+/// At most this many entries of one folder are drawn. A folder with more
+/// says how many are left out.
+const MAX_ENTRIES_SHOWN: usize = 400;
 
 impl ServersPanel {
     pub async fn load(
@@ -88,16 +119,312 @@ impl ServersPanel {
         };
         workspace.update_in(&mut cx, |workspace, _window, cx| {
             let fs = workspace.app_state().fs.clone();
+            let project = workspace.project().clone();
+            let on_a_server = matches!(
+                project.read(cx).remote_connection_options(cx),
+                Some(RemoteConnectionOptions::Ssh(_))
+            );
             let workspace = workspace.weak_handle();
-            cx.new(|cx| Self {
-                workspace,
-                focus_handle: cx.focus_handle(),
-                position,
-                config_hosts: Vec::new(),
-                _settings_changed: cx.observe_global::<SettingsStore>(|_, cx| cx.notify()),
-                _config_watch: Self::watch_ssh_config(fs, cx),
+            cx.new(|cx| {
+                let mut panel = Self {
+                    workspace,
+                    project: project.clone(),
+                    focus_handle: cx.focus_handle(),
+                    position,
+                    config_hosts: Vec::new(),
+                    browser: None,
+                    _settings_changed: cx.observe_global::<SettingsStore>(|_, cx| cx.notify()),
+                    _config_watch: Self::watch_ssh_config(fs, cx),
+                };
+                if on_a_server {
+                    panel.start_browsing(project, cx);
+                }
+                panel
             })
         })
+    }
+
+    /// Shows the files of the server: the home folder, opened, and the root.
+    fn start_browsing(&mut self, project: Entity<Project>, cx: &mut Context<Self>) {
+        self.browser = Some(Browser::default());
+        let home = project.read(cx).resolve_abs_path("~", cx);
+        cx.spawn(async move |this, cx| {
+            let home = home.await.and_then(|path| path.into_abs_path());
+            this.update(cx, |this, cx| {
+                if let Some(home) = home {
+                    let home = PathBuf::from(home);
+                    if let Some(browser) = &mut this.browser {
+                        browser.home = Some(home.clone());
+                        browser.expanded.insert(home.clone());
+                    }
+                    this.load_folder(home, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Reads one folder of the server.
+    fn load_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        let project = self.project.clone();
+        let Some(browser) = self.browser.as_mut() else {
+            return;
+        };
+        // Reading again keeps what is on screen until the new list is there.
+        browser
+            .listings
+            .entry(folder.clone())
+            .or_insert(Listing::Loading);
+        let listed = project.update(cx, |project, cx| {
+            project.list_directory(folder.to_string_lossy().into_owned(), cx)
+        });
+        cx.spawn(async move |this, cx| {
+            let listing = match listed.await {
+                Ok(mut entries) => {
+                    for entry in &mut entries {
+                        entry.path = folder.join(&entry.path);
+                    }
+                    entries.sort_by(|a, b| {
+                        b.is_dir.cmp(&a.is_dir).then_with(|| {
+                            let name = |entry: &DirectoryItem| {
+                                entry
+                                    .path
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().to_lowercase())
+                            };
+                            name(a).cmp(&name(b))
+                        })
+                    });
+                    Listing::Loaded(entries)
+                }
+                Err(error) => Listing::Failed(why_not_listed(&error).into()),
+            };
+            this.update(cx, |this, cx| {
+                if let Some(browser) = &mut this.browser {
+                    browser.listings.insert(folder, listing);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn toggle_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        let Some(browser) = &mut self.browser else {
+            return;
+        };
+        if !browser.expanded.remove(&folder) {
+            browser.expanded.insert(folder.clone());
+            self.load_folder(folder, cx);
+        }
+        cx.notify();
+    }
+
+    /// Reads again every folder that is open.
+    fn refresh_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(browser) = &self.browser else {
+            return;
+        };
+        let open: Vec<PathBuf> = browser.expanded.iter().cloned().collect();
+        for folder in open {
+            self.load_folder(folder, cx);
+        }
+    }
+
+    /// Opens a file of the server in the editor. It does not have to be in a
+    /// project folder.
+    fn open_remote_file(&mut self, file: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace
+                    .open_abs_path(
+                        file,
+                        OpenOptions {
+                            visible: Some(OpenVisible::None),
+                            ..OpenOptions::default()
+                        },
+                        window,
+                        cx,
+                    )
+                    .detach_and_prompt_err("Could not open the file", window, cx, |_, _, _| None);
+            });
+        });
+    }
+
+    /// Makes a folder of the server a project folder of this window: the
+    /// explorer, the search, source control and the AI then work in it. It is
+    /// also remembered under the server, to go back to it in one click.
+    fn open_as_project_folder(
+        &mut self,
+        folder: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let servers = Self::servers(cx);
+        if let Some(index) = self.connected_server(&servers, cx) {
+            let server = servers[index].clone();
+            let project = RemoteProject {
+                paths: vec![folder.to_string_lossy().into_owned()],
+            };
+            self.update_servers(cx, move |servers| {
+                if let Some(found) = servers
+                    .get_mut(index)
+                    .filter(|found| is_same(found, &server))
+                {
+                    found.projects.insert(project);
+                }
+            });
+        }
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace
+                    .open_paths(
+                        vec![folder],
+                        OpenOptions {
+                            visible: Some(OpenVisible::All),
+                            ..OpenOptions::default()
+                        },
+                        None,
+                        window,
+                        cx,
+                    )
+                    .detach();
+            });
+        });
+    }
+
+    /// The rows of the server's files: the home folder, then the root.
+    fn render_browser(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(browser) = &self.browser else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        if let Some(home) = &browser.home {
+            let label = format!("Home ({})", home.display());
+            rows.extend(self.render_tree(browser, home.clone(), Some(label), 1, cx));
+        }
+        let label = "/ (the whole server)".to_string();
+        rows.extend(self.render_tree(browser, PathBuf::from("/"), Some(label), 1, cx));
+        rows
+    }
+
+    /// A folder and, when it is open, everything under it.
+    fn render_tree(
+        &self,
+        browser: &Browser,
+        folder: PathBuf,
+        label: Option<String>,
+        depth: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let is_open = browser.expanded.contains(&folder);
+        let mut rows = vec![self.render_folder(&folder, label, depth, is_open, cx)];
+        if !is_open {
+            return rows;
+        }
+        match browser.listings.get(&folder) {
+            None | Some(Listing::Loading) => {
+                rows.push(note_row(&folder, "Reading…", depth + 1, Color::Muted));
+            }
+            Some(Listing::Failed(why)) => {
+                rows.push(note_row(&folder, why.clone(), depth + 1, Color::Error));
+            }
+            Some(Listing::Loaded(entries)) => {
+                if entries.is_empty() {
+                    rows.push(note_row(&folder, "Empty", depth + 1, Color::Muted));
+                }
+                let shown = &entries[..entries.len().min(MAX_ENTRIES_SHOWN)];
+                for entry in shown {
+                    if entry.is_dir {
+                        rows.extend(self.render_tree(
+                            browser,
+                            entry.path.clone(),
+                            None,
+                            depth + 1,
+                            cx,
+                        ));
+                    } else {
+                        rows.push(self.render_file(&entry.path, depth + 1, cx));
+                    }
+                }
+                if entries.len() > shown.len() {
+                    rows.push(note_row(
+                        &folder,
+                        format!("and {} more", entries.len() - shown.len()),
+                        depth + 1,
+                        Color::Muted,
+                    ));
+                }
+            }
+        }
+        rows
+    }
+
+    fn render_folder(
+        &self,
+        folder: &Path,
+        label: Option<String>,
+        depth: usize,
+        is_open: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = label.unwrap_or_else(|| entry_name(folder));
+        let to_toggle = folder.to_path_buf();
+        let to_open = folder.to_path_buf();
+        ListItem::new(row_id("folder", folder))
+            .indent_level(depth)
+            .toggle(Some(is_open))
+            .start_slot(
+                Icon::new(if is_open {
+                    IconName::FolderOpen
+                } else {
+                    IconName::Folder
+                })
+                .size(IconSize::Small)
+                .color(Color::Muted),
+            )
+            .child(Label::new(name).truncate())
+            .end_slot_on_hover(
+                IconButton::new(row_id("open-folder", folder), IconName::FileTree)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .tooltip(Tooltip::text(
+                        "Work in this folder: explorer, search, source control and the AI",
+                    ))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_as_project_folder(to_open.clone(), window, cx);
+                    })),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_folder(to_toggle.clone(), cx);
+            }))
+            .into_any_element()
+    }
+
+    fn render_file(&self, file: &Path, depth: usize, cx: &mut Context<Self>) -> AnyElement {
+        let to_open = file.to_path_buf();
+        ListItem::new(row_id("file", file))
+            .indent_level(depth)
+            .start_slot(
+                Icon::new(IconName::File)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(Label::new(entry_name(file)).truncate())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_remote_file(to_open.clone(), window, cx);
+            }))
+            .into_any_element()
     }
 
     /// Follows the person's SSH configuration file: the hosts it names are
@@ -156,8 +483,7 @@ impl ServersPanel {
 
     /// The server this window's project lives on, as an entry of `servers`.
     fn connected_server(&self, servers: &[SshConnection], cx: &App) -> Option<usize> {
-        let workspace = self.workspace.upgrade()?;
-        let project = workspace.read(cx).project().read(cx);
+        let project = self.project.read(cx);
         let RemoteConnectionOptions::Ssh(options) = project.remote_connection_options(cx)? else {
             return None;
         };
@@ -186,9 +512,14 @@ impl ServersPanel {
         });
     }
 
-    /// Connects to a server and shows the folders of the host.
+    /// Connects to a server and shows its files in this panel. On the
+    /// server this window is already on, there is nothing to do.
     fn connect(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(server) = Self::servers(cx).into_iter().nth(index) else {
+        let servers = Self::servers(cx);
+        if self.connected_server(&servers, cx) == Some(index) {
+            return;
+        }
+        let Some(server) = servers.into_iter().nth(index) else {
             return;
         };
         let Some(workspace) = self.workspace.upgrade() else {
@@ -337,9 +668,9 @@ impl ServersPanel {
         let address = server_store::address(server);
         let show_address = address != name;
         let tooltip: SharedString = if is_connected {
-            format!("{name}: this window is on it. Click to choose another folder.").into()
+            format!("This window is on {name}: its files are below.").into()
         } else {
-            format!("Connect to {address} and choose a folder").into()
+            format!("Connect to {address} and browse its files").into()
         };
 
         ListItem::new(("server", index))
@@ -453,39 +784,99 @@ impl ServersPanel {
     }
 }
 
+/// The last part of a path: what a row shows.
+fn entry_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+fn row_id(kind: &str, path: &Path) -> SharedString {
+    format!("server-{kind}:{}", path.display()).into()
+}
+
+/// A line under a folder that is not an entry: still reading, empty, or why
+/// it could not be read.
+fn note_row(
+    folder: &Path,
+    note: impl Into<SharedString>,
+    depth: usize,
+    color: Color,
+) -> AnyElement {
+    ListItem::new(row_id("note", folder))
+        .indent_level(depth)
+        .selectable(false)
+        .child(
+            Label::new(note)
+                .size(LabelSize::Small)
+                .color(color)
+                .truncate(),
+        )
+        .into_any_element()
+}
+
+/// Why a folder could not be read, in a few words.
+fn why_not_listed(error: &anyhow::Error) -> String {
+    let text = format!("{error:#}").to_lowercase();
+    if text.contains("permission denied") {
+        "Not allowed for your user".to_string()
+    } else if text.contains("no such file") {
+        "No longer there".to_string()
+    } else {
+        format!("Could not be read: {error:#}")
+    }
+}
+
 /// Whether two entries are the same server: the settings may have changed
 /// between a click and what it does.
 fn is_same(a: &SshConnection, b: &SshConnection) -> bool {
     a.host == b.host && a.username == b.username && a.port == b.port
 }
 
-/// Connects to `server`, entry `index` of the settings, with its saved
-/// password or passphrase if it has one, and shows the folders of the host.
+/// Connects to `server`, with its saved password or passphrase if it has
+/// one, and puts the window on it without asking for a folder: the Servers
+/// panel of that window shows the files of the server, and a folder becomes a
+/// project folder only when the person says so.
 pub(crate) fn connect_to_server(
     workspace: Entity<Workspace>,
-    index: usize,
+    _index: usize,
     server: SshConnection,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let create_new_window = default_open_in_new_window(cx);
+    let app_state = workspace.read(cx).app_state().clone();
+    let replace_window = if default_open_in_new_window(cx) {
+        None
+    } else {
+        window.window_handle().downcast::<MultiWorkspace>()
+    };
     let secret_name = server_store::secret_name_of(&server);
     let mut options = SshConnectionOptions::from(server);
     window
         .spawn(cx, async move |cx| {
             options.password = server_store::read_secret(&secret_name, cx).await;
-            cx.update(|window, cx| {
-                RemoteServerProjects::connect_and_pick_project(
-                    &workspace,
-                    create_new_window,
-                    ServerIndex::Ssh(SshServerIndex(index)),
-                    RemoteConnectionOptions::Ssh(options),
-                    false,
-                    window,
-                    cx,
-                );
-            })
-            .ok();
+            let result = open_remote_project(
+                RemoteConnectionOptions::Ssh(options),
+                Vec::new(),
+                app_state,
+                OpenOptions {
+                    requesting_window: replace_window,
+                    ..OpenOptions::default()
+                },
+                cx,
+            )
+            .await;
+            if let Err(error) = result {
+                log::error!("Failed to connect: {error:#}");
+                cx.prompt(
+                    PromptLevel::Critical,
+                    "Failed to connect",
+                    Some(&error.to_string()),
+                    &["OK"],
+                )
+                .await
+                .ok();
+            }
         })
         .detach();
 }
@@ -497,6 +888,15 @@ impl Render for ServersPanel {
 
         let header = PanelHeader::new("Servers")
             .id("servers-panel-header")
+            .when(self.browser.is_some(), |header| {
+                header.end_slot(
+                    IconButton::new("refresh-server-files", IconName::RotateCw)
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .tooltip(Tooltip::text("Read the open folders again"))
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_browser(cx))),
+                )
+            })
             .end_slot(
                 IconButton::new("new-server", IconName::Plus)
                     .icon_size(IconSize::Small)
@@ -519,6 +919,14 @@ impl Render for ServersPanel {
                         .into_any_element(),
                 );
             }
+            if connected == Some(index) {
+                rows.extend(self.render_browser(cx));
+            }
+        }
+        // On a server that is not in the list (opened from elsewhere), its
+        // files are shown all the same.
+        if connected.is_none() {
+            rows.extend(self.render_browser(cx));
         }
 
         let config_hosts = self.offered_config_hosts(&servers, cx);
@@ -633,5 +1041,11 @@ impl Panel for ServersPanel {
     fn activation_priority(&self) -> u32 {
         // After source control (3), before the outline (6).
         4
+    }
+
+    /// A window that was just put on a server, with no project folder yet,
+    /// opens on this panel: the files of the server are what there is to see.
+    fn starts_open(&self, _: &Window, cx: &App) -> bool {
+        self.browser.is_some() && self.project.read(cx).visible_worktrees(cx).next().is_none()
     }
 }

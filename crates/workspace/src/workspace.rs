@@ -12480,8 +12480,14 @@ async fn open_remote_project_inner(
         };
     }
 
-    if project_paths_to_open.is_empty() {
-        return Err(project_path_errors.pop().context("no paths given")?);
+    // No folder asked for is not an error: the window is put on the host
+    // with nothing open, and the Servers panel shows the files of the host
+    // (a folder becomes a project folder when the person picks one there).
+    // Folders that were asked for and could not be opened still are.
+    if project_paths_to_open.is_empty()
+        && let Some(error) = project_path_errors.pop()
+    {
+        return Err(error);
     }
 
     let workspace = window.update(cx, |multi_workspace, window, cx| {
