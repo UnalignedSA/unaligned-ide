@@ -229,6 +229,14 @@ jobs:
           name: licenses
           path: assets
 
+      # In two steps, the certificate between them: its key is not on the
+      # machine while the build runs the build scripts of some thousand
+      # third-party packages, and it is used within seconds of being unlocked.
+      - name: Build
+        run: |
+          set -o pipefail
+          script/unaligned/bundle-mac --build-only aarch64-apple-darwin 2>&1 | tee "$RUNNER_TEMP/build.log"
+
       # The product's own certificate (self-signed: macOS trusts it for nothing,
       # but its keychain recognises every build signed with it as the same
       # application, so the keys a user saved survive an update). The secret
@@ -254,6 +262,13 @@ jobs:
           security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P unaligned-ide -T /usr/bin/codesign
           rm "$RUNNER_TEMP/signing.p12"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          # Among the keychains macOS searches, in front of the ones already
+          # there: codesign builds the certificate's chain from that list.
+          searched=("$keychain")
+          while IFS= read -r line; do
+            searched+=("$line")
+          done < <(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')
+          security list-keychains -d user -s "${searched[@]}"
           identity="$(security find-identity -p codesigning "$keychain" | sed -n 's/^ *1) \([0-9A-F]\{40\}\) .*/\1/p')"
           if [[ -z "$identity" ]]; then
             echo "::error::The secret MACOS_SIGNING_CERTIFICATE holds no code-signing identity."
@@ -262,8 +277,22 @@ jobs:
           echo "MACOS_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
           echo "MACOS_SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
-      - name: Build and package
-        run: script/unaligned/bundle-mac aarch64-apple-darwin
+      - name: Package
+        run: |
+          set -o pipefail
+          script/unaligned/bundle-mac --package-only aarch64-apple-darwin 2>&1 | tee "$RUNNER_TEMP/package.log"
+
+      # The end of what the two steps above printed, as an annotation of the
+      # run: annotations can be read without an account, the logs cannot.
+      - name: Why it failed
+        if: ${{ failure() }}
+        run: |
+          for step in build package; do
+            log="$RUNNER_TEMP/$step.log"
+            [[ -s "$log" ]] || continue
+            text="$(tail -n 40 "$log" | sed -e $'s/\x1b\\[[0-9;]*m//g' -e 's/%/%25/g' | awk '{ printf "%s%%0A", $0 }')"
+            echo "::error title=End of the $step log::$text"
+          done
 
       - name: Upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -318,6 +347,14 @@ jobs:
           name: licenses
           path: assets
 
+      # In two steps, the certificate between them: its key is not on the
+      # machine while the build runs the build scripts of some thousand
+      # third-party packages, and it is used within seconds of being unlocked.
+      - name: Build
+        run: |
+          set -o pipefail
+          script/unaligned/bundle-mac --build-only x86_64-apple-darwin 2>&1 | tee "$RUNNER_TEMP/build.log"
+
       # The product's own certificate (self-signed: macOS trusts it for nothing,
       # but its keychain recognises every build signed with it as the same
       # application, so the keys a user saved survive an update). The secret
@@ -343,6 +380,13 @@ jobs:
           security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P unaligned-ide -T /usr/bin/codesign
           rm "$RUNNER_TEMP/signing.p12"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          # Among the keychains macOS searches, in front of the ones already
+          # there: codesign builds the certificate's chain from that list.
+          searched=("$keychain")
+          while IFS= read -r line; do
+            searched+=("$line")
+          done < <(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')
+          security list-keychains -d user -s "${searched[@]}"
           identity="$(security find-identity -p codesigning "$keychain" | sed -n 's/^ *1) \([0-9A-F]\{40\}\) .*/\1/p')"
           if [[ -z "$identity" ]]; then
             echo "::error::The secret MACOS_SIGNING_CERTIFICATE holds no code-signing identity."
@@ -351,8 +395,22 @@ jobs:
           echo "MACOS_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
           echo "MACOS_SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
-      - name: Build and package
-        run: script/unaligned/bundle-mac x86_64-apple-darwin
+      - name: Package
+        run: |
+          set -o pipefail
+          script/unaligned/bundle-mac --package-only x86_64-apple-darwin 2>&1 | tee "$RUNNER_TEMP/package.log"
+
+      # The end of what the two steps above printed, as an annotation of the
+      # run: annotations can be read without an account, the logs cannot.
+      - name: Why it failed
+        if: ${{ failure() }}
+        run: |
+          for step in build package; do
+            log="$RUNNER_TEMP/$step.log"
+            [[ -s "$log" ]] || continue
+            text="$(tail -n 40 "$log" | sed -e $'s/\x1b\\[[0-9;]*m//g' -e 's/%/%25/g' | awk '{ printf "%s%%0A", $0 }')"
+            echo "::error title=End of the $step log::$text"
+          done
 
       - name: Upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

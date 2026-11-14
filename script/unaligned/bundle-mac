@@ -37,6 +37,8 @@ Usage: ${0##*/} [options] [target]
   --runtime-shaders   Compile the Metal shaders when the application starts
                       instead of at build time: for a Mac that has the Command
                       Line Tools but not Xcode.
+  --build-only        Build and stop: no application, no signature, no disk
+                      image. --package-only does the rest afterwards.
   --package-only      Do not build: package the binaries already in the target
                       directory.
   -h, --help          This text.
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
             usage
             exit 0
             ;;
+        --build-only) mode="build-only" ;;
         --package-only) mode="package" ;;
         --runtime-shaders) runtime_shaders=true ;;
         aarch64-apple-darwin | x86_64-apple-darwin) target_triple="$1" ;;
@@ -166,7 +169,7 @@ trap 'exit 129' HUP
 
 # --- Build -------------------------------------------------------------------
 
-if [[ $mode == "build" ]]; then
+if [[ $mode != "package" ]]; then
     # IDE_BUNDLE is left unset on purpose: with it the application looks for a
     # `git` of its own inside the bundle, which this script does not ship. It
     # uses the system's git instead.
@@ -209,6 +212,11 @@ fi
 
 [[ -x "$build_dir/unaligned-ide" ]] || fail "$build_dir/unaligned-ide not found: build first (run without --package-only)"
 [[ -x "$build_dir/cli" ]] || fail "$build_dir/cli not found: build first (run without --package-only)"
+
+if [[ $mode == "build-only" ]]; then
+    echo "Built: $build_dir/unaligned-ide and $build_dir/cli. Package them with: ${0##*/} --package-only $target_triple"
+    exit 0
+fi
 
 # --- Application -------------------------------------------------------------
 
