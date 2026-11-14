@@ -7,7 +7,7 @@
 **The open-source code editor made for coding with AI.**<br>
 Fast, private, and connected to the model you choose.
 
-[![Version](https://img.shields.io/badge/version-0.1.1-E5322D?style=flat-square&labelColor=0D0C0B)](https://github.com/UnalignedSA/unaligned-ide/releases)
+[![Version](https://img.shields.io/badge/version-0.1.2-E5322D?style=flat-square&labelColor=0D0C0B)](https://github.com/UnalignedSA/unaligned-ide/releases)
 [![Licence](https://img.shields.io/badge/licence-GPL--3.0--or--later-E9E7E3?style=flat-square&labelColor=0D0C0B)](LICENSE-GPL)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20·%20macOS%20·%20Linux-E9E7E3?style=flat-square&labelColor=0D0C0B)](#download)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-E9E7E3?style=flat-square&labelColor=0D0C0B)](#build-from-source)
@@ -31,7 +31,7 @@ Unaligned IDE is a free code editor built around one idea: coding with AI should
 It is a fork of the [Zed](https://github.com/zed-industries/zed) editor. [Unaligned](https://unaligned.pw), a privacy-first, pay-as-you-go AI API, is the featured provider and never the only one.
 
 > [!NOTE]
-> **Pre-release (0.1.0).** The editor is developed and run on macOS. The Windows and Linux packages are new and have not been tried on many machines yet: see [Status](#status). "Unaligned IDE" is a working name.
+> **Pre-release (0.1.2).** The editor is developed and run on macOS. The Windows and Linux packages are new and have not been tried on many machines yet: see [Status](#status). "Unaligned IDE" is a working name.
 
 ## Features
 
@@ -89,6 +89,15 @@ Five built-in themes (Unaligned, Light, Dusk, Midnight, Contrast), plus One, Ayu
     <td align="center"><sub>Unaligned Midnight</sub></td>
   </tr>
 </table>
+
+### Work on a server
+
+<img src=".github/readme/servers.png" width="100%" alt="The Servers panel: a server's home folder and root listed on the left, one of its files open in the editor">
+
+- **A Servers panel**, one click from the activity bar: add a machine you reach over SSH in a short form (address, user, password or private key), then click it.
+- **Any private key**: found in `~/.ssh`, chosen in a file, pasted, or made on the spot. OpenSSH, PEM and PuTTY (`.ppk`) keys are read; a PuTTY key is converted.
+- **The whole server, one folder at a time**: browse from your home folder or from `/`, open any file, and make a folder your project when you want the search, source control and the AI inside it.
+- The files, the terminal and the AI work on the server. It must run Linux (x86_64 or ARM); nothing needs installing there by hand.
 
 ### Private by default
 
@@ -153,7 +162,8 @@ More connections can be added later from the chat's "…" menu, "Connections…"
 - The name "Zed" is still shown where it states a fact, such as the credit in About and the line of the Extensions page that names the registry.
 - GitHub Copilot and the ChatGPT sign-in are still told that the editor is Zed: those identities are registered by upstream with the two vendors.
 - The sign-ins of the subscriptions are upstream's code and were not tried one by one here.
-- Remote projects (SSH, WSL, containers) need a Linux host, x86_64 or ARM. Versions up to 0.1.1 cannot open them: their releases carry no server build, and they have no Servers panel.
+- Remote projects (SSH, WSL, containers) need a Linux host, x86_64 or ARM, and version 0.1.2 or later: earlier releases carry no server build and have no Servers panel. Connecting to a server was tried against test hosts only; WSL and containers were not tried.
+- The in-window menus of Windows and Linux (the mark, File, Edit…, "…") are new in 0.1.2 and were only seen in a build made for that on macOS.
 - A project's own settings, tasks and debug scenarios are read from `.unaligned/`. A `.zed/` folder is not read.
 - Nothing is signed for the operating system: no Windows certificate and no Apple notarisation yet. Updates are signed with the project's own key, which the application checks itself. On macOS the application carries the project's own (self-signed) certificate, only so that the keychain gives saved keys back after an update.
 

@@ -1,5 +1,7 @@
 # Packaging: what exists, the rules, and what was never executed
 
+> **Since this page was written (state on 2026-11-14).** The Build workflow ran on GitHub for the tag `v0.1.1` (run 43537924137): the Linux AppImage, the Windows installer and both macOS disk images were built there, the macOS ones signed with the product's certificate, the list of files signed, and the release drafted; 0.1.1 was published. The owner installed the Apple Silicon image from GitHub on a Mac and it started. So where a section below says that a script, the installer or the workflow was "never run", it has now run on GitHub's machines. What nobody has reported yet: the Windows installer and the AppImage used on real machines, and an update between two published versions. Version 0.1.2 adds the remote server (see "The remote server" near the end, and `REMOTE.md`), whose GitHub job has never run.
+
 State on 2026-11-13, after the names inherited from upstream were replaced (`script/unaligned/rename-upstream-names`: cargo package `ide`, binary `unaligned-ide`, `IDE_…` variables), upstream's own packaging files were deleted, and the packages became files a user opens directly: an installer for Windows, a disk image for macOS, an AppImage for Linux. No script writes a zip any more.
 
 | Piece | What it is |
