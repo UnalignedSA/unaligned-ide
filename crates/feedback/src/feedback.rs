@@ -17,12 +17,47 @@ actions!(
     ]
 );
 
-/// Where bug reports, feature requests and messages to the team go: the
-/// product's issue tracker, or the contact page of its website while there is
-/// no tracker. Never upstream's tracker or mailbox: a problem of this fork is
-/// not theirs.
-fn support_url() -> &'static str {
-    branding::issues_url().unwrap_or(branding::SUPPORT_URL)
+/// The form of the product's issue tracker for a new report, with what the
+/// application knows already filled in: its version and the system. Nothing
+/// is sent by opening it: the person reads the form, completes it and sends
+/// it, or not. `None` while there is no tracker.
+///
+/// `template` is a file of `.github/ISSUE_TEMPLATE`, whose `version` and
+/// `system` fields take the two values. Never upstream's tracker: a problem
+/// of this fork is not theirs.
+fn new_issue_url(template: &str, cx: &App) -> Option<String> {
+    let issues = branding::issues_url()?;
+    let version = format!(
+        "{} ({})",
+        release_channel::AppVersion::global(cx),
+        release_channel::ReleaseChannel::global(cx).dev_name()
+    );
+    let system = format!(
+        "{} {} ({})",
+        telemetry::os_name(cx),
+        telemetry::os_version(),
+        std::env::consts::ARCH
+    );
+    issue_form_url(issues, template, &version, &system)
+}
+
+fn issue_form_url(issues: &str, template: &str, version: &str, system: &str) -> Option<String> {
+    let url = url::Url::parse_with_params(
+        &format!("{}/new", issues.trim_end_matches('/')),
+        &[
+            ("template", template),
+            ("version", version),
+            ("system", system),
+        ],
+    )
+    .ok()?;
+    Some(url.into())
+}
+
+/// Where a report goes: the form of the tracker, or the contact page of the
+/// product's website while there is no tracker.
+fn report_url(template: &str, cx: &App) -> String {
+    new_issue_url(template, cx).unwrap_or_else(|| branding::SUPPORT_URL.to_string())
 }
 
 /// The product's source repository, or its website while the source is not
@@ -68,13 +103,15 @@ pub fn init(cx: &mut App) {
                 ));
             })
             .register_action(|_, _: &RequestFeature, _, cx| {
-                cx.open_url(support_url());
+                cx.open_url(&report_url("feature_request.yml", cx));
             })
             .register_action(|_, _: &FileBugReport, _, cx| {
-                cx.open_url(support_url());
+                cx.open_url(&report_url("bug_report.yml", cx));
             })
+            // The contact page, not the tracker: for what is private, and for
+            // people without an account on the tracker.
             .register_action(|_, _: &ContactSupport, _, cx| {
-                cx.open_url(support_url());
+                cx.open_url(branding::SUPPORT_URL);
             })
             .register_action(|_, _: &OpenSourceRepository, _, cx| {
                 cx.open_url(repository_url());
@@ -110,4 +147,29 @@ fn format_installed_extensions_for_clipboard(cx: &mut App) -> String {
         lines.len(),
         lines.join("\n")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_the_report_form_carries_the_version_and_the_system() {
+        let url = issue_form_url(
+            "https://github.com/example/ide/issues/",
+            "bug_report.yml",
+            "0.1.2 (stable)",
+            "macOS 15.1 (aarch64)",
+        )
+        .unwrap();
+        assert_eq!(
+            url,
+            "https://github.com/example/ide/issues/new?template=bug_report.yml&version=0.1.2+%28stable%29&system=macOS+15.1+%28aarch64%29"
+        );
+        // A tracker address that is not one gives no form.
+        assert_eq!(
+            issue_form_url("not an address", "bug_report.yml", "1", "2"),
+            None
+        );
+    }
 }

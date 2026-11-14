@@ -1,0 +1,45 @@
+# The form "Help → Report a Bug…" opens. The application fills `version` and
+# `system` through the address (crates/feedback): keep those two ids.
+name: Bug report
+description: Something does not work as it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time. This page is public: do not paste keys, passwords, server addresses or private code.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead. A screenshot helps.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to see it again
+      placeholder: |
+        1. Open …
+        2. Click …
+        3. …
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Filled in when you come from the application. Otherwise, it is in "About Unaligned IDE".
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Filled in when you come from the application. For example "Windows 11", "macOS 15 on Apple Silicon", "Ubuntu 24.04".
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log (optional)
+      description: In the application, open the command palette and type "open log". Read what you paste first, and remove anything private.
+      render: text

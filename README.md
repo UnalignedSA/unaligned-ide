@@ -16,7 +16,7 @@ Fast, private, and connected to the model you choose.
 [![Download for macOS](https://img.shields.io/badge/Download-macOS-E5322D?style=for-the-badge&labelColor=0D0C0B)](#download)
 [![Download for Linux](https://img.shields.io/badge/Download-Linux-E5322D?style=for-the-badge&labelColor=0D0C0B)](https://github.com/UnalignedSA/unaligned-ide/releases/latest/download/unaligned-ide-linux-x86_64.AppImage)
 
-[Features](#features) · [Download](#download) · [Connect a model](#connect-a-model) · [Status](#status) · [Build from source](#build-from-source) · [Privacy](#privacy)
+[Features](#features) · [Download](#download) · [Connect a model](#connect-a-model) · [User guide](assets/manual.md) · [Status](#status) · [Build from source](#build-from-source) · [Privacy](#privacy)
 
 <br>
 
@@ -129,6 +129,12 @@ Version 0.1.0 has no update check: install a newer version by hand once. How it 
 
 More connections can be added later from the chat's "…" menu, "Connections…".
 
+## Help and bug reports
+
+- **The user guide** is in the application (Help → User Guide) and [in this repository](assets/manual.md): first start, the window, the chat, servers over SSH, shortcuts, and what to do when something goes wrong.
+- **A bug**: Help → Report a Bug… opens [a form here](https://github.com/UnalignedSA/unaligned-ide/issues/new/choose) with your version and your system filled in. The application sends nothing by itself: no telemetry and no crash reports, so a problem nobody writes about is a problem nobody knows.
+- **Something private**, a security problem included: the [contact page](https://unaligned.pw/contact) of Unaligned. See [`SECURITY.md`](SECURITY.md).
+
 ## Status
 
 | Platform | State | Details |
@@ -143,7 +149,6 @@ More connections can be added later from the chat's "…" menu, "Connections…"
 
 <br>
 
-- There is no user manual yet. Help → Documentation opens the documentation of the Unaligned API.
 - Language extensions come from Zed's extension registry and are built against its extension API.
 - The name "Zed" is still shown where it states a fact, such as the credit in About and the line of the Extensions page that names the registry.
 - GitHub Copilot and the ChatGPT sign-in are still told that the editor is Zed: those identities are registered by upstream with the two vendors.

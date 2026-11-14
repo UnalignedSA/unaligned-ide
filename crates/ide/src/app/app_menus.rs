@@ -94,9 +94,11 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
     // names them.
     let mut help_items = vec![
         MenuItem::action("Show Welcome", onboarding::ShowWelcome),
+        // The guide of the editor itself, shipped inside the application.
+        MenuItem::action("User Guide", super::OpenUserGuide),
         MenuItem::separator(),
         MenuItem::action(
-            "Documentation",
+            format!("{} API Documentation", branding::PRODUCT_SHORT_NAME),
             super::OpenBrowser {
                 url: branding::DOCS_URL.into(),
             },
@@ -107,15 +109,14 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 url: branding::WEBSITE_URL.into(),
             },
         ),
+        MenuItem::separator(),
+        // A form with the version and the system filled in; while the brand
+        // file names no tracker, the contact page.
+        MenuItem::action("Report a Bug…", app_actions::feedback::FileBugReport),
+        MenuItem::action("Request a Feature…", app_actions::feedback::RequestFeature),
+        MenuItem::action("Contact Support", app_actions::feedback::ContactSupport),
+        MenuItem::separator(),
     ];
-    if let Some(issues_url) = branding::issues_url() {
-        help_items.push(MenuItem::action(
-            "Report an Issue",
-            super::OpenBrowser {
-                url: issues_url.into(),
-            },
-        ));
-    }
     if branding::releases_repository().is_some() {
         help_items.push(MenuItem::action(
             "View Release Notes",

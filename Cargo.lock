@@ -5654,7 +5654,9 @@ dependencies = [
  "client",
  "extension_host",
  "gpui",
+ "release_channel",
  "system_specs",
+ "url",
  "util",
  "workspace",
 ]

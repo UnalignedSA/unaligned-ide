@@ -1,0 +1,28 @@
+# The form "Help → Request a Feature…" opens. The application fills `version`
+# and `system` through the address (crates/feedback): keep those two ids.
+name: Feature request
+description: Something the editor should do, or do better
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like?
+      description: Say what you are trying to do, not only the button you imagine. An example helps.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: How do you do it today?
+      description: In this editor or in another one.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Filled in when you come from the application.
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Filled in when you come from the application.

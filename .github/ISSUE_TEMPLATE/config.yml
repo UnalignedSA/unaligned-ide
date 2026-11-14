@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Something private, or no GitHub account
+    url: https://unaligned.pw/contact
+    about: The contact page of Unaligned. Use it for anything that should not be public, a security problem included.
+  - name: User guide
+    url: https://github.com/UnalignedSA/unaligned-ide/blob/main/assets/manual.md
+    about: How to start, connect a model, use the chat and work on a server. Also in the application, Help → User Guide.

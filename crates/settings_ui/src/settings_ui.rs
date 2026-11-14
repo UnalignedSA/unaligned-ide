@@ -57,8 +57,8 @@ use workspace::{
 
 use crate::components::{
     EnumVariantDropdown, NumberField, NumberFieldMode, NumberFieldType, SettingsInputField,
-    SettingsSectionHeader, font_picker, icon_theme_display_name,
-    icon_theme_picker, render_ollama_model_picker, text_field_a11y_state, theme_picker,
+    SettingsSectionHeader, font_picker, icon_theme_display_name, icon_theme_picker,
+    render_ollama_model_picker, text_field_a11y_state, theme_picker,
 };
 use crate::pages::{
     CustomAgentForm, LlmProviderForm, McpServerForm, render_input_audio_device_dropdown,

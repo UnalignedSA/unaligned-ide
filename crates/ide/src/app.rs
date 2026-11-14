@@ -125,6 +125,8 @@ impl gpui::Global for CrashHandler {}
 actions!(
     app,
     [
+        /// Opens the user guide that ships inside the application.
+        OpenUserGuide,
         /// Opens the element inspector for debugging UI.
         DebugElements,
         /// Hides the application window.
@@ -241,6 +243,9 @@ pub fn init(cx: &mut App) {
 
     cx.on_action(|_: &app_actions::OpenLicenses, cx| {
         open_licenses(cx);
+    })
+    .on_action(|_: &OpenUserGuide, cx| {
+        open_user_guide(cx);
     })
     .on_action(|&app_actions::OpenKeymapFile, cx| {
         with_active_or_new_workspace(cx, |_, window, cx| {
@@ -479,6 +484,109 @@ fn open_licenses(cx: &mut App) {
         }),
         None => with_active_or_new_workspace(cx, open),
     }
+}
+
+/// The user guide: `assets/manual.md`, shipped inside the application so
+/// that it describes the running version and opens without a network.
+fn user_guide_text() -> Option<String> {
+    use gpui::AssetSource as _;
+
+    Assets
+        .load("manual.md")
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes.into_owned()).ok())
+        .filter(|text| !text.trim().is_empty())
+}
+
+const USER_GUIDE_TITLE: &str = "User Guide";
+
+/// Opens the user guide as a rendered page, in the front window or in a new
+/// one.
+fn open_user_guide(cx: &mut App) {
+    let Some(text) = user_guide_text() else {
+        log::error!("the user guide is missing from this build's assets");
+        return;
+    };
+    let workspace_window = cx
+        .active_window()
+        .and_then(|window| window.downcast::<MultiWorkspace>())
+        .or_else(|| {
+            cx.window_stack()
+                .unwrap_or_else(|| cx.windows())
+                .into_iter()
+                .find_map(|window| window.downcast::<MultiWorkspace>())
+        });
+    let open =
+        move |workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
+            open_bundled_page(workspace, text, USER_GUIDE_TITLE, window, cx);
+        };
+    match workspace_window {
+        Some(multi_workspace) => cx.defer(move |cx| {
+            multi_workspace
+                .update(cx, |multi_workspace, window, cx| {
+                    window.activate_window();
+                    let workspace = multi_workspace.workspace().clone();
+                    workspace.update(cx, |workspace, cx| open(workspace, window, cx));
+                })
+                .log_err();
+        }),
+        None => with_active_or_new_workspace(cx, open),
+    }
+}
+
+/// Shows Markdown that ships with the application as a rendered page, in a
+/// tab of the active pane. Opened again, the page that is there comes to the
+/// front.
+fn open_bundled_page(
+    workspace: &mut Workspace,
+    text: String,
+    title: &'static str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    use markdown_preview::markdown_preview_view::MarkdownPreviewView;
+    use workspace::item::Item as _;
+
+    let existing = workspace
+        .items_of_type::<MarkdownPreviewView>(cx)
+        .find(|page| page.read(cx).tab_content_text(0, cx).contains(title));
+    if let Some(existing) = existing {
+        workspace.activate_item(&existing, true, true, window, cx);
+        return;
+    }
+
+    let language = workspace
+        .app_state()
+        .languages
+        .language_for_name("Markdown");
+    cx.spawn_in(window, async move |workspace, cx| {
+        let language = language.await.log_err();
+        let (project, buffer) = workspace.update(cx, |workspace, cx| {
+            let project = workspace.project().clone();
+            let buffer =
+                project.update(cx, |project, cx| project.create_buffer(language, false, cx));
+            (project, buffer)
+        })?;
+        let buffer = buffer.await?;
+        buffer.update(cx, |buffer, cx| {
+            buffer.set_text(text, cx);
+            buffer.set_capability(Capability::ReadOnly, cx);
+        });
+        let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title(title.into()));
+        workspace.update_in(cx, |workspace, window, cx| {
+            // The page is drawn from this editor, which is never shown itself.
+            let source = cx.new(|cx| {
+                let mut editor = Editor::for_multibuffer(buffer, Some(project), window, cx);
+                editor.set_read_only(true);
+                editor.set_should_serialize(false, cx);
+                editor
+            });
+            let page = MarkdownPreviewView::create_markdown_view(workspace, source, window, cx);
+            workspace.add_item_to_active_pane(Box::new(page), None, true, window, cx);
+        })
+    })
+    .detach_and_log_err(cx);
 }
 
 fn bind_on_window_closed(cx: &mut App) -> Option<gpui::Subscription> {
@@ -6893,6 +7001,7 @@ mod tests {
                 "remote_debug",
                 "repl",
                 "search",
+                "servers_panel",
                 "settings_editor",
                 "settings_profile_selector",
                 "skill_creator",

@@ -25,3 +25,5 @@ util.workspace = true
 workspace.workspace = true
 app_actions.workspace = true
 client.workspace = true
+release_channel.workspace = true
+url.workspace = true
