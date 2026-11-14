@@ -4091,7 +4091,7 @@ fn search_and_files_page() -> SettingsPage {
 }
 
 fn window_and_layout_page() -> SettingsPage {
-    fn status_bar_section() -> [SettingsPageItem; 11] {
+    fn status_bar_section() -> [SettingsPageItem; 12] {
         [
             SettingsPageItem::SectionHeader("Status Bar"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -4177,6 +4177,25 @@ fn window_and_layout_page() -> SettingsPage {
                             .status_bar
                             .get_or_insert_default()
                             .cursor_position_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Zoom Buttons",
+                description: "Show the zoom buttons in the status bar: zoom out, the zoom of the code in percent, zoom in.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("status_bar.zoom_buttons"),
+                    pick: |settings_content| {
+                        settings_content.status_bar.as_ref()?.zoom_buttons.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .zoom_buttons = value;
                     },
                 }),
                 metadata: None,

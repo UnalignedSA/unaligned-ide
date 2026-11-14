@@ -14,6 +14,7 @@ pub mod remote_debug;
 pub mod visual_tests;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_only_instance;
+mod zoom_control;
 
 use agent_settings::{UserAgentsMdState, init_user_agents_md};
 use agent_ui::AgentDiffToolbar;
@@ -586,6 +587,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
     init_cursor_hide_mode(cx);
     init_app_appearance(cx);
     init_reduce_motion(cx);
+    zoom_control::init(app_state.fs.clone(), cx);
     init_global_config_error_notifications(cx);
     hide_unavailable_commands(cx);
 
@@ -794,6 +796,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
 
         let cursor_position =
             cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
+        let zoom_control = cx.new(|cx| zoom_control::ZoomControl::new(app_state.fs.clone(), cx));
         let line_ending_indicator =
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
         let git_blame_status = cx.new(|_| git_ui::GitBlameStatus::default());
@@ -816,6 +819,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_right_item(ai_status, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
             status_bar.add_right_item(cursor_position, window, cx);
+            // The zoom buttons are always there too (a setting hides them).
+            status_bar.add_right_item(zoom_control, window, cx);
             // Then what only shows when it has something to say. On screen,
             // towards the middle: line ending and encoding (when not LF and
             // UTF-8), toolchain, language servers, edit prediction (while a
@@ -1433,7 +1438,9 @@ fn register_actions(
                         settings.theme.buffer_font_size = None;
                     });
                 } else {
-                    theme_settings::reset_buffer_font_size(cx);
+                    // The zoom is kept in the settings (`zoom_control`), so
+                    // resetting it has to forget it there too.
+                    zoom_control::reset(fs.clone(), cx);
                 }
             }
         })
@@ -1449,7 +1456,7 @@ fn register_actions(
                     });
                 } else {
                     theme_settings::reset_ui_font_size(cx);
-                    theme_settings::reset_buffer_font_size(cx);
+                    zoom_control::reset(fs.clone(), cx);
                     theme_settings::reset_agent_ui_font_size(cx);
                     theme_settings::reset_agent_buffer_font_size(cx);
                 }

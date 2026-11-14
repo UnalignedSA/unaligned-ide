@@ -686,6 +686,13 @@ pub fn adjust_buffer_font_size(cx: &mut App, f: impl FnOnce(Pixels) -> Pixels) {
     cx.refresh_windows();
 }
 
+/// Whether the buffer font size is adjusted at the moment, that is, whether
+/// [`adjust_buffer_font_size`] set a size that [`reset_buffer_font_size`] or a
+/// change of the setting has not dropped yet.
+pub fn buffer_font_size_is_adjusted(cx: &App) -> bool {
+    cx.has_global::<BufferFontSize>()
+}
+
 /// Resets the buffer font size to the default value.
 pub fn reset_buffer_font_size(cx: &mut App) {
     if cx.has_global::<BufferFontSize>() {
