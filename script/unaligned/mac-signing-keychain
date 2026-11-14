@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+#
+# For the macOS jobs of .github/workflows/build.yml: puts the product's signing
+# certificate in a keychain made for the run, so that bundle-mac can sign with
+# it. The certificate and its key come from the variable
+# MACOS_SIGNING_CERTIFICATE (the repository secret of that name: a .p12 file in
+# base64). What the certificate is for: docs/unaligned/PACKAGING.md, "The
+# product's certificate".
+#
+#   mac-signing-keychain trial     Signs a throwaway program, checks the
+#                                  signature names the brand file's certificate,
+#                                  and removes the keychain again. Run first in
+#                                  the job: a certificate that cannot sign is
+#                                  known in seconds, not after the build.
+#   mac-signing-keychain install   Leaves the keychain in place and names it to
+#                                  the following steps (MACOS_SIGNING_IDENTITY
+#                                  and MACOS_SIGNING_KEYCHAIN in GITHUB_ENV).
+#                                  Run after the build: the key is not on the
+#                                  machine while third-party build scripts run.
+#
+# Without the variable it warns and does nothing: bundle-mac then signs ad hoc.
+# Not for a developer's own Mac: it changes the list of keychains macOS searches.
+
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+fail() {
+    echo "::error title=Signing certificate::$*"
+    exit 1
+}
+
+command="${1:-}"
+case $command in
+    trial | install) ;;
+    *)
+        echo "Usage: ${0##*/} trial | install" >&2
+        exit 1
+        ;;
+esac
+[[ -n "${RUNNER_TEMP:-}" && -d "$RUNNER_TEMP" ]] || fail "RUNNER_TEMP is not a folder: this script is for a GitHub Actions job"
+
+if [[ -z "${MACOS_SIGNING_CERTIFICATE:-}" ]]; then
+    echo "::warning::The secret MACOS_SIGNING_CERTIFICATE is not set: this build is signed ad hoc, so a user who updates to it has to enter saved keys again."
+    exit 0
+fi
+
+expected="$(sed -n 's/^MACOS_SIGNING_CERTIFICATE_SHA1="\(.*\)"$/\1/p' crates/branding/brand.env)"
+[[ -n "$expected" ]] || fail "MACOS_SIGNING_CERTIFICATE_SHA1 is empty or missing in crates/branding/brand.env"
+
+keychain="$RUNNER_TEMP/signing-$command.keychain-db"
+p12="$RUNNER_TEMP/signing.p12"
+program="$RUNNER_TEMP/signing-trial"
+trap 'rm -f "$p12" "$program"' EXIT
+
+password="$(openssl rand -hex 24)"
+printf '%s' "$MACOS_SIGNING_CERTIFICATE" | base64 --decode >"$p12" || fail "the secret MACOS_SIGNING_CERTIFICATE is not base64"
+security create-keychain -p "$password" "$keychain"
+# No argument: the keychain does not lock itself after a while.
+security set-keychain-settings "$keychain"
+security unlock-keychain -p "$password" "$keychain"
+# The file's password is not a secret: the file itself is.
+security import "$p12" -k "$keychain" -P unaligned-ide -T /usr/bin/codesign >/dev/null ||
+    fail "the secret MACOS_SIGNING_CERTIFICATE is not a .p12 file with the expected password"
+rm -f "$p12"
+# Only Apple's own tools may use the key, and they need not ask.
+security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+
+# In front of the keychains macOS searches. codesign finds the certificate in
+# the keychain it is given, but looks for the certificate's key in this list:
+# without the line it fails with "The specified item could not be found in the
+# keychain" (seen on macOS 15, run of 2026-11-13).
+searched=("$keychain")
+while IFS= read -r line; do
+    if [[ -n "$line" && "$line" != "$keychain" ]]; then
+        searched+=("$line")
+    fi
+done < <(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')
+security list-keychains -d user -s "${searched[@]}"
+
+identity="$(security find-identity -p codesigning "$keychain" | sed -n 's/^ *1) \([0-9A-F]\{40\}\) .*/\1/p')"
+[[ -n "$identity" ]] || fail "the secret MACOS_SIGNING_CERTIFICATE holds no code-signing identity"
+if [[ "$(tr 'A-F' 'a-f' <<<"$identity")" != "$(tr 'A-F' 'a-f' <<<"$expected")" ]]; then
+    fail "the certificate of the secret MACOS_SIGNING_CERTIFICATE ($identity) is not the one crates/branding/brand.env names ($expected)"
+fi
+
+if [[ $command == "install" ]]; then
+    [[ -n "${GITHUB_ENV:-}" ]] || fail "GITHUB_ENV is not set"
+    echo "MACOS_SIGNING_IDENTITY=$identity" >>"$GITHUB_ENV"
+    echo "MACOS_SIGNING_KEYCHAIN=$keychain" >>"$GITHUB_ENV"
+    echo "The certificate $identity is ready in $keychain."
+    exit 0
+fi
+
+# The trial: the same codesign call as bundle-mac's, on a copy of a small program.
+cp /usr/bin/true "$program"
+status=0
+output="$(codesign --force --timestamp=none --sign "$identity" --keychain "$keychain" "$program" 2>&1)" || status=$?
+if [[ $status -eq 0 ]]; then
+    requirement="$(codesign -d -r- "$program" 2>&1 | sed -n 's/^designated => //p')"
+    if [[ "$requirement" != *"H\"$(tr 'A-F' 'a-f' <<<"$expected")\""* ]]; then
+        status=1
+        output="the signature does not name the certificate: $requirement"
+    fi
+fi
+# Deleting the keychain also takes it out of the list macOS searches.
+security delete-keychain "$keychain"
+if [[ $status -ne 0 ]]; then
+    fail "codesign could not sign with the certificate: ${output//$'\n'/%0A}"
+fi
+echo "Trial passed: signed as $requirement"
