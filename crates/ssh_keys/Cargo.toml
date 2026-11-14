@@ -23,6 +23,9 @@ cbc.workspace = true
 ctr.workspace = true
 hmac.workspace = true
 rand.workspace = true
+# Already linked by the application (the update signature): it derives the
+# public half of a key made by `generate`.
+ring.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 zeroize.workspace = true

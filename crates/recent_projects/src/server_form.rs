@@ -33,9 +33,15 @@ const MAX_KEY_FILE_BYTES: u64 = 64 * 1024;
 /// At most this many keys of `~/.ssh` are offered.
 const MAX_FOUND_KEYS: usize = 12;
 
+/// What ends the public line of a key made here: on the server, it tells
+/// which program the key in `authorized_keys` belongs to.
+const NEW_KEY_COMMENT: &str = branding::PRODUCT_NAME;
+
 const PASSWORD_HINT: &str =
     "Optional. Kept in your system's keychain. Left empty, it is asked at each connection.";
 const PASSPHRASE_HINT: &str = "Only if the key has one. Kept in your system's keychain.";
+const NEW_PASSPHRASE_HINT: &str =
+    "Optional. Protects the new key's file; kept in your system's keychain so you are not asked.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SignIn {
@@ -65,6 +71,12 @@ enum KeyChoice {
         info: KeyInfo,
         source: SharedString,
     },
+    /// A key made in the form. It exists as its seed until the server is
+    /// saved; its public half is shown at once, to be put on the server.
+    Created {
+        seed: ssh_keys::KeySeed,
+        public_key: SharedString,
+    },
 }
 
 /// What saving has to do about the key.
@@ -81,6 +93,20 @@ enum KeyPlan {
         path: PathBuf,
         name_hint: String,
     },
+    /// Write the key of this seed as a file of the application's own.
+    Create {
+        seed: ssh_keys::KeySeed,
+        name_hint: String,
+    },
+}
+
+/// What the fields say, read and checked.
+struct Fields {
+    address: TypedAddress,
+    name: Option<String>,
+    jump_host: Option<String>,
+    /// `None`: the forwards of the entry are left as they are.
+    port_forwards: Option<Vec<settings::SshPortForwardOption>>,
 }
 
 pub(crate) struct ServerForm {
@@ -92,6 +118,14 @@ pub(crate) struct ServerForm {
     port: Entity<InputField>,
     user: Entity<InputField>,
     secret: Entity<InputField>,
+    jump_host: Entity<InputField>,
+    port_forwards: Entity<InputField>,
+    /// The jump host and the port forwards are shown.
+    more_options: bool,
+    /// The entry's port forwards can be written in the field. When not (one
+    /// was written by hand in a form the field does not have), they are kept
+    /// as they are and the field is not shown.
+    port_forwards_editable: bool,
     sign_in: SignIn,
     key: KeyChoice,
     found_keys: Vec<FoundKey>,
@@ -170,8 +204,25 @@ impl ServerForm {
                 .masked(true)
         });
 
+        let jump_host = field(
+            "Jump host",
+            "user@bastion.example.org (optional)",
+            6,
+            window,
+            cx,
+        );
+        let port_forwards = field(
+            "Port forwards",
+            "8080, 5433:db.internal:5432 (optional)",
+            7,
+            window,
+            cx,
+        );
+
         let mut sign_in = SignIn::Password;
         let mut key = KeyChoice::None;
+        let mut more_options = false;
+        let mut port_forwards_editable = true;
         if let Some((_, server)) = &editing {
             let fill = |field: &Entity<InputField>,
                         text: &str,
@@ -198,6 +249,20 @@ impl ServerForm {
             if let Some(path) = server_store::identity_file(&server.args) {
                 sign_in = SignIn::Key;
                 key = KeyChoice::Kept(PathBuf::from(path));
+            }
+            if let Some(jump) = server_store::jump_host(&server.args) {
+                fill(&jump_host, jump, window, cx);
+                more_options = true;
+            }
+            let forwards = server.port_forwards.clone().unwrap_or_default();
+            match server_store::port_forwards_text(&forwards) {
+                Some(text) => {
+                    if !text.is_empty() {
+                        fill(&port_forwards, &text, window, cx);
+                        more_options = true;
+                    }
+                }
+                None => port_forwards_editable = false,
             }
         }
 
@@ -235,6 +300,10 @@ impl ServerForm {
             port,
             user,
             secret,
+            jump_host,
+            port_forwards,
+            more_options,
+            port_forwards_editable,
             sign_in,
             key,
             found_keys: Vec::new(),
@@ -325,6 +394,28 @@ impl ServerForm {
         }
     }
 
+    /// Makes a new key. Only its seed exists until the server is saved; the
+    /// public half is shown now, because the server needs it before the key
+    /// can sign in.
+    fn create_key(&mut self, cx: &mut Context<Self>) {
+        let created = ssh_keys::KeySeed::new().and_then(|seed| {
+            let key = ssh_keys::generate(&seed, NEW_KEY_COMMENT, None)?;
+            Ok((seed, key.public_key.unwrap_or_default()))
+        });
+        match created {
+            Ok((seed, public_key)) => {
+                self.key = KeyChoice::Created {
+                    seed,
+                    public_key: public_key.into(),
+                };
+                self.key_note = None;
+                self.error = None;
+            }
+            Err(error) => self.key_note = Some((error.to_string().into(), true)),
+        }
+        cx.notify();
+    }
+
     fn use_key_text(
         &mut self,
         text: Zeroizing<String>,
@@ -345,7 +436,7 @@ impl ServerForm {
     }
 
     /// Reads the fields. An `Err` is a sentence for the person.
-    fn read_fields(&self, cx: &App) -> Result<(TypedAddress, Option<String>), SharedString> {
+    fn read_fields(&self, cx: &App) -> Result<Fields, SharedString> {
         let mut typed = server_store::parse_address(&self.address.read(cx).text(cx))?;
         let port = self.port.read(cx).text(cx);
         if !port.trim().is_empty() {
@@ -357,7 +448,20 @@ impl ServerForm {
         }
         let name = self.name.read(cx).text(cx);
         let name = Some(name.trim().to_string()).filter(|name| !name.is_empty());
-        Ok((typed, name))
+        let jump_host = server_store::parse_jump_host(&self.jump_host.read(cx).text(cx))?;
+        let port_forwards = if self.port_forwards_editable {
+            Some(server_store::parse_port_forwards(
+                &self.port_forwards.read(cx).text(cx),
+            )?)
+        } else {
+            None
+        };
+        Ok(Fields {
+            address: typed,
+            name,
+            jump_host,
+            port_forwards,
+        })
     }
 
     fn key_plan(&self, name_hint: &str) -> Result<KeyPlan, SharedString> {
@@ -388,6 +492,10 @@ impl ServerForm {
                 text: text.clone(),
                 name_hint,
             }),
+            KeyChoice::Created { seed, .. } => Ok(KeyPlan::Create {
+                seed: seed.clone(),
+                name_hint,
+            }),
         }
     }
 
@@ -398,10 +506,15 @@ impl ServerForm {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let (typed, name) = match self.read_fields(cx) {
+        let fields = match self.read_fields(cx) {
             Ok(fields) => fields,
-            Err(message) => return self.fail(message, cx),
+            Err(message) => {
+                // A problem in a field that is folded away would not be seen.
+                self.more_options = true;
+                return self.fail(message, cx);
+            }
         };
+        let (typed, name) = (fields.address, fields.name);
         let plan = match self.key_plan(name.as_deref().unwrap_or(&typed.host)) {
             Ok(plan) => plan,
             Err(message) => return self.fail(message, cx),
@@ -416,6 +529,10 @@ impl ServerForm {
         server.username = typed.username;
         server.port = typed.port;
         server.nickname = name;
+        server.args = server_store::with_jump_host(&server.args, fields.jump_host.as_deref());
+        if let Some(port_forwards) = fields.port_forwards {
+            server.port_forwards = Some(port_forwards).filter(|forwards| !forwards.is_empty());
+        }
 
         let secret = Zeroizing::new(self.secret.read(cx).text(cx));
         let forget_secret = self.forget_secret;
@@ -469,9 +586,10 @@ impl ServerForm {
     }
 
     fn render_secret(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (label, hint) = match self.sign_in {
-            SignIn::Password => ("Password", PASSWORD_HINT),
-            SignIn::Key => ("Key passphrase", PASSPHRASE_HINT),
+        let (label, hint) = match (self.sign_in, &self.key) {
+            (SignIn::Password, _) => ("Password", PASSWORD_HINT),
+            (SignIn::Key, KeyChoice::Created { .. }) => ("Key passphrase", NEW_PASSPHRASE_HINT),
+            (SignIn::Key, _) => ("Key passphrase", PASSPHRASE_HINT),
         };
         let saved = self.has_saved_secret && !self.forget_secret;
         v_flex()
@@ -499,6 +617,65 @@ impl ServerForm {
                             })),
                     ),
                 )
+            })
+    }
+
+    fn render_more_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.more_options;
+        v_flex()
+            .gap_3()
+            .child(
+                h_flex().child(
+                    Button::new(
+                        "more-options",
+                        if open {
+                            "Fewer Options"
+                        } else {
+                            "More Options: jump host, port forwards"
+                        },
+                    )
+                    .label_size(LabelSize::Small)
+                    .style(ButtonStyle::Subtle)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.more_options = !this.more_options;
+                        cx.notify();
+                    })),
+                ),
+            )
+            .when(open, |column| {
+                column
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(self.jump_host.clone())
+                            .child(
+                                Label::new(
+                                    "A server to go through first, when this one cannot be reached directly.",
+                                )
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                            ),
+                    )
+                    .child(if self.port_forwards_editable {
+                        v_flex()
+                            .gap_1()
+                            .child(self.port_forwards.clone())
+                            .child(
+                                Label::new(
+                                    "Ports of the server to open on this computer while connected. 8080: the same port. 3000:80: this computer's 3000 shows the server's 80.",
+                                )
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                            )
+                            .into_any_element()
+                    } else {
+                        Label::new(
+                            "This server has port forwards written by hand in the settings file: they are kept as they are.",
+                        )
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted)
+                        .into_any_element()
+                    })
             })
     }
 
@@ -556,8 +733,21 @@ impl ServerForm {
                 )
                 .into_any_element(),
             ),
+            KeyChoice::Created { .. } => rows.push(
+                key_row(
+                    ("created-key", 0),
+                    "New key".into(),
+                    Some("ED25519 key, made for this server".into()),
+                    true,
+                )
+                .into_any_element(),
+            ),
             KeyChoice::None | KeyChoice::Found(_) => {}
         }
+        let created_public_key = match &self.key {
+            KeyChoice::Created { public_key, .. } => Some(public_key.clone()),
+            _ => None,
+        };
         for (index, found) in self.found_keys.iter().enumerate() {
             let selected = matches!(self.key, KeyChoice::Found(chosen) if chosen == index);
             rows.push(
@@ -596,8 +786,49 @@ impl ServerForm {
                         Button::new("paste-key", "Paste a Key")
                             .style(ButtonStyle::Outlined)
                             .on_click(cx.listener(|this, _, _, cx| this.paste_key(cx))),
+                    )
+                    .child(
+                        Button::new("create-key", "Create a New Key")
+                            .style(ButtonStyle::Outlined)
+                            .on_click(cx.listener(|this, _, _, cx| this.create_key(cx))),
                     ),
             )
+            // A new key signs in only once the server knows its public half.
+            .children(created_public_key.map(|public_key| {
+                let to_copy = public_key.clone();
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Label::new(
+                            "The server does not know this key yet. Add this line to the file ~/.ssh/authorized_keys of your user on the server, then connect:",
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .font_buffer(cx)
+                                    .text_xs()
+                                    .whitespace_nowrap()
+                                    .child(public_key),
+                            )
+                            .child(
+                                Button::new("copy-public-key", "Copy")
+                                    .style(ButtonStyle::Outlined)
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            to_copy.to_string(),
+                                        ));
+                                    }),
+                            ),
+                    )
+            }))
             .children(self.key_note.clone().map(|(note, is_problem)| {
                 Label::new(note)
                     .size(LabelSize::Small)
@@ -637,6 +868,10 @@ async fn apply(
                 import_key(&text, passphrase, &name_hint)
             })
             .await?,
+        ),
+        KeyPlan::Create { seed, name_hint } => Some(
+            cx.background_spawn(async move { create_key(&seed, passphrase, &name_hint) })
+                .await?,
         ),
     };
     server.args = match &key {
@@ -743,6 +978,24 @@ fn import_key(
         .map_err(|error| format!("The key could not be saved on this computer: {error}").into())
 }
 
+/// Writes the key of `seed` as a file of the application's own, protected by
+/// `passphrase` when there is one. Returns its path.
+fn create_key(
+    seed: &ssh_keys::KeySeed,
+    passphrase: Option<Zeroizing<String>>,
+    name_hint: &str,
+) -> Result<PathBuf, SharedString> {
+    let created = ssh_keys::generate(
+        seed,
+        NEW_KEY_COMMENT,
+        passphrase.as_ref().map(|passphrase| passphrase.as_str()),
+    )
+    .map_err(|error| -> SharedString { error.to_string().into() })?;
+    let text = Zeroizing::new(created.text);
+    ssh_keys::write_key_file(&server_store::managed_keys_dir(), name_hint, &text)
+        .map_err(|error| format!("The key could not be saved on this computer: {error}").into())
+}
+
 fn read_key_file(path: &Path) -> Result<Zeroizing<String>, String> {
     let name = file_name(path);
     let size = std::fs::metadata(path)
@@ -832,9 +1085,12 @@ fn describe(info: &KeyInfo) -> String {
 }
 
 impl Render for ServerForm {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_new = self.editing.is_none();
         let saving = self.saving;
+        // Never taller than the window: with a key and the extra options open
+        // the fields scroll, and the buttons stay in sight.
+        let max_height = window.viewport_size().height * 0.86;
 
         v_flex()
             .key_context("ServerForm")
@@ -860,34 +1116,50 @@ impl Render for ServerForm {
             })
             .elevation_3(cx)
             .w(rems(30.))
-            .p_4()
-            .gap_3()
+            .max_h(max_height)
+            .overflow_hidden()
             .child(
-                Headline::new(if is_new { "New Server" } else { "Edit Server" })
-                    .size(HeadlineSize::XSmall),
-            )
-            .child(self.name.clone())
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_start()
-                    .child(div().flex_1().child(self.address.clone()))
-                    .child(div().w(rems(6.)).child(self.port.clone())),
-            )
-            .child(self.user.clone())
-            .child(self.render_sign_in(cx))
-            .when(self.sign_in == SignIn::Key, |form| {
-                form.child(self.render_key(cx))
-            })
-            .child(self.render_secret(cx))
-            .children(
-                self.error
-                    .clone()
-                    .map(|error| Label::new(error).size(LabelSize::Small).color(Color::Error)),
+                div().px_4().pt_4().pb_2().child(
+                    Headline::new(if is_new { "New Server" } else { "Edit Server" })
+                        .size(HeadlineSize::XSmall),
+                ),
             )
             .child(
-                h_flex()
+                v_flex()
+                    .id("server-form-fields")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_4()
+                    .pb_2()
+                    .gap_3()
+                    .child(self.name.clone())
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_start()
+                            .child(div().flex_1().child(self.address.clone()))
+                            .child(div().w(rems(6.)).child(self.port.clone())),
+                    )
+                    .child(self.user.clone())
+                    .child(self.render_sign_in(cx))
+                    .when(self.sign_in == SignIn::Key, |form| {
+                        form.child(self.render_key(cx))
+                    })
+                    .child(self.render_secret(cx))
+                    .child(self.render_more_options(cx)),
+            )
+            .children(self.error.clone().map(|error| {
+                div()
+                    .px_4()
                     .pt_1()
+                    .child(Label::new(error).size(LabelSize::Small).color(Color::Error))
+            }))
+            .child(
+                h_flex()
+                    .px_4()
+                    .pt_2()
+                    .pb_4()
                     .gap_2()
                     .justify_end()
                     .child(

@@ -6,18 +6,23 @@
 //! [`ServerForm`](crate::server_form::ServerForm), where a server is described
 //! in a few fields instead of an `ssh` command line.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use db::kvp::KeyValueStore;
+use fs::Fs;
+use futures::StreamExt as _;
 use gpui::{
     Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, ParentElement, Pixels, PromptLevel, Render, SharedString, Styled, Subscription,
-    WeakEntity, Window, actions, px,
+    Task, WeakEntity, Window, actions, px,
 };
 use remote::{RemoteConnectionOptions, SshConnectionOptions};
-use settings::{RemoteProject, Settings as _, SettingsStore, SshConnection, update_settings_file};
-use ui::{IconButton, ListItem, PanelHeader, Tooltip, prelude::*};
+use settings::{
+    RemoteProject, Settings as _, SettingsStore, SshConnection, update_settings_file,
+    watch_config_file,
+};
+use ui::{IconButton, ListItem, PanelHeader, SectionLabel, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     MultiWorkspace, OpenOptions, Workspace,
@@ -29,6 +34,7 @@ use crate::{
     remote_servers::{ServerIndex, SshServerIndex},
     server_form::ServerForm,
     server_store,
+    ssh_config::parse_ssh_config_hosts,
 };
 
 actions!(
@@ -59,7 +65,10 @@ pub struct ServersPanel {
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     position: DockPosition,
+    /// The hosts named in the person's `~/.ssh/config`, kept up to date.
+    config_hosts: Vec<String>,
     _settings_changed: Subscription,
+    _config_watch: Task<()>,
 }
 
 impl ServersPanel {
@@ -78,14 +87,67 @@ impl ServersPanel {
             _ => DockPosition::Left,
         };
         workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let fs = workspace.app_state().fs.clone();
             let workspace = workspace.weak_handle();
             cx.new(|cx| Self {
                 workspace,
                 focus_handle: cx.focus_handle(),
                 position,
+                config_hosts: Vec::new(),
                 _settings_changed: cx.observe_global::<SettingsStore>(|_, cx| cx.notify()),
+                _config_watch: Self::watch_ssh_config(fs, cx),
             })
         })
+    }
+
+    /// Follows the person's SSH configuration file: the hosts it names are
+    /// offered under the servers, so that what already works from a terminal
+    /// is one click away here too.
+    fn watch_ssh_config(fs: Arc<dyn Fs>, cx: &mut Context<Self>) -> Task<()> {
+        let (mut contents, watcher) =
+            watch_config_file(cx.background_executor(), fs, paths::user_ssh_config_file());
+        cx.spawn(async move |this, cx| {
+            let _watcher = watcher;
+            while let Some(content) = contents.next().await {
+                let hosts = parse_ssh_config_hosts(&content);
+                let updated = this.update(cx, |this, cx| {
+                    this.config_hosts = hosts.into_iter().collect();
+                    cx.notify();
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
+    /// The hosts of the SSH configuration that are not in the list already.
+    fn offered_config_hosts(&self, servers: &[SshConnection], cx: &App) -> Vec<String> {
+        if !RemoteSettings::get_global(cx).read_ssh_config {
+            return Vec::new();
+        }
+        self.config_hosts
+            .iter()
+            .filter(|host| !servers.iter().any(|server| &server.host == *host))
+            .cloned()
+            .collect()
+    }
+
+    /// Adds a host of the SSH configuration to the servers and connects to
+    /// it. `ssh` reads the rest (address, user, key, jump host) from the
+    /// configuration file, as it does in a terminal.
+    fn connect_config_host(&mut self, host: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let index = Self::servers(cx).len();
+        let server = SshConnection {
+            host,
+            ..Default::default()
+        };
+        let added = server.clone();
+        self.update_servers(cx, move |servers| servers.push(added));
+        connect_to_server(workspace, index, server, window, cx);
     }
 
     fn servers(cx: &App) -> Vec<SshConnection> {
@@ -459,6 +521,37 @@ impl Render for ServersPanel {
             }
         }
 
+        let config_hosts = self.offered_config_hosts(&servers, cx);
+        if !config_hosts.is_empty() {
+            rows.push(
+                h_flex()
+                    .px_3()
+                    .pt_3()
+                    .pb_1()
+                    .child(SectionLabel::new("From your SSH config"))
+                    .into_any_element(),
+            );
+            for (index, host) in config_hosts.into_iter().enumerate() {
+                let to_connect = host.clone();
+                rows.push(
+                    ListItem::new(("config-host", index))
+                        .start_slot(
+                            Icon::new(IconName::Server)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(Label::new(host.clone()).color(Color::Muted).truncate())
+                        .tooltip(Tooltip::text(format!(
+                            "Connect to {host} as ~/.ssh/config describes it, and add it to the servers"
+                        )))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.connect_config_host(to_connect.clone(), window, cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+
         v_flex()
             .id("servers-panel")
             .key_context("ServersPanel")
@@ -466,7 +559,7 @@ impl Render for ServersPanel {
             .on_action(cx.listener(Self::new_server))
             .size_full()
             .child(header)
-            .child(if servers.is_empty() {
+            .child(if rows.is_empty() {
                 self.render_empty(cx).into_any_element()
             } else {
                 v_flex()

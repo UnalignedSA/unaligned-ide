@@ -15,8 +15,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::wire::{Reader, put_mpint, put_string, put_u32};
 use crate::{
-    KeyError, KeyFormat, KeyInfo, import, import_with_rounds, inspect, openssh, text_from_bytes,
-    write_key_file,
+    KeyError, KeyFormat, KeyInfo, KeySeed, generate_with_rounds, import, import_with_rounds,
+    inspect, openssh, text_from_bytes, write_key_file,
 };
 
 macro_rules! fixture {
@@ -1938,4 +1938,73 @@ fn written_openssh_files_are_read_back() {
     put_string(&mut options, &[0; 16]);
     put_u32(&mut options, 24);
     assert_eq!(options.len(), 24);
+}
+
+// --- generate ----------------------------------------------------------------
+
+#[test]
+fn test_a_generated_key_is_an_openssh_ed25519_key_with_its_public_line() {
+    let key =
+        generate_with_rounds(&KeySeed::new().unwrap(), "laptop of Zoé", None, TEST_ROUNDS).unwrap();
+    assert!(
+        key.text
+            .starts_with("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+    );
+    assert!(key.text.ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
+    assert!(!key.converted);
+
+    // What was written reads back as what was meant.
+    let info = inspect(&key.text).unwrap();
+    assert_eq!(info.format, KeyFormat::OpenSsh);
+    assert_eq!(info.algorithm.as_deref(), Some("ED25519"));
+    assert!(!info.encrypted);
+    assert_eq!(info.comment.as_deref(), Some("laptop of Zoé"));
+    assert_eq!(key.info, info);
+
+    let public = key.public_key.unwrap();
+    assert!(
+        public.starts_with("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"),
+        "{public}"
+    );
+    assert!(public.ends_with(" laptop of Zoé"), "{public}");
+    // The file's own public half is the one given.
+    let read_back = import_with_rounds(&key.text, None, TEST_ROUNDS).unwrap();
+    assert_eq!(read_back.public_key.as_deref(), Some(public.as_str()));
+    assert_eq!(read_back.text, key.text);
+}
+
+#[test]
+fn test_a_generated_key_with_a_passphrase_is_protected_and_two_keys_differ() {
+    let seed = KeySeed::new().unwrap();
+    let protected =
+        generate_with_rounds(&seed, "work", Some("correct horse"), TEST_ROUNDS).unwrap();
+    let info = inspect(&protected.text).unwrap();
+    assert!(info.encrypted);
+    assert!(protected.info.encrypted);
+    // The public half is readable without the passphrase.
+    assert!(protected.public_key.as_deref().unwrap().ends_with(" work"));
+
+    // The same seed without a passphrase: the same key, in the clear.
+    let clear = generate_with_rounds(&seed, "work", None, TEST_ROUNDS).unwrap();
+    assert_eq!(protected.public_key, clear.public_key);
+    assert!(!clear.info.encrypted);
+    assert_ne!(protected.text, clear.text);
+
+    let other = generate_with_rounds(&KeySeed::new().unwrap(), "work", None, TEST_ROUNDS).unwrap();
+    assert_ne!(protected.public_key, other.public_key);
+}
+
+#[test]
+fn test_a_generated_keys_comment_is_one_line() {
+    let key = generate_with_rounds(
+        &KeySeed::new().unwrap(),
+        "  two\nlines\t ",
+        None,
+        TEST_ROUNDS,
+    )
+    .unwrap();
+    assert_eq!(key.info.comment.as_deref(), Some("twolines"));
+    let key = generate_with_rounds(&KeySeed::new().unwrap(), "", None, TEST_ROUNDS).unwrap();
+    assert_eq!(key.info.comment, None);
+    assert_eq!(key.public_key.unwrap().split(' ').count(), 2);
 }

@@ -15825,6 +15825,7 @@ dependencies = [
  "ctr",
  "hmac",
  "rand 0.9.4",
+ "ring",
  "sha1",
  "sha2",
  "tempfile",

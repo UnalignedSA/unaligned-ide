@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use gpui::AsyncApp;
-use settings::SshConnection;
+use settings::{SshConnection, SshPortForwardOption};
 use util::ResultExt as _;
 
 /// `ssh` tries every key of the agent before the one it is given, and a
@@ -68,6 +68,131 @@ pub(crate) fn with_identity(args: &[String], key: &Path) -> Vec<String> {
         ONLY_THIS_KEY.to_string(),
     ]);
     args
+}
+
+/// The server a connection goes through first (`-J`), if any.
+pub(crate) fn jump_host(args: &[String]) -> Option<&str> {
+    let position = args.iter().position(|arg| arg == "-J")?;
+    args.get(position + 1).map(String::as_str)
+}
+
+/// The arguments with `jump` as the server to go through first, or without
+/// one. Arguments this module did not write are kept.
+pub(crate) fn with_jump_host(args: &[String], jump: Option<&str>) -> Vec<String> {
+    let mut kept = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "-J" && index + 1 < args.len() {
+            index += 2;
+        } else {
+            kept.push(args[index].clone());
+            index += 1;
+        }
+    }
+    if let Some(jump) = jump {
+        kept.extend(["-J".to_string(), jump.to_string()]);
+    }
+    kept
+}
+
+/// What a person typed as a jump host: one `user@host` or `user@host:port`,
+/// or several separated by commas (ssh goes through them in order).
+pub(crate) fn parse_jump_host(typed: &str) -> Result<Option<String>, String> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return Ok(None);
+    }
+    let mut hops = Vec::new();
+    for hop in typed.split(',') {
+        let address = parse_address(hop).map_err(|problem| format!("Jump host: {problem}"))?;
+        if hop.split_whitespace().count() != 1 {
+            return Err(
+                "Jump host: write an address only, such as user@bastion.example.org.".to_string(),
+            );
+        }
+        let mut written = String::new();
+        if let Some(username) = &address.username {
+            written.push_str(username);
+            written.push('@');
+        }
+        if address.host.contains(':') {
+            written.push_str(&format!("[{}]", address.host));
+        } else {
+            written.push_str(&address.host);
+        }
+        if let Some(port) = address.port {
+            written.push_str(&format!(":{port}"));
+        }
+        hops.push(written);
+    }
+    Ok(Some(hops.join(",")))
+}
+
+/// Port forwards as a person writes them, separated by commas or spaces:
+///
+/// - `8080`: this computer's port 8080 shows the server's own port 8080;
+/// - `8080:80`: this computer's 8080 shows the server's port 80;
+/// - `5433:db.internal:5432`: this computer's 5433 shows port 5432 of a
+///   machine the server can reach.
+pub(crate) fn parse_port_forwards(typed: &str) -> Result<Vec<SshPortForwardOption>, String> {
+    let mut forwards = Vec::new();
+    for word in typed
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|word| !word.is_empty())
+    {
+        let wrong = || {
+            format!(
+                "Port forward \"{word}\": write a port (8080), two ports (8080:80), or port:host:port (5433:db.internal:5432)."
+            )
+        };
+        let parts: Vec<&str> = word.split(':').collect();
+        let port = |text: &str| parse_port(text).map_err(|_| wrong());
+        let forward = match parts.as_slice() {
+            [same] => SshPortForwardOption {
+                local_host: None,
+                local_port: port(same)?,
+                remote_host: Some("localhost".to_string()),
+                remote_port: port(same)?,
+            },
+            [local, remote] => SshPortForwardOption {
+                local_host: None,
+                local_port: port(local)?,
+                remote_host: Some("localhost".to_string()),
+                remote_port: port(remote)?,
+            },
+            [local, host, remote] if !host.is_empty() => SshPortForwardOption {
+                local_host: None,
+                local_port: port(local)?,
+                remote_host: Some(host.to_string()),
+                remote_port: port(remote)?,
+            },
+            _ => return Err(wrong()),
+        };
+        forwards.push(forward);
+    }
+    Ok(forwards)
+}
+
+/// The same forwards, written the way [`parse_port_forwards`] reads them. A
+/// forward that cannot be written that way (it listens on another address
+/// than this computer's own) gives `None`: the form then leaves the forwards
+/// of the entry alone.
+pub(crate) fn port_forwards_text(forwards: &[SshPortForwardOption]) -> Option<String> {
+    let mut words = Vec::new();
+    for forward in forwards {
+        if forward.local_host.is_some() {
+            return None;
+        }
+        let host = forward.remote_host.as_deref().unwrap_or("localhost");
+        words.push(if host != "localhost" {
+            format!("{}:{host}:{}", forward.local_port, forward.remote_port)
+        } else if forward.local_port == forward.remote_port {
+            forward.local_port.to_string()
+        } else {
+            format!("{}:{}", forward.local_port, forward.remote_port)
+        });
+    }
+    Some(words.join(", "))
 }
 
 /// Removes a key file of the application's own once no server uses it any
@@ -313,6 +438,85 @@ mod tests {
         assert!(parse_address("example.org:70000").is_err());
         assert!(parse_address("one two").is_err());
         assert!(parse_address("ssh -i key root@example.org").is_err());
+    }
+
+    #[test]
+    fn test_the_jump_host_is_set_and_removed_beside_the_key() {
+        let plain = args(&["-o", "ServerAliveInterval=30"]);
+        let with_key = with_identity(&plain, Path::new("/keys/one"));
+        let with_both = with_jump_host(&with_key, Some("me@bastion:2222"));
+        assert_eq!(jump_host(&with_both), Some("me@bastion:2222"));
+        assert_eq!(identity_file(&with_both), Some("/keys/one"));
+
+        let replaced = with_jump_host(&with_both, Some("other"));
+        assert_eq!(jump_host(&replaced), Some("other"));
+        assert_eq!(replaced.iter().filter(|arg| *arg == "-J").count(), 1);
+
+        assert_eq!(with_jump_host(&replaced, None), with_key);
+        // Changing the key leaves the jump host alone.
+        assert_eq!(
+            jump_host(&with_identity(&with_both, Path::new("/keys/two"))),
+            Some("me@bastion:2222")
+        );
+    }
+
+    #[test]
+    fn test_what_people_type_as_a_jump_host() {
+        assert_eq!(parse_jump_host("  "), Ok(None));
+        assert_eq!(
+            parse_jump_host("me@bastion.example.org"),
+            Ok(Some("me@bastion.example.org".to_string()))
+        );
+        assert_eq!(
+            parse_jump_host("me@bastion:2222, other"),
+            Ok(Some("me@bastion:2222,other".to_string()))
+        );
+        assert_eq!(
+            parse_jump_host("me@2001:db8::1"),
+            Ok(Some("me@[2001:db8::1]".to_string()))
+        );
+        assert!(parse_jump_host("me@bastion -o ProxyCommand=evil").is_err());
+        assert!(parse_jump_host("ssh me@bastion").is_err());
+        assert!(parse_jump_host("a,,b").is_err());
+    }
+
+    #[test]
+    fn test_port_forwards_as_people_write_them() {
+        let forward = |local_port, remote_host: &str, remote_port| SshPortForwardOption {
+            local_host: None,
+            local_port,
+            remote_host: Some(remote_host.to_string()),
+            remote_port,
+        };
+        assert_eq!(parse_port_forwards(""), Ok(Vec::new()));
+        let parsed = parse_port_forwards("8080, 3000:80  5433:db.internal:5432").unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                forward(8080, "localhost", 8080),
+                forward(3000, "localhost", 80),
+                forward(5433, "db.internal", 5432),
+            ]
+        );
+        // Written back the way it is read.
+        assert_eq!(
+            port_forwards_text(&parsed).as_deref(),
+            Some("8080, 3000:80, 5433:db.internal:5432")
+        );
+        assert_eq!(
+            parse_port_forwards(&port_forwards_text(&parsed).unwrap()),
+            Ok(parsed)
+        );
+
+        assert!(parse_port_forwards("web").is_err());
+        assert!(parse_port_forwards("0").is_err());
+        assert!(parse_port_forwards("8080::80").is_err());
+        assert!(parse_port_forwards("1:2:3:4").is_err());
+
+        // A forward that listens on another address is not rewritten.
+        let mut elsewhere = forward(8080, "localhost", 80);
+        elsewhere.local_host = Some("0.0.0.0".to_string());
+        assert_eq!(port_forwards_text(&[elsewhere]), None);
     }
 
     #[test]

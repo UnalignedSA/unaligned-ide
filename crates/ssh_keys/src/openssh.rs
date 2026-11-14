@@ -181,7 +181,7 @@ pub(crate) fn public_key_line(key_type: &str, public_blob: &[u8], comment: Optio
     line
 }
 
-fn random_bytes<const N: usize>() -> Result<[u8; N], KeyError> {
+pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N], KeyError> {
     let mut bytes = [0u8; N];
     OsRng.try_fill_bytes(&mut bytes).map_err(|_| {
         KeyError::Unsupported(

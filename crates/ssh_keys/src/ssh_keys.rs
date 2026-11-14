@@ -170,6 +170,95 @@ fn import_with_rounds(
     }
 }
 
+/// What a new key is made from: 32 random bytes. The same seed always gives
+/// the same key, so a key can be shown (its public half) before it is known
+/// whether it will be protected by a passphrase. Wiped when dropped.
+#[derive(Clone)]
+pub struct KeySeed(zeroize::Zeroizing<[u8; 32]>);
+
+impl KeySeed {
+    /// A seed from the system's random number generator.
+    pub fn new() -> Result<Self, KeyError> {
+        Ok(Self(
+            zeroize::Zeroizing::new(openssh::random_bytes::<32>()?),
+        ))
+    }
+}
+
+/// Makes the ED25519 key of a seed: the kind of key `ssh-keygen` makes by
+/// default, accepted by every OpenSSH server since 2014.
+///
+/// With a passphrase the key file is protected the way `ssh-keygen` protects
+/// one. `comment` is the label that ends the public key line, usually what
+/// the key is used from. The `public_key` of the result is the line to add to
+/// the server's `~/.ssh/authorized_keys`.
+pub fn generate(
+    seed: &KeySeed,
+    comment: &str,
+    passphrase: Option<&str>,
+) -> Result<ImportedKey, KeyError> {
+    generate_with_rounds(seed, comment, passphrase, openssh::BCRYPT_ROUNDS)
+}
+
+fn generate_with_rounds(
+    seed: &KeySeed,
+    comment: &str,
+    passphrase: Option<&str>,
+    bcrypt_rounds: u32,
+) -> Result<ImportedKey, KeyError> {
+    const KEY_TYPE: &str = "ssh-ed25519";
+    // A comment is one line of the public key file.
+    let comment: String = comment
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect();
+    let comment = comment.trim();
+
+    let seed = &seed.0;
+    let pair =
+        ring::signature::Ed25519KeyPair::from_seed_unchecked(seed.as_slice()).map_err(|_| {
+            KeyError::Unsupported("This computer could not make a key: try again.".to_string())
+        })?;
+    let public = ring::signature::KeyPair::public_key(&pair).as_ref();
+
+    let mut public_blob = Vec::new();
+    wire::put_string(&mut public_blob, KEY_TYPE.as_bytes());
+    wire::put_string(&mut public_blob, public);
+
+    // OpenSSH keeps the public half after the seed, in one string.
+    let mut seed_and_public = zeroize::Zeroizing::new(Vec::with_capacity(64));
+    seed_and_public.extend_from_slice(seed.as_slice());
+    seed_and_public.extend_from_slice(public);
+    let mut private_key = zeroize::Zeroizing::new(Vec::with_capacity(
+        public_blob.len() + 4 + seed_and_public.len(),
+    ));
+    private_key.extend_from_slice(&public_blob);
+    wire::put_string(&mut private_key, &seed_and_public);
+
+    let text = openssh::write(
+        &public_blob,
+        &private_key,
+        comment,
+        passphrase.map(str::as_bytes),
+        bcrypt_rounds,
+    )?;
+    Ok(ImportedKey {
+        text,
+        info: KeyInfo {
+            format: KeyFormat::OpenSsh,
+            algorithm: Some("ED25519".to_string()),
+            encrypted: passphrase.is_some(),
+            comment: (!comment.is_empty()).then(|| comment.to_string()),
+        },
+        converted: false,
+        public_key: Some(openssh::public_key_line(
+            KEY_TYPE,
+            &public_blob,
+            Some(comment),
+        )),
+    })
+}
+
 /// The text of a key file read from disk, whatever its encoding.
 ///
 /// A key is ASCII, but the file around it is not always: PowerShell and
