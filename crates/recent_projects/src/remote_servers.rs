@@ -590,7 +590,7 @@ impl gpui::Render for ProjectPicker {
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-struct SshServerIndex(usize);
+pub(crate) struct SshServerIndex(pub(crate) usize);
 impl std::fmt::Display for SshServerIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
@@ -599,7 +599,7 @@ impl std::fmt::Display for SshServerIndex {
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-struct WslServerIndex(usize);
+pub(crate) struct WslServerIndex(usize);
 impl std::fmt::Display for WslServerIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
@@ -607,7 +607,7 @@ impl std::fmt::Display for WslServerIndex {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-enum ServerIndex {
+pub(crate) enum ServerIndex {
     Ssh(SshServerIndex),
     Wsl(WslServerIndex),
 }
@@ -1788,8 +1788,31 @@ impl RemoteServerProjects {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
+        Self::connect_and_pick_project(
+            &workspace,
+            self.create_new_window,
+            index,
+            connection_options,
+            true,
+            window,
+            cx,
+        );
+    }
 
-        let create_new_window = self.create_new_window;
+    /// Connects to a server of the settings and, once connected, shows the
+    /// folders of the host to choose the project from. Also what a click on a
+    /// server of the Servers panel does. `reopen_on_failure`: after a failed
+    /// connection, show this dialog's list of servers again (the panel has its
+    /// own list and wants nothing opened).
+    pub(crate) fn connect_and_pick_project(
+        workspace: &Entity<Workspace>,
+        create_new_window: bool,
+        index: ServerIndex,
+        connection_options: RemoteConnectionOptions,
+        reopen_on_failure: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         workspace.update(cx, |_, cx| {
             cx.defer_in(window, move |workspace, window, cx| {
                 let app_state = workspace.app_state().clone();
@@ -1821,6 +1844,9 @@ impl RemoteServerProjects {
                     })?;
 
                     let Some(Some(session)) = session else {
+                        if !reopen_on_failure {
+                            return Ok(());
+                        }
                         return workspace.update_in(cx, |workspace, window, cx| {
                             let weak = cx.entity().downgrade();
                             let fs = workspace.project().read(cx).fs().clone();

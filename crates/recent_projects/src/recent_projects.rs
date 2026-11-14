@@ -2,6 +2,9 @@ mod dev_container_suggest;
 pub mod disconnected_overlay;
 mod remote_connections;
 mod remote_servers;
+mod server_form;
+mod server_store;
+pub mod servers_panel;
 pub mod sidebar_recent_projects;
 mod ssh_config;
 
@@ -206,6 +209,7 @@ pub(crate) fn default_open_in_new_window(cx: &App) -> bool {
 }
 
 pub fn init(cx: &mut App) {
+    servers_panel::init(cx);
     #[cfg(target_os = "windows")]
     cx.on_action(|open_wsl: &app_actions::wsl_actions::OpenFolderInWsl, cx| {
         let create_new_window = open_wsl

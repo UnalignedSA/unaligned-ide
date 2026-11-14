@@ -10,6 +10,19 @@ It is not SFTP. The application puts one program on the host, the **remote serve
 
 Which hosts: Linux on x86_64 and on aarch64 (ARM). The server is one static executable (musl), so the host's distribution and C library do not matter. A macOS or Windows host has no server build: the connection says "release v… has no remote server for …".
 
+## The Servers panel
+
+The activity bar has a **Servers** icon. Its panel lists the SSH servers of the settings (`ssh_connections`); the code is `crates/recent_projects/src/servers_panel.rs`, `server_form.rs` and `server_store.rs`, and `crates/ssh_keys` for the keys.
+
+- **A click on a server** connects and shows the folders of the host. The folder that is opened is remembered under the server; a click on it goes straight back. The server's icon is green while the window is on it.
+- **The plus button**, or the pencil of a row, opens a form: a name, the address, the port, the user, and how to sign in. The address field takes what people are given: `203.0.113.4`, `root@host`, `root@host:2222`, or a whole `ssh root@host -p 2222`.
+- **Sign in with a password**: typed in the form, it is kept in the system keychain and given to `ssh` when it asks. Left empty, it is asked at each connection. It is never written to the settings file.
+- **Sign in with a private key**: one of the keys found in `~/.ssh`, a file chosen anywhere, or text pasted from the clipboard. Every form people have keys in is read: OpenSSH, PEM (`RSA`, `EC`, PKCS#8), and PuTTY `.ppk` (versions 2 and 3), which is converted to an OpenSSH key; a PuTTY key protected by a passphrase gives an OpenSSH key protected by the same one. Line ends, a byte order mark, text around the key and a body that lost its line breaks are repaired. A public key chosen by mistake is said to be one.
+- A key of `~/.ssh` that `ssh` can use as it is stays where it is. Any other key (pasted, converted, readable by others, from another folder) becomes a file of the application's own in `<config>/ssh_keys/`, readable by the user only, removed when no server uses it any more. The settings name the key with `-i <file> -o IdentitiesOnly=yes` in the entry's `args`, so `ssh` offers that key and not every key of the agent.
+- **The first connection to a server** shows its fingerprint and a "Trust and Connect" button, in place of `ssh`'s question to answer with the word "yes". A saved password is never sent as the answer to that question, and is given once: if the server refuses it, the person is asked.
+
+Not there yet: a field for a jump host or for port forwards (the `args` of the entry still take them by hand, and the form keeps them), generating a new key, the hosts of `~/.ssh/config` (File → Open Remote… lists them).
+
 ## Where the server comes from, and what is checked
 
 The server has to be of the application's exact version: the two speak a protocol that changes between versions. So each release carries its own servers, beside the installers:
@@ -54,4 +67,6 @@ On GitHub the `remote-server` job of `build.yml` runs it twice, on `ubuntu-24.04
 
 ## What was verified, and what was not
 
-`PACKAGING.md`, "Executed and not executed", "The remote server". In short: built and tried end to end on the development Mac against a local SSH host and a stand-in for GitHub (connection, editing, terminal, a refused altered file); never built on GitHub, never tried from a release build, from Windows or Linux, or with WSL and containers.
+The Servers panel, on the development Mac on 2026-11-14, in private instances against SSH hosts in local containers: a server added through the form with a PuTTY key (the saved file read back by the real `ssh-keygen`, which gave the key's public half), a server edited to use a key of a stand-in `~/.ssh` and connected, a folder opened and found again under the server, a password kept and given after the first-connection screen, the settings file holding no password. `crates/ssh_keys` was checked against the real tools: 33 PuTTY files made by puttygen converted and read by OpenSSH 9.2 (29 by OpenSSH 10.5, which refuses DSA keys). Not tried: the file chooser and the paste button (the same code path as a found key from there on), the system keychain itself (the trial used a development build's file), Windows and Linux as the client.
+
+The remote server: `PACKAGING.md`, "Executed and not executed", "The remote server". In short: built and tried end to end on the development Mac against a local SSH host and a stand-in for GitHub (connection, editing, terminal, a refused altered file); never built on GitHub, never tried from a release build, from Windows or Linux, or with WSL and containers.

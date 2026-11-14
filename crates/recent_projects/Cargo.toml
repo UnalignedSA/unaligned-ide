@@ -18,6 +18,7 @@ test-support = ["remote/test-support", "remote_connection/test-support", "projec
 
 [dependencies]
 anyhow.workspace = true
+app_credentials_provider.workspace = true
 branding.workspace = true
 chrono.workspace = true
 askpass.workspace = true
@@ -44,11 +45,14 @@ remote_connection.workspace = true
 semver.workspace = true
 serde_json.workspace = true
 settings.workspace = true
+ssh_keys.workspace = true
 telemetry.workspace = true
 ui.workspace = true
+ui_input.workspace = true
 util.workspace = true
 workspace.workspace = true
 worktree.workspace = true
+zeroize.workspace = true
 app_actions.workspace = true
 indoc.workspace = true
 

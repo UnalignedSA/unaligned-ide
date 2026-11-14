@@ -148,7 +148,7 @@ More connections can be added later from the chat's "…" menu, "Connections…"
 - The name "Zed" is still shown where it states a fact, such as the credit in About and the line of the Extensions page that names the registry.
 - GitHub Copilot and the ChatGPT sign-in are still told that the editor is Zed: those identities are registered by upstream with the two vendors.
 - The sign-ins of the subscriptions are upstream's code and were not tried one by one here.
-- Remote projects (SSH, WSL, containers) need a Linux host, x86_64 or ARM. Versions up to 0.1.1 cannot open them: their releases carry no server build.
+- Remote projects (SSH, WSL, containers) need a Linux host, x86_64 or ARM. Versions up to 0.1.1 cannot open them: their releases carry no server build, and they have no Servers panel.
 - A project's own settings, tasks and debug scenarios are read from `.unaligned/`. A `.zed/` folder is not read.
 - Nothing is signed for the operating system: no Windows certificate and no Apple notarisation yet. Updates are signed with the project's own key, which the application checks itself. On macOS the application carries the project's own (self-signed) certificate, only so that the keychain gives saved keys back after an update.
 

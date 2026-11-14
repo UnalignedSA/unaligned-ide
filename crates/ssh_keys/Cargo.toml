@@ -1,0 +1,31 @@
+[package]
+name = "ssh_keys"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/ssh_keys.rs"
+doctest = false
+
+# Kept small on purpose: text parsing plus the few primitives the PuTTY and
+# OpenSSH key formats need. Nothing here links a C library.
+[dependencies]
+aes.workspace = true
+argon2.workspace = true
+base64.workspace = true
+bcrypt-pbkdf.workspace = true
+cbc.workspace = true
+ctr.workspace = true
+hmac.workspace = true
+rand.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

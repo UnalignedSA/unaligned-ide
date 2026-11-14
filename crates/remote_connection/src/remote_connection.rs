@@ -33,6 +33,9 @@ pub struct RemoteConnectionPrompt {
     editor: Arc<dyn ErasedEditor>,
     is_password_prompt: bool,
     is_masked: bool,
+    /// The question asked is `ssh`'s "this host is not known, continue?",
+    /// with the fingerprint it shows when one could be read.
+    host_key_question: Option<Option<SharedString>>,
 }
 
 impl Drop for RemoteConnectionPrompt {
@@ -76,6 +79,7 @@ impl RemoteConnectionPrompt {
             prompt_cancellation_task: None,
             is_password_prompt: false,
             is_masked: true,
+            host_key_question: None,
         }
     }
 
@@ -91,7 +95,8 @@ impl RemoteConnectionPrompt {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let is_yes_no = prompt.contains("yes/no");
+        let is_yes_no = asks_for_confirmation(&prompt);
+        self.host_key_question = is_yes_no.then(|| fingerprint_in(&prompt).map(Into::into));
         self.is_password_prompt = !is_yes_no;
         self.is_masked = !is_yes_no;
         self.editor.set_masked(self.is_masked, window, cx);
@@ -121,7 +126,12 @@ impl RemoteConnectionPrompt {
             self.prompt_cancellation_task.take();
             self.status_message = Some("Connecting".into());
 
-            let pw = self.editor.text(cx);
+            let mut pw = self.editor.text(cx);
+            // The first-connection question is answered by a button (or
+            // Enter), not by typing the word.
+            if self.host_key_question.take().is_some() && pw.trim().is_empty() {
+                pw = "yes".to_string();
+            }
             if let Ok(secure) = EncryptedPassword::try_from(pw.as_ref()) {
                 tx.send(secure).ok();
             }
@@ -163,7 +173,47 @@ impl Render for RemoteConnectionPrompt {
             .key_context("PasswordPrompt")
             .p_2()
             .size_full()
-            .when_some(self.prompt.as_ref(), |this, prompt| {
+            .when_some(
+                self.host_key_question
+                    .clone()
+                    .filter(|_| self.prompt.is_some()),
+                |this, fingerprint| {
+                    this.child(
+                        v_flex()
+                            .gap_2()
+                            .p_1()
+                            .child(Label::new("First connection to this server"))
+                            .child(
+                                Label::new(
+                                    "This computer has never connected to it, so it cannot tell that the server is the right one. If you were given the server's fingerprint, compare it with this one.",
+                                )
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                            )
+                            .children(fingerprint.map(|fingerprint| {
+                                div()
+                                    .font_buffer(cx)
+                                    .text_sm()
+                                    .overflow_hidden()
+                                    .child(fingerprint)
+                            }))
+                            .child(
+                                h_flex().pt_1().child(
+                                    Button::primary("trust-host", "Trust and Connect").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.confirm(window, cx);
+                                        }),
+                                    ),
+                                ),
+                            ),
+                    )
+                },
+            )
+            .when_some(
+                self.prompt
+                    .as_ref()
+                    .filter(|_| self.host_key_question.is_none()),
+                |this, prompt| {
                 this.child(
                     v_flex()
                         .text_sm()
@@ -443,6 +493,10 @@ pub struct RemoteClientDelegate {
     window: AnyWindowHandle,
     ui: WeakEntity<RemoteConnectionPrompt>,
     known_password: Option<EncryptedPassword>,
+    /// The known password was given to a question already. It answers one
+    /// question only: a second one means it was refused, or that something
+    /// else is asked, and the person is shown the question.
+    known_password_given: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RemoteClientDelegate {
@@ -455,8 +509,34 @@ impl RemoteClientDelegate {
             window,
             ui,
             known_password,
+            known_password_given: Arc::default(),
         }
     }
+}
+
+/// The fingerprint in `ssh`'s question about a host it does not know
+/// ("ED25519 key fingerprint is: SHA256:…"), with the kind of key in front.
+fn fingerprint_in(prompt: &str) -> Option<String> {
+    let (before, after) = prompt.split_once("key fingerprint is")?;
+    let fingerprint = after
+        .trim_start_matches(':')
+        .split_whitespace()
+        .next()?
+        .trim_end_matches('.');
+    if fingerprint.is_empty() {
+        return None;
+    }
+    match before.split_whitespace().last() {
+        Some(kind) => Some(format!("{kind} {fingerprint}")),
+        None => Some(fingerprint.to_string()),
+    }
+}
+
+/// Whether a question of `ssh` wants a word and not a secret: the first
+/// connection to a host asks to confirm its key ("… (yes/no/[fingerprint])?").
+/// A saved password must never be the answer to that.
+fn asks_for_confirmation(prompt: &str) -> bool {
+    prompt.contains("yes/no")
 }
 
 impl remote::RemoteClientDelegate for RemoteClientDelegate {
@@ -467,8 +547,13 @@ impl remote::RemoteClientDelegate for RemoteClientDelegate {
         cancellation: oneshot::Receiver<()>,
         cx: &mut AsyncApp,
     ) {
-        let mut known_password = self.known_password.clone();
-        if let Some(password) = known_password.take() {
+        let known_password = self.known_password.clone().filter(|_| {
+            !asks_for_confirmation(&prompt)
+                && !self
+                    .known_password_given
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+        });
+        if let Some(password) = known_password {
             tx.send(password).ok();
         } else {
             self.window
@@ -725,6 +810,7 @@ pub fn connect(
         window,
         ui: ui.downgrade(),
         known_password,
+        known_password_given: Arc::default(),
     });
 
     cx.spawn(async move |cx| {
@@ -849,5 +935,36 @@ mod tests {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             editor::init(cx);
         });
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    const UNKNOWN_HOST: &str = "The authenticity of host '[203.0.113.4]:2222 ([203.0.113.4]:2222)' can't be established.\nED25519 key fingerprint is: SHA256:okc0eFM0PtdZvg9Nb0sl6qh5Dk7j\nThis key is not known by any other names.\nAre you sure you want to continue connecting (yes/no/[fingerprint])? ";
+
+    #[test]
+    fn test_the_question_about_an_unknown_host_is_not_a_password_question() {
+        assert!(asks_for_confirmation(UNKNOWN_HOST));
+        assert!(!asks_for_confirmation("dev@203.0.113.4's password: "));
+        assert!(!asks_for_confirmation(
+            "Enter passphrase for key '/home/me/.ssh/id_ed25519': "
+        ));
+    }
+
+    #[test]
+    fn test_the_fingerprint_is_read_from_the_question() {
+        assert_eq!(
+            fingerprint_in(UNKNOWN_HOST).as_deref(),
+            Some("ED25519 SHA256:okc0eFM0PtdZvg9Nb0sl6qh5Dk7j")
+        );
+        // Older OpenSSH: no colon, a final dot.
+        assert_eq!(
+            fingerprint_in("RSA key fingerprint is SHA256:abc123.\nAre you sure (yes/no)?")
+                .as_deref(),
+            Some("RSA SHA256:abc123")
+        );
+        assert_eq!(fingerprint_in("Are you sure (yes/no)?"), None);
     }
 }
